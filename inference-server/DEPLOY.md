@@ -174,7 +174,7 @@ curl http://127.0.0.1:8100/ops
 # 3. 端到端冒烟：加载模型
 curl -X POST http://127.0.0.1:8100/op \
   -H "Content-Type: application/json" \
-  -d '{"op": "checkpoint.load", "inputs": {"ckpt": "v1-5-pruned-emaonly.safetensors"}}'
+  -d '{"name": "checkpoint.load", "inputs": {"ckpt": "v1-5-pruned-emaonly.safetensors"}}'
 ```
 
 无 GPU 的本地开发环境可跑引擎单元测试：
