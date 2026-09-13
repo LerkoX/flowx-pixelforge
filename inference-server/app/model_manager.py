@@ -4,7 +4,7 @@ import threading
 import time
 
 import torch
-from diffusers import StableDiffusionWorkflow
+from diffusers import StableDiffusionPipeline
 
 MODELS_DIR = os.environ.get("MODELS_DIR", "/models")
 LORAS_DIR = os.environ.get("LORAS_DIR", "/loras")
@@ -44,7 +44,7 @@ class ModelManager:
                 return key, False
             self._evict_if_needed()
             t0 = time.time()
-            pipe = StableDiffusionWorkflow.from_single_file(
+            pipe = StableDiffusionPipeline.from_single_file(
                 path, torch_dtype=torch.float16, safety_checker=None
             )
             if CPU_OFFLOAD:
@@ -57,7 +57,7 @@ class ModelManager:
             print(f"[model-manager] loaded '{key}' in {time.time()-t0:.1f}s", flush=True)
             return key, True
 
-    def get(self, name: str) -> StableDiffusionWorkflow:
+    def get(self, name: str) -> StableDiffusionPipeline:
         key, _ = self.load(name)
         self._last_used[key] = time.time()
         return self._pipes[key]

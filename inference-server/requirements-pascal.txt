@@ -4,10 +4,14 @@
 # PyTorch 2.7+（CUDA 12.8+ 构建）已从官方二进制中移除 sm_60/61（Pascal）支持，
 # 因此 Pascal 机型必须使用 torch <= 2.6。这里与基础镜像保持一致，固定为 2.3.1。
 torch==2.3.1
-diffusers>=0.30
-transformers>=4.40
-accelerate>=0.28
-safetensors>=0.4
+# 下列版本与 torch 2.3.1 同时代，验证可用。
+# 不要放开上界：diffusers 新版引用 torch>=2.5 的 flex_attention，会在导入期崩溃；
+# huggingface_hub 1.x 有破坏性变更，与 diffusers 0.30 不兼容。
+diffusers==0.30.3
+transformers==4.44.2
+accelerate==0.33.0
+huggingface-hub==0.24.7
+safetensors==0.4.5
 fastapi>=0.110
 uvicorn[standard]>=0.29
 pillow>=10.0
