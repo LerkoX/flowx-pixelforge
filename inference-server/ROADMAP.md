@@ -1,0 +1,145 @@
+# 演进路线：对标 ComfyUI 的能力补齐计划
+
+> 定位：本服务是 ComfyUI 执行模型的**远程复刻**（类型化端口 + 对象仓库 + 拓扑调度 + 内容寻址缓存，
+> `/graph` 对齐 `/prompt` 语义）。内核已与 ComfyUI 同构，剩余差距是**算子覆盖面**与少量引擎语义。
+> 本文档给出差距清单与分阶段演进计划。判断依据：ComfyUI 生态流行度（ControlNet 系、SDXL 系、
+> 高清放大链为流量大头）与对本服务现有代码的侵入程度。
+
+## 0. 现状盘点（已对齐的部分）
+
+| ComfyUI 概念 | 本服务对应 | 状态 |
+| --- | --- | --- |
+| 节点 INPUT_TYPES/RETURN_TYPES | `registry.py` 声明式端口类型 | ✅ 同构 |
+| 图执行 + 拓扑排序 + 缓存 | `engine.py`（内容寻址缓存） | ✅ 同构 |
+| 对象按引用传递（张量不出 GPU） | `object_store.py` UUID 仓库 | ✅ 同构 |
+| `/prompt` `/object_info` `/view` | `/graph` `/ops` `/images/{id}` | ✅ 对应 |
+| ModelPatcher.clone + add_patches | `ops.ModelRef`（LoRA 补丁视图，可串联） | ✅ 同构 |
+| ckpt/safetensors 加载 + key 映射 | diffusers `from_single_file()` | ✅ 免费获得 |
+| 采样器 euler/dpmpp/uni_pc 等 8 种 | `samplers.py` | ⚠️ sampler 与 schedule 未解耦 |
+| 模型显存搬移 | `ENABLE_CPU_OFFLOAD=1`（diffusers 版） | ⚠️ 粗粒度但可用 |
+| dtype 探测/fallback | 硬编码 fp16 | ❌ 未做 |
+| SDXL/SD3/Flux 架构 | 仅 SD1.x UNet 路径 | ❌ 未做 |
+| MASK/CONTROL_NET/UPSCALE_MODEL 等类型 | 仅 6 种对象类型 | ❌ 未做 |
+| 进度推送 / interrupt | 仅 stdout step 日志 | ❌ 未做 |
+
+## 1. 扩展方法论（贯穿所有阶段）
+
+新增能力的固定路径，全程无引擎改动：
+
+1. `app/ops.py` 加一个纯函数（张量/PIL 进出，不碰网络与 ID）
+2. `app/main.py` 用 `@registry.register(...)` 注册一行
+3. 新对象类型时往 `registry.py` 的 `OBJ_TYPES` 加一个名字
+4. FlowX 侧用通用节点 `inference-op` 立即可用；高频能力再补专属瘦节点
+
+**原则：只支持 safetensors 单文件 + diffusers 目录两条加载路径**（`from_single_file` /
+`from_pretrained` 分派），不自己实现 state_dict key 映射；架构逐个加，不提前抽象。
+
+## 2. 阶段规划
+
+### 阶段 1：图生图链路（最小投入，解锁 i2i）
+
+当前 `sample()` 已支持 `denoise<1` 跳过前段步数，只差输入侧算子：
+
+- 新算子 `vae.encode`（IMAGE→LATENT）、`image.load`（上传/本地路径→IMAGE）、
+  `latent.noise`（可选，独立注入噪声）
+- 采样循环补 img2img 所需的 timestep 截断细节校验
+- 验收：txt2img 出图 → vae.encode → denoise=0.6 重采样 → 构图保留、风格可变
+
+### 阶段 2：sigma 排布与采样算法解耦（越早越便宜的重构）
+
+ComfyUI 把 `sampler_name`（更新公式）与 `scheduler`（sigma 曲线）拆成两个参数自由组合。
+当前 `samplers.py` 把两者揉在一个名字里（如 `dpmpp_2m_karras`），组合一多会爆炸。
+
+- `sample` 算子签名增加 `scheduler` 参数（uniform/karras/exponential/sgm_uniform），
+  旧名字保留兼容映射
+- 同步在 FlowX 的 ksampler 节点加下拉项
+- 验收：同 seed 下 euler+karras 与旧 euler_karras 结果一致
+
+### 阶段 3：dtype fallback 小修（配合 VAE 类节点）
+
+SD1.5 的 fp16 VAE 解码会偶发纯黑图，社区标准修法是 VAE 单独 fp32。
+
+- `model_manager.py` 加载后把 `pipe.vae` 转 fp32（代价 ~0.2GB 显存，换稳定性）
+- Pascal 卡路径补 dtype 探测注释（当前兼容镜像已绕过，不深挖）
+- 验收：连续 50 次 vae.decode 无黑图
+
+### 阶段 4：ControlNet（流行度最高的扩展类，工程量最大）
+
+- 新类型 `CONTROL_NET`、`MASK`
+- 新算子 `controlnet.load`（ControlNetModel.from_pretrained）、
+  `controlnet.apply`（COND + 控制图 + 强度 → 打包条件）、
+  预处理器算子先做 1~2 个（canny 边缘、OpenPose 走外部库或客户端预处理）
+- **核心改动在 `ops.sample` 采样循环**：UNet 调用注入
+  `down_block_additional_residuals` / `mid_block_additional_residual`
+  （按 diffusers `ControlNetModel` 输出格式对接）
+- 显存：`ENABLE_CPU_OFFLOAD=1` 成为推荐配置（三件套同时在场 ~9GB）
+- 验收：线稿 → 同构图出图；强度 0.5/1.0 效果区分明显
+
+### 阶段 5：SDXL 支持（主流模型门槛）
+
+- 加载：`StableDiffusionXLWorkflow.from_single_file`（按文件嗅探或文件名约定分派）
+- `clip.encode` 出 SDXL 变体：双 text encoder + pooled embedding
+- `sample` 补 `added_cond_kwargs`（time_ids/pooled）——**此时引入架构分派**，
+  用「采样循环骨架 + 每架构适配函数」而非 if-else 堆积（见 §3）
+- 验收：Pony/Illustrious 系社区模型出图正常
+
+### 阶段 6：高清放大链
+
+- 新类型 `UPSCALE_MODEL`；新算子 `upscale.load` / `upscale.image`
+  （ESRGAN/SwinIR 系，纯 IMAGE→IMAGE，不碰采样循环）
+- hires fix 链 = `latent.upscale` + 低 denoise 二次采样（阶段 1 已备好底座）
+- 验收：512→2048 放大细节自然；hires fix 与一次性放大出图质量对比达标
+
+### 阶段 7：执行体验补齐
+
+- WebSocket `/ws`：进度推送（sample 的 print step 改为回调上报）+ 执行完成通知
+- `POST /interrupt`：采样循环内检查取消标志（对齐 ComfyUI）
+- 引擎补 lazy evaluation：只执行通向输出节点的分支
+- 验收：长采样可中途取消；FlowX 画布实时显示进度
+
+### 阶段 8：Flux / SD3（flow matching 范式，独立工程量）
+
+- 采样数学不同：预测速度场而非噪声；Flux 无 neg prompt（distilled guidance 标量）
+- 三文本编码器（SD3: 双 CLIP + T5；Flux: CLIP + T5）——COND 类型需要组合结构
+- 大显存前提（Flux dev fp16 ~24GB，或走 fp8/量化路径），依赖阶段 7 的显存治理
+- 验收：Flux schnell 4 步出图
+
+## 3. 架构守护：`sample()` 的分派纪律
+
+唯一「加法做多了会欠债」的地方。规则：
+
+- 采样循环骨架（timesteps 迭代、CFG 结构、scheduler.step）保持一份
+- 每架构一个适配函数：`predict_noise(pipe_arch, latents, t, cond_bundle) -> noise_pred`
+- SDXL/ControlNet/Flux 的差异**只允许进适配函数**，不允许在骨架里加 if-else
+- 第三个架构接入之前不做统一抽象（两个实例时直接分派，三个时再提炼接口）
+
+## 4. 显存治理演进
+
+| 阶段 | 机制 | 粒度 |
+| --- | --- | --- |
+| 现在 | `MAX_RESIDENT_MODELS` LRU 整模型淘汰 | pipe 级 |
+| 三件套起 | `ENABLE_CPU_OFFLOAD=1`（diffusers 按子模块搬移） | 子模块级 |
+| 远期（如有需要） | 参考 comfy/model_management 做张量级搬移 | 层级 |
+
+原则：diffusers 自带的 offload 够用就不自研；整模型淘汰保留作为兜底。
+
+## 5. 不做清单（明确排除，避免 scope 蔓延)
+
+- ❌ 自研 ckpt/safetensors key 映射（diffusers 已覆盖）
+- ❌ 复刻 ComfyUI 前端/画布（FlowX Studio 已承担）
+- ❌ 兼容 monkey-patch 类自定义节点生态（隐式约定，承接成本无上限）
+- ❌ 视频/音频模态（AnimateDiff/Wan 等），待图像链路完整后再评估
+- ⚠️ ComfyUI V3 节点 schema（comfy_api）仅保持关注，不提前对标
+
+## 6. 里程碑速查
+
+| 里程碑 | 阶段 | 解锁能力 | 预估侵入面 |
+| --- | --- | --- | --- |
+| M1 图生图 | 1 | i2i / 变体生成 | 2 个算子 |
+| M2 采样器完整 | 2 | 全采样器×sigma 组合 | samplers.py 重构 |
+| M3 稳定 VAE | 3 | 无黑图 | model_manager 几行 |
+| M4 ControlNet | 4 | 构图控制 | 采样循环改造 |
+| M5 SDXL | 5 | 主流社区模型 | 架构分派落地 |
+| M6 高清链 | 6 | 2K/4K 出图 | 2~3 个算子 |
+| M7 体验 | 7 | 进度/取消/懒执行 | 引擎 + WS |
+| M8 Flux | 8 | 最新架构 | 独立采样路径 |

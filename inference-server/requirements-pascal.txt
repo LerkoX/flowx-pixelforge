@@ -1,0 +1,13 @@
+# inference-server 算子服务的 Python 依赖（Pascal 兼容版）
+#
+# 与 requirements.txt 的区别：显式固定 torch 版本。
+# PyTorch 2.7+（CUDA 12.8+ 构建）已从官方二进制中移除 sm_60/61（Pascal）支持，
+# 因此 Pascal 机型必须使用 torch <= 2.6。这里与基础镜像保持一致，固定为 2.3.1。
+torch==2.3.1
+diffusers>=0.30
+transformers>=4.40
+accelerate>=0.28
+safetensors>=0.4
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pillow>=10.0

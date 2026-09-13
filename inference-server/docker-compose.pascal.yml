@@ -1,0 +1,10 @@
+# Pascal 兼容版 compose override
+# 用法：docker compose -f docker-compose.yml -f docker-compose.pascal.yml up -d --build
+services:
+  inference:
+    build:
+      context: .
+      dockerfile: Dockerfile.pascal
+    container_name: flowx-inference-server-pascal
+    environment:
+      MAX_RESIDENT_MODELS: "1"        # Pascal 卡显存有限，默认降为 1

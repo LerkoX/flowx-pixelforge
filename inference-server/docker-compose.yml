@@ -1,0 +1,23 @@
+services:
+  inference:
+    build: .
+    container_name: flowx-inference-server
+    ports:
+      - "8100:8100"
+    environment:
+      MODELS_DIR: /models
+      LORAS_DIR: /loras
+      MAX_RESIDENT_MODELS: "2"        # 显存常驻模型上限，超出按 LRU 淘汰
+      ENABLE_CPU_OFFLOAD: "0"         # 1 = 淘汰前换出到内存，再换入更快
+      INFERENCE_TOKEN: ""             # 非空则启用 Bearer 鉴权
+    volumes:
+      - ./models:/models              # 把 safetensors/ckpt 模型文件放到 ./models
+      - ./loras:/loras                # LoRA 文件放到 ./loras
+    restart: always
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
