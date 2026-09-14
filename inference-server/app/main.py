@@ -14,7 +14,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from . import engine, ops
+from . import engine, ops, preview
 from .model_manager import ModelManager
 from .object_store import ObjectStore
 from .registry import Registry
@@ -65,13 +65,28 @@ def _op_latent_empty(width=512, height=512, batch_size=1):
     "sample",
     inputs={"model": "MODEL", "pos": "COND", "neg": "COND", "latent": "LATENT",
             "seed": "INT", "steps": "INT", "cfg": "FLOAT",
-            "sampler_name": "STRING", "denoise": "FLOAT"},
+            "sampler_name": "STRING", "denoise": "FLOAT",
+            "preview_callback_url": "STRING", "preview_token": "STRING",
+            "preview_every": "INT"},
     outputs={"latent": "LATENT", "seed": "INT"},
-    description="KSampler：seed/steps/cfg/sampler_name/denoise 均有默认值")
+    description="KSampler：seed/steps/cfg/sampler_name/denoise 均有默认值；"
+                "提供 preview_callback_url 时逐步 POST latent 预览帧（JPEG）到该地址")
 def _op_sample(model, pos, neg, latent, seed=-1, steps=20, cfg=7.0,
-               sampler_name="euler", denoise=1.0):
+               sampler_name="euler", denoise=1.0, preview_callback_url="",
+               preview_token="", preview_every=1):
+    pusher = None
+    if preview_callback_url:
+        pipe, _ = ops.resolve_pipe(model)
+        pusher = preview.PreviewPusher(
+            preview_callback_url, preview_token, every=preview_every,
+            hint=preview.model_hint_of(pipe))
+
+    def on_step(latents, i, total):
+        if pusher is not None and pusher.want(i, total):
+            pusher.push(latents, (i + 1) / total)
+
     return ops.sample(model, pos, neg, latent, seed, steps, cfg,
-                      sampler_name, denoise)
+                      sampler_name, denoise, preview_cb=on_step)
 
 
 @registry.register(

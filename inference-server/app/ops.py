@@ -64,9 +64,12 @@ def latent_empty(width=512, height=512, batch_size=1):
 
 
 def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
-           sampler_name=DEFAULT_SAMPLER, denoise=1.0):
+           sampler_name=DEFAULT_SAMPLER, denoise=1.0, preview_cb=None):
     """KSampler：手动采样循环，返回 {'latent': ..., 'seed': 实际种子}。
-    model 可为裸 pipe 或带 LoRA 补丁的 ModelRef（采样前启用、采样后关闭）。"""
+    model 可为裸 pipe 或带 LoRA 补丁的 ModelRef（采样前启用、采样后关闭）。
+    preview_cb 可选：签名 preview_cb(latents, step_index, total)，在每一步
+    去噪后回调（由调用方注入预览推送，如 app.preview.PreviewPusher），
+    本层不感知网络。"""
     if sampler_name not in SAMPLERS:
         raise ValueError(f"unknown sampler '{sampler_name}', available: {sorted(SAMPLERS)}")
 
@@ -107,6 +110,13 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
                 guided = uncond + cfg * (cond - uncond)
                 latents = sched.step(guided, t, latents).prev_sample
                 print(f"[sample] step {i+1}/{len(ts)}", flush=True)
+                if preview_cb is not None:
+                    try:
+                        preview_cb(latents, i, len(ts))
+                    except Exception as e:
+                        # 预览推送绝不影响采样主流程
+                        print(f"[sample] preview callback failed (ignored): {e}",
+                              flush=True)
     finally:
         if patches:
             try:
