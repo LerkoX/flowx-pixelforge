@@ -10,8 +10,9 @@ import io
 import os
 
 import torch
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import Response
+from PIL import Image
 from pydantic import BaseModel, Field
 
 from . import engine, ops, preview
@@ -20,6 +21,8 @@ from .object_store import ObjectStore
 from .registry import Registry
 
 TOKEN = os.environ.get("INFERENCE_TOKEN", "")
+INPUT_DIR = os.environ.get("INPUT_DIR", "/input")
+MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_MB", "32")) * 1024 * 1024
 
 app = FastAPI(title="flowx-inference-server")
 models = ModelManager()
@@ -107,6 +110,24 @@ def _op_vae_decode(vae, latent):
     return ops.vae_decode(vae, latent)
 
 
+@registry.register(
+    "vae.encode",
+    inputs={"vae": "VAE", "image": "IMAGE"},
+    outputs={"latent": "LATENT"},
+    description="VAE Encode：PIL 图像 → latent（图生图入口，配 sample 的 denoise<1 使用）")
+def _op_vae_encode(vae, image):
+    return ops.vae_encode(vae, image)
+
+
+@registry.register(
+    "image.load",
+    inputs={"name": "STRING"},
+    outputs={"image": "IMAGE"},
+    description="Load Image：读 INPUT_DIR 下的服务端本地图片（仅文件名）；客户端上传用 POST /images")
+def _op_image_load(name):
+    return ops.image_load(INPUT_DIR, name)
+
+
 # ---------- schemas ----------
 
 class OpReq(BaseModel):
@@ -136,6 +157,24 @@ def health():
 @app.get("/models", dependencies=[Depends(auth)])
 def list_models():
     return {"resident_models": models.resident()}
+
+
+@app.post("/images", dependencies=[Depends(auth)])
+async def upload_image(request: Request):
+    """上传图像（原始字节，Content-Type: image/png|jpeg），登记为 IMAGE 对象返回 id。
+    供 FlowX 的 load-image 节点把客户端本地图片送入对象仓库。"""
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="empty body")
+    if len(body) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413,
+                            detail=f"image too large: {len(body)} > {MAX_UPLOAD_BYTES} bytes")
+    try:
+        pil = Image.open(io.BytesIO(body)).convert("RGB")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"cannot decode image: {e}")
+    oid = store.put("IMAGE", pil, meta={"source": "upload"})
+    return {"id": oid, "width": pil.width, "height": pil.height}
 
 
 @app.get("/images/{image_id}", dependencies=[Depends(auth)])

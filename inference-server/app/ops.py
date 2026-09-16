@@ -1,10 +1,12 @@
 """算子实现：纯 Python 对象（管道/张量/PIL 图像）进出的函数，不感知对象 ID 与网络。
 每个函数对应注册表中的一个算子，是"能力"的最小单元——新增能力就是在这里加一个函数
 并在 main.py 注册一行。"""
+import os
 import random
 import time
 
 import torch
+from PIL import Image
 
 from .samplers import SAMPLERS, DEFAULT_SAMPLER, make_scheduler
 
@@ -143,3 +145,27 @@ def vae_decode(pipe, latents):
             latents / pipe.vae.config.scaling_factor, return_dict=False)[0]
     pil = pipe.image_processor.postprocess(img, output_type="pil")
     return {"image": pil[0] if len(pil) == 1 else pil}
+
+
+def vae_encode(pipe, image):
+    """VAE Encode：PIL 图像（或列表）→ latent，供图生图（denoise<1）重采样。
+    乘 scaling_factor 与 vae_decode 的除法互逆（ComfyUI VAEEncode 同语义）。"""
+    images = image if isinstance(image, list) else [image]
+    tensors = [pipe.image_processor.preprocess(img) for img in images]
+    img_t = torch.cat(tensors).to(device=pipe.device, dtype=pipe.vae.dtype)
+    with torch.no_grad():
+        latent = pipe.vae.encode(img_t).latent_dist.sample()
+    return {"latent": (latent * pipe.vae.config.scaling_factor).to(torch.float16)}
+
+
+def image_load(input_dir, name):
+    """Load Image：读服务端 INPUT_DIR 下的本地图片 → PIL（RGB）。
+    仅接受纯文件名（防路径穿越）；客户端上传走 POST /images 端点。"""
+    if os.path.basename(name) != name or name in ("", ".", ".."):
+        raise ValueError(f"image name must be a plain file name under INPUT_DIR, got {name!r}")
+    path = os.path.join(input_dir, name)
+    if not os.path.isfile(path):
+        available = sorted(os.listdir(input_dir)) if os.path.isdir(input_dir) else []
+        raise FileNotFoundError(
+            f"image '{name}' not found in {input_dir}; available: {available or '(empty)'}")
+    return {"image": Image.open(path).convert("RGB")}

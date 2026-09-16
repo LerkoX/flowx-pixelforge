@@ -36,13 +36,12 @@
 
 ## 2. 阶段规划
 
-### 阶段 1：图生图链路（最小投入，解锁 i2i）
+### 阶段 1：图生图链路（✅ 已完成）
 
-当前 `sample()` 已支持 `denoise<1` 跳过前段步数，只差输入侧算子：
-
-- 新算子 `vae.encode`（IMAGE→LATENT）、`image.load`（上传/本地路径→IMAGE）、
-  `latent.noise`（可选，独立注入噪声）
-- 采样循环补 img2img 所需的 timestep 截断细节校验
+- 新算子 `vae.encode`（IMAGE→LATENT，乘 scaling_factor 与 decode 互逆）、
+  `image.load`（INPUT_DIR 服务端本地图）；`POST /images` 上传端点（客户端本地图 → IMAGE 对象）
+- 采样侧 `denoise<1` 跳步 + add_noise 原本已支持，无需改动
+- FlowX 侧新节点 `load-image` / `vae-encode`，示例 `pipeline/i2i.yaml`
 - 验收：txt2img 出图 → vae.encode → denoise=0.6 重采样 → 构图保留、风格可变
 
 ### 阶段 2：sigma 排布与采样算法解耦（越早越便宜的重构）
@@ -104,6 +103,21 @@ SD1.5 的 fp16 VAE 解码会偶发纯黑图，社区标准修法是 VAE 单独 f
 - 大显存前提（Flux dev fp16 ~24GB，或走 fp8/量化路径），依赖阶段 7 的显存治理
 - 验收：Flux schnell 4 步出图
 
+### 阶段 9：视频模态（图生视频 / 前后帧视频）
+
+从「不做清单」移入正式规划。前提与内容：
+
+- **异步任务体系**（视频生成分钟级，同步 HTTP 必超时）：`POST /jobs` 提交 →
+  job_id 轮询 / WS 进度 → `/interrupt` 取消；与阶段 7 合并实施
+- **模型管理器分派**：按模型文件/目录嗅探分派管道类（SD1.x / 视频管道），
+  本项同时是 SDXL / AuraFlow / 视频所有线的公共前置
+- 新类型 `VIDEO`；视频结果落盘 mp4（imageio-ffmpeg）+ `/videos/{id}` 下载端点
+- 显存治理升级：sequential offload 起步，fp8 量化留接口（视频模型 5B~14B 级）
+- 首个视频模型建议 Wan2.2-TI2V-5B（文/图生视频一体，消费级显卡可跑）；
+  前后帧走 diffusers 现成 `WanFirstLastFrameToVideoPipeline`
+- FlowX 侧：视频节点先行用 `inference-op`，widget 视频播放器由节点包 UI 自行实现
+- 验收：图生视频出片；首帧+尾帧插帧出片；长任务可取消、进度可见
+
 ## 3. 架构守护：`sample()` 的分派纪律
 
 唯一「加法做多了会欠债」的地方。规则：
@@ -128,14 +142,16 @@ SD1.5 的 fp16 VAE 解码会偶发纯黑图，社区标准修法是 VAE 单独 f
 - ❌ 自研 ckpt/safetensors key 映射（diffusers 已覆盖）
 - ❌ 复刻 ComfyUI 前端/画布（FlowX Studio 已承担）
 - ❌ 兼容 monkey-patch 类自定义节点生态（隐式约定，承接成本无上限）
-- ❌ 视频/音频模态（AnimateDiff/Wan 等），待图像链路完整后再评估
+- ❌ 音频模态，待视频链路完整后再评估
+- ⚠️ MiniMax H3 等新开源视频模型：权重确认可用后按阶段 9 的基础设施接入，
+  架构适配遵循 §3 分派纪律（当前明确排除，不做预投入）
 - ⚠️ ComfyUI V3 节点 schema（comfy_api）仅保持关注，不提前对标
 
 ## 6. 里程碑速查
 
 | 里程碑 | 阶段 | 解锁能力 | 预估侵入面 |
 | --- | --- | --- | --- |
-| M1 图生图 | 1 | i2i / 变体生成 | 2 个算子 |
+| M1 图生图 | 1 ✅ | i2i / 变体生成 | 2 个算子（已交付） |
 | M2 采样器完整 | 2 | 全采样器×sigma 组合 | samplers.py 重构 |
 | M3 稳定 VAE | 3 | 无黑图 | model_manager 几行 |
 | M4 ControlNet | 4 | 构图控制 | 采样循环改造 |
@@ -143,3 +159,4 @@ SD1.5 的 fp16 VAE 解码会偶发纯黑图，社区标准修法是 VAE 单独 f
 | M6 高清链 | 6 | 2K/4K 出图 | 2~3 个算子 |
 | M7 体验 | 7 | 进度/取消/懒执行 | 引擎 + WS |
 | M8 Flux | 8 | 最新架构 | 独立采样路径 |
+| M9 视频 | 9 | i2v / 首尾帧插帧 | 异步任务 + 显存治理 |

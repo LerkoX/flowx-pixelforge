@@ -1,0 +1,116 @@
+Name: sd-i2i
+Description: ComfyUI 风格图生图：健康检查 → Checkpoint 加载 → CLIP 编码(正/反) → 加载本地图片 → VAE 编码 → KSampler(denoise<1) → VAE 解码 → 保存图像
+Param:
+  service_url: "http://127.0.0.1:8100"   # 远程 GPU 机器上的推理服务地址
+  service_token: ""                       # 服务端 INFERENCE_TOKEN，未启用鉴权留空
+  ckpt_name: "v1-5-pruned-emaonly"        # 推理服务 MODELS_DIR 下的模型文件名（可省略扩展名）
+  image_path: "~/flowx-input/source.png"  # FlowX 侧本地图片（PNG/JPEG，宽高建议为 8 的倍数）
+  prompt: "a cute cat sitting on a windowsill, soft light, masterpiece, best quality"
+  negative: "lowres, blurry, worst quality, watermark, text"
+  seed: -1
+  steps: 20
+  cfg: 7.0
+  sampler: "euler"
+  denoise: 0.6                            # 图生图重绘幅度：越大越偏离原图（1.0 = 纯文生图）
+Graph: |
+  stateDiagram-v2
+    [*] --> Ensure
+    Ensure --> LoadCheckpoint
+    Ensure --> LoadImage
+    LoadCheckpoint --> EncodePos
+    LoadCheckpoint --> EncodeNeg
+    LoadCheckpoint --> VAEEncode
+    LoadImage --> VAEEncode
+    EncodePos --> KSampler
+    EncodeNeg --> KSampler
+    VAEEncode --> KSampler
+    KSampler --> VAEDecode
+    VAEDecode --> SaveImage
+    SaveImage --> [*]
+Nodes:
+  Ensure:
+    name: 服务健康检查
+    config:
+      nodeRef: inference-ensure@1.0.0
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        wait_seconds: 60
+  LoadCheckpoint:
+    name: Checkpoint加载
+    config:
+      nodeRef: checkpoint-loader@1.0.0
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        ckpt_name: "{{ Param.ckpt_name }}"
+  EncodePos:
+    name: 正向提示词
+    config:
+      nodeRef: clip-text-encode@1.0.0
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        clip_ref: "{{ LoadCheckpoint.clip_ref }}"
+        text: "{{ Param.prompt }}"
+  EncodeNeg:
+    name: 反向提示词
+    config:
+      nodeRef: clip-text-encode@1.0.0
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        clip_ref: "{{ LoadCheckpoint.clip_ref }}"
+        text: "{{ Param.negative }}"
+  LoadImage:
+    name: 加载原图
+    config:
+      nodeRef: load-image@1.0.0
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image_path: "{{ Param.image_path }}"
+  VAEEncode:
+    name: VAE编码
+    config:
+      nodeRef: vae-encode@1.0.0
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        vae_ref: "{{ LoadCheckpoint.vae_ref }}"
+        image: "{{ LoadImage.image }}"
+  KSampler:
+    name: KSampler采样
+    config:
+      nodeRef: ksampler@1.0.0
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        model_ref: "{{ LoadCheckpoint.model_ref }}"
+        positive: "{{ EncodePos.conditioning }}"
+        negative: "{{ EncodeNeg.conditioning }}"
+        latent: "{{ VAEEncode.latent }}"
+        seed: "{{ Param.seed }}"
+        steps: "{{ Param.steps }}"
+        cfg: "{{ Param.cfg }}"
+        sampler_name: "{{ Param.sampler }}"
+        denoise: "{{ Param.denoise }}"
+  VAEDecode:
+    name: VAE解码
+    config:
+      nodeRef: vae-decode@1.0.0
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        vae_ref: "{{ LoadCheckpoint.vae_ref }}"
+        latent: "{{ KSampler.latent }}"
+  SaveImage:
+    name: 保存图像
+    config:
+      nodeRef: save-image@1.0.0
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ VAEDecode.image }}"
+        filename_prefix: "flowx_i2i"
+        output_dir: "~/flowx-output"
