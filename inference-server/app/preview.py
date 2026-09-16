@@ -11,8 +11,10 @@ import io
 import json
 import urllib.request
 
-import torch
 from PIL import Image
+
+# torch 延迟导入：仅 latent_to_jpeg 的投影矩阵需要；
+# progress_card / PreviewPusher.push_pil 在无 GPU/torch 环境也可用。
 
 # ComfyUI latent_rgb_factors：# R G B
 SD15_FACTORS = [
@@ -37,6 +39,7 @@ def model_hint_of(pipe) -> str:
 
 def latent_to_jpeg(latents, hint="sd15", max_size=256, quality=70) -> bytes:
     """latent (b,4,h,w) → JPEG 字节。取 batch 第 0 张，4 通道线性投影到 RGB。"""
+    import torch  # 延迟导入
     if hint == "sdxl":
         factors = torch.tensor(SDXL_FACTORS).t()
         bias = torch.tensor(SDXL_BIAS)
@@ -61,6 +64,23 @@ def latent_to_jpeg(latents, hint="sd15", max_size=256, quality=70) -> bytes:
     return buf.getvalue()
 
 
+def progress_card(step, total, width=256, height=144):
+    """进度卡片帧：纯渲染的进度图（不碰模型/显存）。
+    视频采样等场景的中间结果是 3D latent，无法廉价投影成图；用本卡片经既有
+    预览通道给画布实时反馈（step/total + 进度条）。"""
+    from PIL import ImageDraw
+    img = Image.new("RGB", (width, height), (15, 17, 26))
+    d = ImageDraw.Draw(img)
+    pct = min(1.0, step / max(1, total))
+    mx, my, bar_h = 16, height - 34, 10
+    d.rectangle([mx, my, width - mx, my + bar_h], outline=(80, 90, 120))
+    d.rectangle([mx, my, mx + (width - 2 * mx) * pct, my + bar_h],
+                fill=(34, 211, 238))
+    d.text((mx, 24), f"sampling {step}/{total}", fill=(226, 232, 240))
+    d.text((mx, 44), f"{pct * 100:.0f}%", fill=(148, 163, 184))
+    return img
+
+
 class PreviewPusher:
     """把采样中间 latent 推送为 Studio 预览帧；推送失败静默忽略（不影响采样）。"""
 
@@ -75,11 +95,21 @@ class PreviewPusher:
         return step_index % self.every == 0 or step_index == total - 1
 
     def push(self, latents, progress):
+        """推送 latent 预览帧（SD 系 2D latent 的 RGB 近似投影）。"""
         try:
             jpeg = latent_to_jpeg(latents, hint=self.hint)
         except Exception as e:
             print(f"[preview] latent->jpeg failed (ignored): {e}", flush=True)
             return
+        self._post(jpeg, progress)
+
+    def push_pil(self, img, progress):
+        """推送已渲染的 PIL 帧（视频进度卡片/关键帧等）。"""
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, format="JPEG", quality=75)
+        self._post(buf.getvalue(), progress)
+
+    def _post(self, jpeg, progress):
         payload = {"image": base64.b64encode(jpeg).decode(),
                    "mime": "image/jpeg",
                    "progress": round(progress, 4)}

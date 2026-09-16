@@ -152,12 +152,22 @@ def main():
     print("progress view OK")
 
     # --- 结果淘汰：retained=2，最旧完成任务被逐出 ---
+    # 注意：wait() 返回时 worker 的 _evict()（finally 块）可能尚未执行，
+    # 逐出断言必须轮询等待而非立即检查
     jm4 = make_manager(build_registry(), retained=2)
     ids = []
     for i in range(4):
         jid = jm4.submit("op", {"name": "make", "inputs": {"value": i}})
         wait(jm4, jid)
         ids.append(jid)
+    t0 = time.time()
+    while time.time() - t0 < 10:
+        try:
+            jm4.get(ids[0])
+            jm4.get(ids[1])
+            time.sleep(0.01)
+        except KeyError:
+            break
     for old in ids[:2]:
         try:
             jm4.get(old)

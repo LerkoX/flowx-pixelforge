@@ -11,13 +11,14 @@ FlowX Studio 上的 ComfyUI 风格文生图/图生图方案：真实推理（dif
 
 ```
 Termux (FlowX Server, 本地 executor)
-  └─ 11 个节点 = Python 瘦客户端（stdlib HTTP，零依赖）
-          │ HTTP（节点间只传对象 ID，张量驻留 GPU 内存）
+  └─ 13 个节点 = Python 瘦客户端（stdlib HTTP，零依赖）
+          │ HTTP（节点间只传对象 ID，张量驻留 GPU 内存；分钟级任务走异步 /jobs）
 远程 GPU 机器
   └─ Docker: flowx-inference-server (FastAPI + diffusers)
       ├─ 算子注册表 + 图执行引擎（/op /graph，ComfyUI 式能力运行时）
+      ├─ 异步任务体系：/jobs 提交轮询 + /interrupt 协作式取消（视频等分钟级任务）
       ├─ 模型缓存：checkpoint 常驻显存，LRU 淘汰（MAX_RESIDENT_MODELS）
-      └─ 对象仓库：MODEL/CLIP/VAE/COND/LATENT/IMAGE 以 UUID 登记，TTL 1h
+      └─ 对象仓库：MODEL/CLIP/VAE/COND/LATENT/IMAGE/VIDEO 以 UUID 登记，TTL 1h（VIDEO 落盘 mp4）
 ```
 
 ## 目录
@@ -25,9 +26,10 @@ Termux (FlowX Server, 本地 executor)
 | 路径 | 说明 |
 | --- | --- |
 | `inference-server/` | 推理服务 = 远程能力运行时（FastAPI + diffusers），含 Dockerfile / docker-compose.yml，部署见 [inference-server/DEPLOY.md](inference-server/DEPLOY.md) |
-| `nodes/` | 11 个 FlowX 节点包：`inference-ensure` / `checkpoint-loader` / `lora-loader` / `clip-text-encode` / `empty-latent` / `load-image` / `vae-encode` / `ksampler` / `vae-decode` / `save-image` / `inference-op`（通用算子调用） |
+| `nodes/` | 13 个 FlowX 节点包：`inference-ensure` / `checkpoint-loader` / `lora-loader` / `clip-text-encode` / `empty-latent` / `load-image` / `vae-encode` / `ksampler` / `vae-decode` / `save-image` / `video-gen`（文/图生视频，异步任务） / `save-video`（mp4 下载） / `inference-op`（通用算子调用） |
 | `pipeline/txt2img.yaml` | 文生图 workflow |
 | `pipeline/i2i.yaml` | 图生图 workflow（LoadImage → VAEEncode → KSampler denoise<1） |
+| `pipeline/video-ti2v.yaml` | 文/图生视频 workflow（Wan TI2V 系，异步 job + 进度卡片） |
 | `pipeline/txt2img-lora.yaml` | 文生图 + LoRA workflow（LoadCheckpoint → LoraLoader → 后续链路） |
 
 ## GPU 机器部署
@@ -76,18 +78,20 @@ flowx-studio workflow run --id <N> --follow
 - `POST /graph`：整图执行（对齐 ComfyUI `/prompt` 语义）。对象端口用 `["节点ID", "端口"]` 引用，
   引擎做拓扑排序、类型校验、逐算子调度，并按「输入内容哈希」缓存中间结果——
   改一个 seed 重跑时上游编码/加载全部命中缓存
-- 系统端点：`/health`（健康检查 + GPU/显存上报）、`POST /images`（上传图片登记为 IMAGE 对象，供图生图）、`/images/{id}`（PNG 下载，`?thumb=256` 取 JPEG 缩略图）、`/gc`（清对象仓库 + 执行缓存）、`/models`（常驻模型列表）
+- 系统端点：`/health`（健康检查 + GPU/显存上报）、`POST /images`（上传图片登记为 IMAGE 对象，供图生图）、`/images/{id}`（PNG 下载，`?thumb=256` 取 JPEG 缩略图）、`/videos/{id}`（mp4 下载）、`/gc`（清对象仓库 + 执行缓存）、`/models`（常驻模型列表）
+- 异步任务：`POST /jobs`（提交 graph/op 任务，分钟级视频生成走此通道）、`GET /jobs/{id}`（状态/进度轮询）、`POST /interrupt`（协作式取消）
 
 **新增能力 = 在 `app/main.py` 注册一个算子函数**（纯算法，不碰网络/ID），
 FlowX 侧用通用节点 `inference-op` 即可立即使用，无需新增节点包；
 高频能力再补专属瘦节点（参数面板 + 画布 UI 更友好）。
 
-对象类型系统（对齐 ComfyUI）：`MODEL` / `CLIP` / `VAE` / `COND` / `LATENT` / `IMAGE`，
+对象类型系统（对齐 ComfyUI）：`MODEL` / `CLIP` / `VAE` / `COND` / `LATENT` / `IMAGE` / `VIDEO`（落盘 mp4），
 字面量类型：`INT` / `FLOAT` / `STRING` / `BOOL`。
 
 已注册算子：`checkpoint.load` / `lora.apply`（ModelRef 补丁视图，可串联叠加）/
 `clip.encode` / `latent.empty` / `image.load`（INPUT_DIR 服务端本地图）/ `vae.encode`（图生图入口）/
-`sample`（自动识别裸 pipe 或带补丁的 ModelRef，denoise<1 即图生图）/ `vae.decode`
+`sample`（自动识别裸 pipe 或带补丁的 ModelRef，denoise<1 即图生图）/ `vae.decode` /
+`video.sample`（Wan TI2V 系文/图生视频，分钟级，经异步 job 执行）
 
 引擎测试（无 GPU 可跑）：`cd inference-server && python3 tests/test_engine.py`
 

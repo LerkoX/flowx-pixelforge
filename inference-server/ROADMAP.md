@@ -119,10 +119,13 @@ SD1.5 的 fp16 VAE 解码会偶发纯黑图，社区标准修法是 VAE 单独 f
   对象过期/清理时同步删除落盘文件
 - 显存治理升级：✅ sequential offload 已交付（`OFFLOAD_MODE=sequential`），
   fp8 量化接口已预留（`QUANTIZATION=fp8` 识别配置、告警未实现，实现后置）（视频模型 5B~14B 级）
-- 首个视频模型建议 Wan2.2-TI2V-5B（文/图生视频一体，消费级显卡可跑）；
-  前后帧走 diffusers 现成 `WanFirstLastFrameToVideoPipeline`
-- FlowX 侧：视频节点先行用 `inference-op`，widget 视频播放器由节点包 UI 自行实现
-- 验收：图生视频出片；首帧+尾帧插帧出片；长任务可取消、进度可见
+- 首个视频模型 Wan2.2-TI2V-5B（文/图生视频一体，消费级显卡可跑）：✅ `video.sample`
+  算子已交付（prompt/可选首帧/尺寸/帧数/fps/steps/cfg/seed，经 callback_on_step_end
+  上报进度与响应取消）；前后帧走 diffusers 现成 `WanFirstLastFrameToVideoPipeline`（待接）
+- FlowX 侧：✅ 专属瘦节点 `video-gen`（异步 job 提交/轮询/超时自动取消）+
+  `save-video`（mp4 下载落盘）；widget：video-gen 画布进度卡片（服务端纯渲染帧推送）、
+  save-video 内嵌 mp4 播放器（小体积 base64）——外壳零改动
+- 验收（待 GPU 实测）：图生视频出片；首帧+尾帧插帧出片；长任务可取消、进度可见
 
 ## 3. 架构守护：`sample()` 的分派纪律
 

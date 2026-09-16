@@ -1,0 +1,78 @@
+Name: sd-video-ti2v
+Description: 文/图生视频（Wan TI2V 系）：健康检查 → Checkpoint 加载（diffusers 目录）→ 视频生成（异步任务，画布进度卡片）→ 保存视频 mp4；提供 image_path 为首帧图生视频（纯文生视频请删除 LoadImage 节点并清空 VideoGen 的 image 参数）
+Param:
+  service_url: "http://127.0.0.1:8100"   # 远程 GPU 机器上的推理服务地址
+  service_token: ""                       # 服务端 INFERENCE_TOKEN，未启用鉴权留空
+  model_name: "Wan2.2-TI2V-5B-Diffusers"  # 推理服务 MODELS_DIR 下的 diffusers 目录名
+  image_path: ""                          # 首帧图（可选）：FlowX 侧本地图片路径；留空 = 纯文生视频
+  prompt: "a cat walking through a sunlit garden, gentle camera pan, cinematic"
+  negative: "blur, distortion, low quality, watermark"
+  width: 832
+  height: 480
+  num_frames: 121                         # 121 帧 @24fps ≈ 5 秒
+  fps: 24
+  steps: 50
+  cfg: 5.0
+  seed: -1
+Graph: |
+  stateDiagram-v2
+    [*] --> Ensure
+    Ensure --> LoadCheckpoint
+    Ensure --> LoadImage
+    LoadCheckpoint --> VideoGen
+    LoadImage --> VideoGen
+    VideoGen --> SaveVideo
+    SaveVideo --> [*]
+Nodes:
+  Ensure:
+    name: 服务健康检查
+    config:
+      nodeRef: inference-ensure@1.0.0
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        wait_seconds: 60
+  LoadCheckpoint:
+    name: 视频模型加载
+    config:
+      nodeRef: checkpoint-loader@1.0.0
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        ckpt_name: "{{ Param.model_name }}"
+  LoadImage:
+    name: 加载首帧（可选）
+    config:
+      nodeRef: load-image@1.0.0
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image_path: "{{ Param.image_path }}"
+  VideoGen:
+    name: 视频生成
+    config:
+      nodeRef: video-gen@1.0.0
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        model_ref: "{{ LoadCheckpoint.model_ref }}"
+        prompt: "{{ Param.prompt }}"
+        negative_prompt: "{{ Param.negative }}"
+        image: "{{ LoadImage.image }}"
+        width: "{{ Param.width }}"
+        height: "{{ Param.height }}"
+        num_frames: "{{ Param.num_frames }}"
+        fps: "{{ Param.fps }}"
+        steps: "{{ Param.steps }}"
+        cfg: "{{ Param.cfg }}"
+        seed: "{{ Param.seed }}"
+  SaveVideo:
+    name: 保存视频
+    config:
+      nodeRef: save-video@1.0.0
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        video: "{{ VideoGen.video }}"
+        filename_prefix: "flowx_ti2v"
+        output_dir: "~/flowx-output"

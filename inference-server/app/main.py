@@ -131,6 +131,40 @@ def _op_vae_encode(vae, image):
 
 
 @registry.register(
+    "video.sample",
+    inputs={"model": "MODEL", "prompt": "STRING", "neg_prompt": "STRING",
+            "image": "IMAGE", "width": "INT", "height": "INT",
+            "num_frames": "INT", "fps": "INT", "steps": "INT", "cfg": "FLOAT",
+            "seed": "INT", "preview_callback_url": "STRING",
+            "preview_token": "STRING", "preview_every": "INT"},
+    outputs={"video": "VIDEO", "seed": "INT"},
+    description="Video Sample（Wan TI2V 系）：文/图生视频，image 可选（首帧）。分钟级任务，"
+                "请经 POST /jobs 异步执行；进度经 job 轮询上报，preview_callback_url "
+                "推进度卡片帧（preview_every>0 启用）；/interrupt 可中途取消")
+def _op_video_sample(model, prompt, neg_prompt="", image=None,
+                     width=832, height=480, num_frames=121, fps=24,
+                     steps=50, cfg=5.0, seed=-1, preview_callback_url="",
+                     preview_token="", preview_every=0):
+    pusher = None
+    if preview_callback_url and preview_every > 0:
+        pusher = preview.PreviewPusher(preview_callback_url, preview_token,
+                                       every=preview_every)
+
+    def on_step(latents, i, total):
+        job = execution.current()
+        if job is not None:
+            job.set_progress(i + 1, total)  # 异步 job 进度（轮询通道）
+        if pusher is not None and pusher.want(i, total):
+            # 视频 3D latent 无法廉价投影成图，推纯渲染的进度卡片帧
+            pusher.push_pil(preview.progress_card(i + 1, total), (i + 1) / total)
+
+    return ops.video_sample(model, prompt, neg_prompt, image, width, height,
+                            num_frames, fps, steps, cfg, seed,
+                            preview_cb=on_step,
+                            interrupt_check=execution.check_cancelled)
+
+
+@registry.register(
     "image.load",
     inputs={"name": "STRING"},
     outputs={"image": "IMAGE"},

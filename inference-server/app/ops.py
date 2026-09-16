@@ -163,6 +163,63 @@ def vae_encode(pipe, image):
     return {"latent": (latent * pipe.vae.config.scaling_factor).to(torch.float16)}
 
 
+def video_sample(model, prompt, neg_prompt="", image=None,
+                 width=832, height=480, num_frames=121, fps=24,
+                 steps=50, cfg=5.0, seed=-1, preview_cb=None, interrupt_check=None):
+    """Video Sample（Wan TI2V 系视频管道）：文/图生视频。
+    返回 {'video': {'frames': [PIL...], 'fps': n}, 'seed': 实际种子}。
+    分钟级任务——调用方应经异步 job（POST /jobs）执行；preview_cb /
+    interrupt_check 语义同 sample()，经 callback_on_step_end 每步回调。
+    image 可选：提供时管道须声明支持 image 输入（如 Wan2.2-TI2V），否则报错。"""
+    import inspect
+
+    pipe, patches = resolve_pipe(model)
+    if patches:
+        print("[video.sample] lora patches: "
+              + ", ".join(f"{n}@{w}" for n, w in patches), flush=True)
+    _enable_adapters(pipe, patches)
+
+    seed = seed if seed >= 0 else random.randint(0, 2**32 - 1)
+    gen = torch.Generator(device=pipe.device).manual_seed(seed)
+
+    kwargs = dict(prompt=prompt, negative_prompt=neg_prompt or None,
+                  width=width, height=height, num_frames=num_frames,
+                  num_inference_steps=steps, guidance_scale=cfg,
+                  generator=gen, output_type="pil")
+    if image is not None:
+        if "image" not in inspect.signature(pipe.__call__).parameters:
+            raise ValueError(
+                f"{type(pipe).__name__} 不接受 image 输入（非图生视频管道）；"
+                f"纯文生视频请断开 image 端口")
+        kwargs["image"] = image
+
+    def on_step_end(p, i, t, cb_kwargs):
+        if interrupt_check is not None:
+            interrupt_check()  # 取消检查点：抛 JobCancelled 即中断
+        if preview_cb is not None:
+            try:
+                preview_cb(cb_kwargs.get("latents"), i, steps)
+            except Exception as e:
+                print(f"[video.sample] preview callback failed (ignored): {e}",
+                      flush=True)
+        return cb_kwargs
+
+    t0 = time.time()
+    try:
+        out = pipe(callback_on_step_end=on_step_end,
+                   callback_on_step_end_tensor_inputs=["latents"], **kwargs)
+    finally:
+        if patches:
+            try:
+                pipe.disable_lora()
+            except Exception:
+                pass
+    frames = out.frames[0]
+    print(f"[video.sample] done in {time.time()-t0:.1f}s "
+          f"frames={len(frames)} seed={seed}", flush=True)
+    return {"video": {"frames": frames, "fps": fps}, "seed": seed}
+
+
 def image_load(input_dir, name):
     """Load Image：读服务端 INPUT_DIR 下的本地图片 → PIL（RGB）。
     仅接受纯文件名（防路径穿越）；客户端上传走 POST /images 端点。"""
