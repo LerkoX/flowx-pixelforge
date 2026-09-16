@@ -20,7 +20,7 @@
 | dtype 探测/fallback | 硬编码 fp16 | ❌ 未做 |
 | SDXL/SD3/Flux 架构 | 仅 SD1.x UNet 路径 | ❌ 未做 |
 | MASK/CONTROL_NET/UPSCALE_MODEL 等类型 | 仅 6 种对象类型 | ❌ 未做 |
-| 进度推送 / interrupt | 仅 stdout step 日志 | ❌ 未做 |
+| 进度推送 / interrupt | 异步任务体系（/jobs 轮询进度 + /interrupt，协作式取消） | ⚠️ WS 推送未做 |
 
 ## 1. 扩展方法论（贯穿所有阶段）
 
@@ -89,12 +89,13 @@ SD1.5 的 fp16 VAE 解码会偶发纯黑图，社区标准修法是 VAE 单独 f
 - hires fix 链 = `latent.upscale` + 低 denoise 二次采样（阶段 1 已备好底座）
 - 验收：512→2048 放大细节自然；hires fix 与一次性放大出图质量对比达标
 
-### 阶段 7：执行体验补齐
+### 阶段 7：执行体验补齐（部分完成）
 
-- WebSocket `/ws`：进度推送（sample 的 print step 改为回调上报）+ 执行完成通知
-- `POST /interrupt`：采样循环内检查取消标志（对齐 ComfyUI）
+- ✅ 异步任务体系：`POST /jobs` 提交 → job_id 轮询进度 → `POST /interrupt` 取消
+  （采样循环内检查取消标志，对齐 ComfyUI）；与阶段 9 的异步前置合并交付
+- WebSocket `/ws`：进度推送改 WS（当前轮询已可用，WS 为体验优化，待定）
 - 引擎补 lazy evaluation：只执行通向输出节点的分支
-- 验收：长采样可中途取消；FlowX 画布实时显示进度
+- 验收：长采样可中途取消（已达成）；FlowX 画布实时显示进度（轮询通道已具备）
 
 ### 阶段 8：Flux / SD3（flow matching 范式，独立工程量）
 
@@ -107,8 +108,8 @@ SD1.5 的 fp16 VAE 解码会偶发纯黑图，社区标准修法是 VAE 单独 f
 
 从「不做清单」移入正式规划。前提与内容：
 
-- **异步任务体系**（视频生成分钟级，同步 HTTP 必超时）：`POST /jobs` 提交 →
-  job_id 轮询 / WS 进度 → `/interrupt` 取消；与阶段 7 合并实施
+- **异步任务体系**（视频生成分钟级，同步 HTTP 必超时）：✅ 已交付（阶段 7 合并实施）——
+  `POST /jobs` 提交 → job_id 轮询进度 → `/interrupt` 取消
 - **模型管理器分派**：按模型文件/目录嗅探分派管道类（SD1.x / 视频管道），
   本项同时是 SDXL / AuraFlow / 视频所有线的公共前置
 - 新类型 `VIDEO`；视频结果落盘 mp4（imageio-ffmpeg）+ `/videos/{id}` 下载端点

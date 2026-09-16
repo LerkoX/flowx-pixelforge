@@ -66,12 +66,15 @@ def latent_empty(width=512, height=512, batch_size=1):
 
 
 def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
-           sampler_name=DEFAULT_SAMPLER, denoise=1.0, preview_cb=None):
+           sampler_name=DEFAULT_SAMPLER, denoise=1.0, preview_cb=None,
+           interrupt_check=None):
     """KSampler：手动采样循环，返回 {'latent': ..., 'seed': 实际种子}。
     model 可为裸 pipe 或带 LoRA 补丁的 ModelRef（采样前启用、采样后关闭）。
     preview_cb 可选：签名 preview_cb(latents, step_index, total)，在每一步
     去噪后回调（由调用方注入预览推送，如 app.preview.PreviewPusher），
-    本层不感知网络。"""
+    本层不感知网络。
+    interrupt_check 可选：无参回调，每步采样前调用，抛异常即中断
+    （由调用方注入取消检查，如 app.execution.check_cancelled）。"""
     if sampler_name not in SAMPLERS:
         raise ValueError(f"unknown sampler '{sampler_name}', available: {sorted(SAMPLERS)}")
 
@@ -106,6 +109,8 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
     try:
         with torch.no_grad():
             for i, t in enumerate(ts):
+                if interrupt_check is not None:
+                    interrupt_check()  # 取消检查点：抛异常即中断采样
                 inp = sched.scale_model_input(torch.cat([latents] * 2), t)
                 noise_pred = pipe.unet(inp, t, encoder_hidden_states=hidden).sample
                 uncond, cond = noise_pred.chunk(2)

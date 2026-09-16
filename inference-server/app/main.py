@@ -2,7 +2,9 @@
 
 接口：
 - 系统：/health、/images/{id}（PNG 下载 / thumb 缩略图）、/gc（清对象仓库+缓存）
-- 能力运行时：/ops（列出算子）、/op（单算子）、/graph（整图执行，带缓存）
+- 能力运行时（同步）：/ops（列出算子）、/op（单算子）、/graph（整图执行，带缓存）
+- 能力运行时（异步）：POST /jobs 提交 → GET /jobs/{id} 轮询状态/进度 →
+  POST /interrupt 取消；视频等分钟级任务走此通道（同步 HTTP 会超时）
 
 新增能力只需在下方注册一个算子函数，无需新增端点。
 """
@@ -15,7 +17,8 @@ from fastapi.responses import Response
 from PIL import Image
 from pydantic import BaseModel, Field
 
-from . import engine, ops, preview
+from . import engine, execution, ops, preview
+from .jobs import JobManager
 from .model_manager import ModelManager
 from .object_store import ObjectStore
 from .registry import Registry
@@ -85,11 +88,15 @@ def _op_sample(model, pos, neg, latent, seed=-1, steps=20, cfg=7.0,
             hint=preview.model_hint_of(pipe))
 
     def on_step(latents, i, total):
+        job = execution.current()
+        if job is not None:
+            job.set_progress(i + 1, total)  # 异步 job 进度（无需预览回调也上报）
         if pusher is not None and pusher.want(i, total):
             pusher.push(latents, (i + 1) / total)
 
     return ops.sample(model, pos, neg, latent, seed, steps, cfg,
-                      sampler_name, denoise, preview_cb=on_step)
+                      sampler_name, denoise, preview_cb=on_step,
+                      interrupt_check=execution.check_cancelled)
 
 
 @registry.register(
@@ -136,6 +143,15 @@ class OpReq(BaseModel):
 
 class GraphReq(BaseModel):
     nodes: dict
+
+class JobReq(BaseModel):
+    """异步任务提交：nodes 非空 = graph 任务；否则 name = op 任务。"""
+    nodes: dict | None = None
+    name: str | None = None
+    inputs: dict = Field(default_factory=dict)
+
+class InterruptReq(BaseModel):
+    job_id: str | None = None
 
 
 # ---------- 系统端点 ----------
@@ -202,7 +218,7 @@ def gc():
     return {"cleared": store.clear()}
 
 
-# ---------- 能力运行时端点 ----------
+# ---------- 能力运行时端点（同步） ----------
 
 @app.get("/ops", dependencies=[Depends(auth)])
 def list_ops():
@@ -225,3 +241,54 @@ def run_graph(req: GraphReq):
         return engine.run_graph(store, registry, {"nodes": req.nodes})
     except (KeyError, TypeError, ValueError) as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# ---------- 能力运行时端点（异步任务） ----------
+
+def _execute_job(kind, payload):
+    """job worker 的执行入口：分派到引擎（与同步端点共用缓存与执行锁）。"""
+    if kind == "graph":
+        return engine.run_graph(store, registry, {"nodes": payload["nodes"]})
+    return engine.run_op(store, registry, payload["name"], payload.get("inputs") or {})
+
+
+jobman = JobManager(_execute_job)
+
+
+@app.post("/jobs", dependencies=[Depends(auth)])
+def submit_job(req: JobReq):
+    """提交异步任务（视频等分钟级任务走此通道）：返回 job_id，轮询 GET /jobs/{id}。
+    body 二选一：{"nodes": {...}}（graph，同 /graph）或 {"name", "inputs"}（op，同 /op）。"""
+    if req.nodes:
+        return {"job_id": jobman.submit("graph", {"nodes": req.nodes}),
+                "status": "pending"}
+    if req.name:
+        return {"job_id": jobman.submit(
+            "op", {"name": req.name, "inputs": req.inputs}),
+                "status": "pending"}
+    raise HTTPException(status_code=400,
+                        detail="job requires 'nodes' (graph) or 'name' (op)")
+
+
+@app.get("/jobs", dependencies=[Depends(auth)])
+def list_jobs():
+    return {"jobs": jobman.list()}
+
+
+@app.get("/jobs/{job_id}", dependencies=[Depends(auth)])
+def get_job(job_id: str):
+    """任务状态/进度轮询：done 时带 result（同 /graph 返回），failed/cancelled 时带 error。"""
+    try:
+        return jobman.get(job_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.post("/interrupt", dependencies=[Depends(auth)])
+def interrupt(req: InterruptReq | None = None):
+    """取消任务：带 job_id 取消指定任务；空 body 取消当前 running + 全部 pending。
+    running 任务在下一个检查点（节点间 / 采样每步）生效。"""
+    try:
+        return jobman.interrupt(None if req is None else req.job_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))

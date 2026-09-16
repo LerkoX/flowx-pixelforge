@@ -10,10 +10,13 @@ graph 格式（对齐 ComfyUI /prompt）：
 对象端口引用：["节点ID", "输出端口"]；字面量直接写值。
 """
 import json
+import threading
 
+from . import execution
 from .registry import OBJ_TYPES, meta_to_objects, outputs_to_store
 
 _CACHE = {}  # 跨调用缓存：node_key -> {port: meta}
+EXEC_LOCK = threading.Lock()  # GPU 串行：同步 /graph、/op 与异步 job worker 互斥
 
 
 def _is_ref(v):
@@ -74,28 +77,30 @@ def run_graph(store, registry, graph: dict, cache=None):
     order = topo_sort(nodes)
 
     results, out_meta, cached, memo = {}, {}, [], {}
-    for nid in order:
-        spec = nodes[nid]
-        if "op" not in spec:
-            raise ValueError(f"node '{nid}' missing 'op'")
-        op = registry.get(spec["op"])
-        raw_inputs = spec.get("inputs") or {}
+    with EXEC_LOCK:
+        for nid in order:
+            execution.check_cancelled()  # 节点间取消检查点（异步 job 上下文生效）
+            spec = nodes[nid]
+            if "op" not in spec:
+                raise ValueError(f"node '{nid}' missing 'op'")
+            op = registry.get(spec["op"])
+            raw_inputs = spec.get("inputs") or {}
 
-        key = _node_key(nodes, nid, memo)
-        hit = cache.get(key)
-        if hit is not None and _cache_valid(store, hit):
-            results[nid] = meta_to_objects(store, op, hit)
-            out_meta[nid] = hit
-            cached.append(nid)
-            print(f"[engine] node '{nid}' ({op.name}) -> cache hit", flush=True)
-            continue
+            key = _node_key(nodes, nid, memo)
+            hit = cache.get(key)
+            if hit is not None and _cache_valid(store, hit):
+                results[nid] = meta_to_objects(store, op, hit)
+                out_meta[nid] = hit
+                cached.append(nid)
+                print(f"[engine] node '{nid}' ({op.name}) -> cache hit", flush=True)
+                continue
 
-        kwargs = registry.resolve_in_process(op, raw_inputs, results, out_meta)
-        out = op.fn(**kwargs)
-        results[nid] = out
-        out_meta[nid] = outputs_to_store(store, op, out)
-        cache[key] = out_meta[nid]
-        print(f"[engine] node '{nid}' ({op.name}) -> executed", flush=True)
+            kwargs = registry.resolve_in_process(op, raw_inputs, results, out_meta)
+            out = op.fn(**kwargs)
+            results[nid] = out
+            out_meta[nid] = outputs_to_store(store, op, out)
+            cache[key] = out_meta[nid]
+            print(f"[engine] node '{nid}' ({op.name}) -> executed", flush=True)
 
     return {"nodes": out_meta, "cached": cached}
 
@@ -103,9 +108,10 @@ def run_graph(store, registry, graph: dict, cache=None):
 def run_op(store, registry, name: str, raw_inputs: dict):
     """单算子调用（/op）：对象端口用 {"$id": uuid} 引用。"""
     op = registry.get(name)
-    kwargs = registry.resolve_from_ids(store, op, raw_inputs or {})
-    out = op.fn(**kwargs)
-    return {"outputs": outputs_to_store(store, op, out)}
+    with EXEC_LOCK:
+        kwargs = registry.resolve_from_ids(store, op, raw_inputs or {})
+        out = op.fn(**kwargs)
+        return {"outputs": outputs_to_store(store, op, out)}
 
 
 def clear_cache():

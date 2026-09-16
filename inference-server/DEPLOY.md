@@ -180,8 +180,33 @@ curl -X POST http://127.0.0.1:8100/op \
 无 GPU 的本地开发环境可跑引擎单元测试：
 
 ```bash
-cd inference-server && python3 tests/test_engine.py
+cd inference-server && python3 tests/test_engine.py && python3 tests/test_jobs.py
 ```
+
+### 6.1 异步任务（分钟级任务通道，视频生成用）
+
+同步 `/graph`、`/op` 保持不变；长任务走异步任务体系：
+
+```bash
+# 1. 提交（body 同 /graph；也支持 {"name", "inputs"} 单算子任务）
+curl -X POST http://127.0.0.1:8100/jobs \
+  -H "Content-Type: application/json" \
+  -d '{"nodes": {...}}'
+# → {"job_id": "...", "status": "pending"}
+
+# 2. 轮询状态/进度（done 时 result 与 /graph 返回同构）
+curl http://127.0.0.1:8100/jobs/<job_id>
+# → {"status": "running", "progress": {"current": 12, "total": 20, "percent": 60.0}, ...}
+
+# 3. 取消：指定 job_id 取消单个；空 body 取消当前 running + 全部 pending
+curl -X POST http://127.0.0.1:8100/interrupt -H "Content-Type: application/json" \
+  -d '{"job_id": "..."}'
+curl -X POST http://127.0.0.1:8100/interrupt   # 全部取消
+```
+
+任务状态机：`pending → running → done / failed / cancelled`。任务串行执行
+（GPU 是串行资源，与同步调用经全局执行锁互斥）；取消是协作式的，
+running 任务在下一个检查点（图节点间 / 采样每步）生效。
 
 ---
 
@@ -204,8 +229,10 @@ cd inference-server && python3 tests/test_engine.py
 ```
 Docker 容器 flowx-inference-server（uvicorn + FastAPI）
 ├─ app/main.py          端点 + 算子注册（新能力在这里加一行）
+├─ app/jobs.py          异步任务：FIFO 队列 + 单 worker + 进度/取消
+├─ app/execution.py     执行上下文：线程本地 job 绑定 + 取消检查点
 ├─ app/ops.py           算子实现（纯算法，不碰网络/对象 ID）
-├─ app/engine.py        /graph 图执行引擎：拓扑排序 + 输入哈希缓存
+├─ app/engine.py        /graph 图执行引擎：拓扑排序 + 输入哈希缓存 + 执行锁
 ├─ app/model_manager.py checkpoint/LoRA 加载，LRU 常驻缓存
 ├─ app/object_store.py  MODEL/CLIP/VAE/COND/LATENT/IMAGE 对象仓库（UUID，TTL）
 └─ app/registry.py      算子注册表（名称/端口类型/描述）
