@@ -1,10 +1,16 @@
-"""模型管理：checkpoint 常驻显存，LRU 淘汰。"""
+"""模型管理：checkpoint 常驻显存，LRU 淘汰；按内容嗅探分派管道类。
+
+加载路径（ROADMAP §1 纪律）：diffusers 目录 from_pretrained / 单文件 from_single_file，
+管道类由 app.sniff 按内容嗅探（SD1.x / SDXL / 视频管道），不再写死 StableDiffusionPipeline。
+"""
 import os
 import threading
 import time
 
 import torch
-from diffusers import StableDiffusionPipeline
+import diffusers
+
+from . import sniff
 
 MODELS_DIR = os.environ.get("MODELS_DIR", "/models")
 LORAS_DIR = os.environ.get("LORAS_DIR", "/loras")
@@ -19,18 +25,28 @@ class ModelManager:
     def __init__(self):
         self._pipes = {}
         self._last_used = {}
+        self._archs = {}  # pipe_key -> 管道类名（嗅探结果，供诊断/分派）
         self._adapters = {}  # pipe_key -> set(已加载的 adapter 名)
         self._lock = threading.Lock()
 
     def resolve(self, name: str):
-        """按名称在 MODELS_DIR 中定位模型文件，可省略扩展名。"""
+        """按名称在 MODELS_DIR 中定位模型：diffusers 目录 或 safetensors/ckpt 文件
+        （可省略扩展名）。返回 (路径, key)。"""
+        d = os.path.join(MODELS_DIR, name)
+        if os.path.isdir(d):  # diffusers 目录格式（from_pretrained）
+            return d, name
         candidates = [name] if name.endswith(_EXTENSIONS) else [name + e for e in _EXTENSIONS]
         candidates.append(name)
         for c in candidates:
             p = os.path.join(MODELS_DIR, c)
             if os.path.isfile(p):
                 return p, os.path.splitext(os.path.basename(p))[0]
-        available = [f for f in os.listdir(MODELS_DIR) if f.endswith(_EXTENSIONS)] if os.path.isdir(MODELS_DIR) else []
+        available = []
+        if os.path.isdir(MODELS_DIR):
+            available = sorted(
+                [f for f in os.listdir(MODELS_DIR) if f.endswith(_EXTENSIONS)]
+                + [f + "/" for f in os.listdir(MODELS_DIR)
+                   if os.path.isdir(os.path.join(MODELS_DIR, f))])
         raise FileNotFoundError(
             f"model '{name}' not found in {MODELS_DIR}; available: {available or '(empty)'}"
         )
@@ -44,20 +60,30 @@ class ModelManager:
                 return key, False
             self._evict_if_needed()
             t0 = time.time()
-            pipe = StableDiffusionPipeline.from_single_file(
-                path, torch_dtype=torch.float16, safety_checker=None
-            )
+            loader, cls_name = sniff.sniff_arch(path)
+            cls = getattr(diffusers, cls_name, None)
+            if cls is None:
+                raise ValueError(
+                    f"diffusers has no pipeline class '{cls_name}' "
+                    f"(sniffed from '{path}'); 请升级 diffusers 或更换模型")
+            if loader == "pretrained":
+                pipe = cls.from_pretrained(path, torch_dtype=torch.float16)
+            else:
+                pipe = cls.from_single_file(path, torch_dtype=torch.float16,
+                                            safety_checker=None)
             if CPU_OFFLOAD:
                 pipe.enable_model_cpu_offload()
             else:
                 pipe = pipe.to("cuda")
             pipe.set_progress_bar_config(disable=True)
             self._pipes[key] = pipe
+            self._archs[key] = cls_name
             self._last_used[key] = time.time()
-            print(f"[model-manager] loaded '{key}' in {time.time()-t0:.1f}s", flush=True)
+            print(f"[model-manager] loaded '{key}' ({cls_name}) in {time.time()-t0:.1f}s",
+                  flush=True)
             return key, True
 
-    def get(self, name: str) -> StableDiffusionPipeline:
+    def get(self, name: str):
         key, _ = self.load(name)
         self._last_used[key] = time.time()
         return self._pipes[key]
@@ -68,6 +94,10 @@ class ModelManager:
             if p is pipe:
                 return k
         raise KeyError("pipe is not managed by ModelManager")
+
+    def arch_of(self, key: str) -> str:
+        """模型的管道类名（嗅探分派结果），如 StableDiffusionPipeline / WanPipeline。"""
+        return self._archs[key]
 
     def resolve_lora(self, name: str):
         """按名称在 LORAS_DIR 中定位 LoRA 文件，可省略扩展名。"""
@@ -106,6 +136,7 @@ class ModelManager:
             print(f"[model-manager] evicting '{victim}' (LRU)", flush=True)
             del self._pipes[victim]
             del self._last_used[victim]
+            self._archs.pop(victim, None)
             self._adapters.pop(victim, None)
             torch.cuda.empty_cache()
 

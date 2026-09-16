@@ -68,6 +68,8 @@ cd inference-server
 # 1. 放置模型文件
 mkdir -p models loras
 cp /path/to/v1-5-pruned-emaonly.safetensors models/
+# 也支持 diffusers 目录格式：把含 model_index.json 的整个目录拷进 models/
+# （视频模型 / 未来架构走这条路径，管道类按目录内容自动分派）
 # LoRA 文件（可选）放到 loras/，在 workflow / 算子调用里用文件名引用
 
 # 2.（可选）编辑 docker-compose.yml 调整环境变量，见第 3 节
@@ -154,7 +156,7 @@ docker compose down
 # 更新代码后重新构建
 docker compose up -d --build
 
-# 新增模型：把文件放进 models/ 后无需重启，下次 checkpoint.load 即用
+# 新增模型：把文件（或 diffusers 目录）放进 models/ 后无需重启，下次 checkpoint.load 即用
 # 查看当前常驻模型
 curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8100/models
 
@@ -233,7 +235,8 @@ Docker 容器 flowx-inference-server（uvicorn + FastAPI）
 ├─ app/execution.py     执行上下文：线程本地 job 绑定 + 取消检查点
 ├─ app/ops.py           算子实现（纯算法，不碰网络/对象 ID）
 ├─ app/engine.py        /graph 图执行引擎：拓扑排序 + 输入哈希缓存 + 执行锁
-├─ app/model_manager.py checkpoint/LoRA 加载，LRU 常驻缓存
+├─ app/model_manager.py checkpoint/LoRA 加载，LRU 常驻缓存，按嗅探结果分派管道类
+├─ app/sniff.py         模型架构嗅探：safetensors 头部 key / diffusers 目录 model_index.json
 ├─ app/object_store.py  MODEL/CLIP/VAE/COND/LATENT/IMAGE 对象仓库（UUID，TTL）
 └─ app/registry.py      算子注册表（名称/端口类型/描述）
 ```

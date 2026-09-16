@@ -18,7 +18,7 @@
 | 采样器 euler/dpmpp/uni_pc 等 8 种 | `samplers.py` | ⚠️ sampler 与 schedule 未解耦 |
 | 模型显存搬移 | `ENABLE_CPU_OFFLOAD=1`（diffusers 版） | ⚠️ 粗粒度但可用 |
 | dtype 探测/fallback | 硬编码 fp16 | ❌ 未做 |
-| SDXL/SD3/Flux 架构 | 仅 SD1.x UNet 路径 | ❌ 未做 |
+| SDXL/SD3/Flux 架构 | 仅 SD1.x 采样/编码路径；管道类已按内容嗅探分派（sniff.py） | ⚠️ 分派机制已备，架构适配未做 |
 | MASK/CONTROL_NET/UPSCALE_MODEL 等类型 | 仅 6 种对象类型 | ❌ 未做 |
 | 进度推送 / interrupt | 异步任务体系（/jobs 轮询进度 + /interrupt，协作式取消） | ⚠️ WS 推送未做 |
 
@@ -76,8 +76,9 @@ SD1.5 的 fp16 VAE 解码会偶发纯黑图，社区标准修法是 VAE 单独 f
 
 ### 阶段 5：SDXL 支持（主流模型门槛）
 
-- 加载：`StableDiffusionXLWorkflow.from_single_file`（按文件嗅探或文件名约定分派）
-- `clip.encode` 出 SDXL 变体：双 text encoder + pooled embedding
+- 加载：✅ 分派机制已交付（sniff.py 按 safetensors 头部 key / model_index.json 嗅探，
+  SDXL checkpoint 已路由到 StableDiffusionXLPipeline.from_single_file）
+- `clip.encode` 出 SDXL 变体：双 text encoder + pooled embedding（未做）
 - `sample` 补 `added_cond_kwargs`（time_ids/pooled）——**此时引入架构分派**，
   用「采样循环骨架 + 每架构适配函数」而非 if-else 堆积（见 §3）
 - 验收：Pony/Illustrious 系社区模型出图正常
@@ -110,8 +111,9 @@ SD1.5 的 fp16 VAE 解码会偶发纯黑图，社区标准修法是 VAE 单独 f
 
 - **异步任务体系**（视频生成分钟级，同步 HTTP 必超时）：✅ 已交付（阶段 7 合并实施）——
   `POST /jobs` 提交 → job_id 轮询进度 → `/interrupt` 取消
-- **模型管理器分派**：按模型文件/目录嗅探分派管道类（SD1.x / 视频管道），
-  本项同时是 SDXL / AuraFlow / 视频所有线的公共前置
+- **模型管理器分派**：✅ 已交付——按模型文件/目录嗅探分派管道类
+  （app/sniff.py；safetensors 头部 key 嗅探 / diffusers 目录 model_index.json），
+  同时是 SDXL / AuraFlow / 视频所有线的公共前置
 - 新类型 `VIDEO`；视频结果落盘 mp4（imageio-ffmpeg）+ `/videos/{id}` 下载端点
 - 显存治理升级：sequential offload 起步，fp8 量化留接口（视频模型 5B~14B 级）
 - 首个视频模型建议 Wan2.2-TI2V-5B（文/图生视频一体，消费级显卡可跑）；
