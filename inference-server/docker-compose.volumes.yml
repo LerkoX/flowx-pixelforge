@@ -1,0 +1,24 @@
+# 远程 daemon 部署 override：docker-compose.yml 里的 ./models 等绑定挂载指向的是
+# **daemon 所在机器**的路径；daemon 不在本机时（如 docker context = tcp://192.168.x.x）
+# 绑定挂载会挂到远端同名路径（多半是空目录），必须改用命名卷。
+#
+# 用法（叠加在 pascal override 之后）：
+#   docker compose -f docker-compose.yml -f docker-compose.pascal.yml \
+#                  -f docker-compose.volumes.yml up -d --build
+#
+# flowx-inference-models / flowx-inference-loras 是既有外部卷（内含模型权重，勿删）。
+services:
+  inference:
+    volumes:
+      - flowx-inference-models:/models
+      - flowx-inference-loras:/loras
+      - inference-input:/input
+      - inference-videos:/videos
+
+volumes:
+  flowx-inference-models:
+    external: true
+  flowx-inference-loras:
+    external: true
+  inference-input:
+  inference-videos:
