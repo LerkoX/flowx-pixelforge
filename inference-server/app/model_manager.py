@@ -68,7 +68,17 @@ class ModelManager:
                     f"diffusers has no pipeline class '{cls_name}' "
                     f"(sniffed from '{path}'); 请升级 diffusers 或更换模型")
             if loader == "pretrained":
-                pipe = cls.from_pretrained(path, torch_dtype=torch.float16)
+                # fp16 变体探测：组件带 *.fp16.safetensors 时按 variant 加载，
+                # 避免 fp32 权重先全量读内存再转半精度（大模型内存直接翻倍）
+                variant = None
+                for _root, _dirs, files in os.walk(path):
+                    if any(f.endswith(".fp16.safetensors") for f in files):
+                        variant = "fp16"
+                        break
+                kwargs = {"torch_dtype": torch.float16}
+                if variant:
+                    kwargs["variant"] = variant
+                pipe = cls.from_pretrained(path, **kwargs)
             else:
                 pipe = cls.from_single_file(path, torch_dtype=torch.float16,
                                             safety_checker=None)

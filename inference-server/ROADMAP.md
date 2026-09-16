@@ -122,6 +122,13 @@ SD1.5 的 fp16 VAE 解码会偶发纯黑图，社区标准修法是 VAE 单独 f
 - 首个视频模型 Wan2.2-TI2V-5B（文/图生视频一体，消费级显卡可跑）：✅ `video.sample`
   算子已交付（prompt/可选首帧/尺寸/帧数/fps/steps/cfg/seed，经 callback_on_step_end
   上报进度与响应取消）；前后帧走 diffusers 现成 `WanFirstLastFrameToVideoPipeline`（待接）
+  - **小显存（8GB / Pascal）替代**：Wan/CogVideoX 的 LLM 级文本编码器（T5-XXL fp16 ~9GB）
+    超 8GB 卡无解；SVD-XT 1.1（纯图生视频，无文本编码器，fp16 ~4.5GB 峰值）可行——
+    `video.sample` 已按 `__call__` 签名自适应（SVD：image 必填、cfg 映射
+    min/max_guidance_scale、fps 进采样条件）；AnimateDiff（SD1.5+运动模块 ~3.5GB）
+    需组合加载（base+adapter），后置
+  - 显存优化：`decode_chunk_size` 分块解码参数已暴露；fp32→fp16 variant 探测加载
+    （避免 fp32 全量读内存）
 - FlowX 侧：✅ 专属瘦节点 `video-gen`（异步 job 提交/轮询/超时自动取消）+
   `save-video`（mp4 下载落盘）；widget：video-gen 画布进度卡片（服务端纯渲染帧推送）、
   save-video 内嵌 mp4 播放器（小体积 base64）——外壳零改动

@@ -161,6 +161,9 @@ docker compose down
 docker compose up -d --build
 
 # 新增模型：把文件（或 diffusers 目录）放进 models/ 后无需重启，下次 checkpoint.load 即用
+# 下载模型（远程 daemon 也适用，走 hf-mirror；只拉 fp16 权重 + 配置）：
+./scripts/download-model.sh svd    # SVD-XT 1.1 图生视频（~9.6GB）
+./scripts/download-model.sh Org/some-model
 # 查看当前常驻模型
 curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8100/models
 

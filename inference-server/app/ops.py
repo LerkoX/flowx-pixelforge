@@ -178,12 +178,19 @@ def vae_encode(pipe, image):
 
 def video_sample(model, prompt, neg_prompt="", image=None,
                  width=832, height=480, num_frames=121, fps=24,
-                 steps=50, cfg=5.0, seed=-1, preview_cb=None, interrupt_check=None):
-    """Video Sample（Wan TI2V 系视频管道）：文/图生视频。
+                 steps=50, cfg=5.0, seed=-1, decode_chunk_size=0,
+                 preview_cb=None, interrupt_check=None):
+    """Video Sample：文/图生视频，一个算子兼容多种视频管道。
     返回 {'video': {'frames': [PIL...], 'fps': n}, 'seed': 实际种子}。
+
+    管道差异适配（不堆 if-else，按 __call__ 签名过滤参数）：
+    - Wan TI2V 系：prompt 文本条件，image 可选（首帧）
+    - SVD 系：image 必填（图生视频），无文本条件；cfg 映射到 min/max_guidance_scale，
+      fps 是采样条件参数（SVD 的 __call__ 接受 fps）
+    - decode_chunk_size>0 且管道支持时透传（VAE 分块解码省显存）
+
     分钟级任务——调用方应经异步 job（POST /jobs）执行；preview_cb /
-    interrupt_check 语义同 sample()，经 callback_on_step_end 每步回调。
-    image 可选：提供时管道须声明支持 image 输入（如 Wan2.2-TI2V），否则报错。"""
+    interrupt_check 语义同 sample()，经 callback_on_step_end 每步回调。"""
     import inspect
 
     pipe, patches = resolve_pipe(model)
@@ -195,16 +202,41 @@ def video_sample(model, prompt, neg_prompt="", image=None,
     seed = seed if seed >= 0 else random.randint(0, 2**32 - 1)
     gen = torch.Generator(device=exec_device_of(pipe)).manual_seed(seed)
 
-    kwargs = dict(prompt=prompt, negative_prompt=neg_prompt or None,
-                  width=width, height=height, num_frames=num_frames,
-                  num_inference_steps=steps, guidance_scale=cfg,
-                  generator=gen, output_type="pil")
-    if image is not None:
-        if "image" not in inspect.signature(pipe.__call__).parameters:
-            raise ValueError(
-                f"{type(pipe).__name__} 不接受 image 输入（非图生视频管道）；"
-                f"纯文生视频请断开 image 端口")
-        kwargs["image"] = image
+    sig = inspect.signature(pipe.__call__).parameters
+    cls_name = type(pipe).__name__
+
+    if "prompt" not in sig and image is None:
+        raise ValueError(
+            f"{cls_name} 是纯图生视频管道（image 必填），请提供首帧图像")
+    if image is not None and "image" not in sig:
+        raise ValueError(
+            f"{cls_name} 不接受 image 输入（非图生视频管道）；"
+            f"纯文生视频请断开 image 端口")
+
+    candidates = {
+        "prompt": prompt or None,
+        "negative_prompt": neg_prompt or None,
+        "image": image,
+        "width": width, "height": height,
+        "num_frames": num_frames,
+        "num_inference_steps": steps,
+        "guidance_scale": cfg,
+        "generator": gen,
+        "output_type": "pil",
+        "fps": fps,  # SVD 的采样条件参数；Wan 无此参（fps 只进 mp4 元数据）
+    }
+    if "guidance_scale" not in sig and "min_guidance_scale" in sig:
+        # SVD 系：min/max 区间引导，取恒定 cfg
+        candidates.pop("guidance_scale")
+        candidates["min_guidance_scale"] = cfg
+        candidates["max_guidance_scale"] = cfg
+    if decode_chunk_size > 0:
+        candidates["decode_chunk_size"] = decode_chunk_size
+
+    kwargs = {k: v for k, v in candidates.items() if k in sig and v is not None}
+    dropped = sorted(set(candidates) - set(kwargs) - {"prompt", "negative_prompt"})
+    if dropped:
+        print(f"[video.sample] {cls_name} 不支持的参数已忽略: {dropped}", flush=True)
 
     def on_step_end(p, i, t, cb_kwargs):
         if interrupt_check is not None:
@@ -219,8 +251,12 @@ def video_sample(model, prompt, neg_prompt="", image=None,
 
     t0 = time.time()
     try:
-        out = pipe(callback_on_step_end=on_step_end,
-                   callback_on_step_end_tensor_inputs=["latents"], **kwargs)
+        call = dict(**kwargs)
+        if "callback_on_step_end" in sig:
+            call["callback_on_step_end"] = on_step_end
+            if "callback_on_step_end_tensor_inputs" in sig:
+                call["callback_on_step_end_tensor_inputs"] = ["latents"]
+        out = pipe(**call)
     finally:
         if patches:
             try:

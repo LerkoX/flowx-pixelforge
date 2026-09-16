@@ -135,16 +135,18 @@ def _op_vae_encode(vae, image):
     inputs={"model": "MODEL", "prompt": "STRING", "neg_prompt": "STRING",
             "image": "IMAGE", "width": "INT", "height": "INT",
             "num_frames": "INT", "fps": "INT", "steps": "INT", "cfg": "FLOAT",
-            "seed": "INT", "preview_callback_url": "STRING",
+            "seed": "INT", "decode_chunk_size": "INT",
+            "preview_callback_url": "STRING",
             "preview_token": "STRING", "preview_every": "INT"},
     outputs={"video": "VIDEO", "seed": "INT"},
-    description="Video Sample（Wan TI2V 系）：文/图生视频，image 可选（首帧）。分钟级任务，"
-                "请经 POST /jobs 异步执行；进度经 job 轮询上报，preview_callback_url "
-                "推进度卡片帧（preview_every>0 启用）；/interrupt 可中途取消")
+    description="Video Sample：文/图生视频，按管道签名自适应（Wan TI2V 文本+可选首帧 / "
+                "SVD 纯图生视频，cfg 映射 min/max_guidance_scale，fps 进采样条件）。"
+                "分钟级任务，请经 POST /jobs 异步执行；进度经 job 轮询上报，"
+                "preview_callback_url 推进度卡片帧（preview_every>0 启用）；/interrupt 可取消")
 def _op_video_sample(model, prompt, neg_prompt="", image=None,
                      width=832, height=480, num_frames=121, fps=24,
-                     steps=50, cfg=5.0, seed=-1, preview_callback_url="",
-                     preview_token="", preview_every=0):
+                     steps=50, cfg=5.0, seed=-1, decode_chunk_size=0,
+                     preview_callback_url="", preview_token="", preview_every=0):
     pusher = None
     if preview_callback_url and preview_every > 0:
         pusher = preview.PreviewPusher(preview_callback_url, preview_token,
@@ -159,7 +161,7 @@ def _op_video_sample(model, prompt, neg_prompt="", image=None,
             pusher.push_pil(preview.progress_card(i + 1, total), (i + 1) / total)
 
     return ops.video_sample(model, prompt, neg_prompt, image, width, height,
-                            num_frames, fps, steps, cfg, seed,
+                            num_frames, fps, steps, cfg, seed, decode_chunk_size,
                             preview_cb=on_step,
                             interrupt_check=execution.check_cancelled)
 
