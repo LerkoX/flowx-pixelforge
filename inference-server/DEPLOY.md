@@ -114,6 +114,9 @@ docker compose -f docker-compose.yml -f docker-compose.pascal.yml up -d --build
 | `ENABLE_CPU_OFFLOAD` | `0` | `1` = 淘汰前换出到内存，再次换入更快（占用宿主机内存） |
 | `INFERENCE_TOKEN` | 空 | **非空则启用 Bearer 鉴权**，公网暴露时强烈建议设置 |
 | `OBJECT_TTL_SECONDS` | `3600` | 对象仓库（中间张量）的 TTL |
+| `INPUT_DIR` | `/input` | image.load 算子读取服务端本地图片的目录（compose 默认挂载 `./input`） |
+| `VIDEO_DIR` | `/videos` | VIDEO 对象 mp4 落盘目录（compose 默认挂载 `./videos`），`GET /videos/{id}` 下载 |
+| `MAX_UPLOAD_MB` | `32` | POST /images 上传体积上限 |
 | `PORT` | `8100` | 容器内监听端口（在 Dockerfile ENV / compose 端口映射里改） |
 
 启用鉴权后，所有业务端点需携带：
@@ -237,7 +240,8 @@ Docker 容器 flowx-inference-server（uvicorn + FastAPI）
 ├─ app/engine.py        /graph 图执行引擎：拓扑排序 + 输入哈希缓存 + 执行锁
 ├─ app/model_manager.py checkpoint/LoRA 加载，LRU 常驻缓存，按嗅探结果分派管道类
 ├─ app/sniff.py         模型架构嗅探：safetensors 头部 key / diffusers 目录 model_index.json
-├─ app/object_store.py  MODEL/CLIP/VAE/COND/LATENT/IMAGE 对象仓库（UUID，TTL）
+├─ app/object_store.py  MODEL/CLIP/VAE/COND/LATENT/IMAGE/VIDEO 对象仓库（UUID，TTL；VIDEO 落盘）
+├─ app/video.py         VIDEO 对象 mp4 编码（imageio-ffmpeg 内置静态 ffmpeg）
 └─ app/registry.py      算子注册表（名称/端口类型/描述）
 ```
 

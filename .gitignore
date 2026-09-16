@@ -3,3 +3,7 @@ __pycache__/
 .venv/
 node_modules/
 .env
+inference-server/models/
+inference-server/loras/
+inference-server/input/
+inference-server/videos/

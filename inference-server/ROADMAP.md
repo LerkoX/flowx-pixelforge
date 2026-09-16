@@ -19,7 +19,7 @@
 | 模型显存搬移 | `ENABLE_CPU_OFFLOAD=1`（diffusers 版） | ⚠️ 粗粒度但可用 |
 | dtype 探测/fallback | 硬编码 fp16 | ❌ 未做 |
 | SDXL/SD3/Flux 架构 | 仅 SD1.x 采样/编码路径；管道类已按内容嗅探分派（sniff.py） | ⚠️ 分派机制已备，架构适配未做 |
-| MASK/CONTROL_NET/UPSCALE_MODEL 等类型 | 仅 6 种对象类型 | ❌ 未做 |
+| MASK/CONTROL_NET/UPSCALE_MODEL 等类型 | VIDEO 已加入（共 7 种对象类型） | ⚠️ 控制/放大类未做 |
 | 进度推送 / interrupt | 异步任务体系（/jobs 轮询进度 + /interrupt，协作式取消） | ⚠️ WS 推送未做 |
 
 ## 1. 扩展方法论（贯穿所有阶段）
@@ -114,7 +114,9 @@ SD1.5 的 fp16 VAE 解码会偶发纯黑图，社区标准修法是 VAE 单独 f
 - **模型管理器分派**：✅ 已交付——按模型文件/目录嗅探分派管道类
   （app/sniff.py；safetensors 头部 key 嗅探 / diffusers 目录 model_index.json），
   同时是 SDXL / AuraFlow / 视频所有线的公共前置
-- 新类型 `VIDEO`；视频结果落盘 mp4（imageio-ffmpeg）+ `/videos/{id}` 下载端点
+- 新类型 `VIDEO`；✅ 已交付——视频结果 put 时即编码 mp4 落盘（imageio-ffmpeg，
+  自带静态 ffmpeg 二进制）+ `GET /videos/{id}` 下载端点（对标 `/images/{id}`），
+  对象过期/清理时同步删除落盘文件
 - 显存治理升级：sequential offload 起步，fp8 量化留接口（视频模型 5B~14B 级）
 - 首个视频模型建议 Wan2.2-TI2V-5B（文/图生视频一体，消费级显卡可跑）；
   前后帧走 diffusers 现成 `WanFirstLastFrameToVideoPipeline`

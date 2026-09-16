@@ -1,7 +1,8 @@
 """FlowX 推理服务 = 远程能力运行时（ComfyUI 语义的公共能力层）。
 
 接口：
-- 系统：/health、/images/{id}（PNG 下载 / thumb 缩略图）、/gc（清对象仓库+缓存）
+- 系统：/health、/images/{id}（PNG 下载 / thumb 缩略图）、/videos/{id}（mp4 下载）、
+  /gc（清对象仓库+缓存）
 - 能力运行时（同步）：/ops（列出算子）、/op（单算子）、/graph（整图执行，带缓存）
 - 能力运行时（异步）：POST /jobs 提交 → GET /jobs/{id} 轮询状态/进度 →
   POST /interrupt 取消；视频等分钟级任务走此通道（同步 HTTP 会超时）
@@ -13,7 +14,7 @@ import os
 
 import torch
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 from PIL import Image
 from pydantic import BaseModel, Field
 
@@ -25,12 +26,15 @@ from .registry import Registry
 
 TOKEN = os.environ.get("INFERENCE_TOKEN", "")
 INPUT_DIR = os.environ.get("INPUT_DIR", "/input")
+VIDEO_DIR = os.environ.get("VIDEO_DIR", "/videos")
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_MB", "32")) * 1024 * 1024
 
 app = FastAPI(title="flowx-inference-server")
 models = ModelManager()
-store = ObjectStore(ttl_seconds=int(os.environ.get("OBJECT_TTL_SECONDS", "3600")))
+store = ObjectStore(ttl_seconds=int(os.environ.get("OBJECT_TTL_SECONDS", "3600")),
+                    video_dir=VIDEO_DIR)
 registry = Registry()
+os.makedirs(VIDEO_DIR, exist_ok=True)
 
 
 def auth(authorization: str = Header(default="")):
@@ -210,6 +214,21 @@ def get_image(image_id: str, index: int = 0, thumb: int = 0):
     buf = io.BytesIO()
     pil.save(buf, format="PNG")
     return Response(content=buf.getvalue(), media_type="image/png")
+
+
+@app.get("/videos/{video_id}", dependencies=[Depends(auth)])
+def get_video(video_id: str):
+    """下载视频 mp4（对标 /images/{id}）：VIDEO 对象在 put 时已编码落盘。"""
+    try:
+        data = store.get(video_id, "VIDEO")["data"]
+    except (KeyError, TypeError) as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    path = data.get("path") if isinstance(data, dict) else None
+    if not path or not os.path.isfile(path):
+        raise HTTPException(status_code=404,
+                            detail="video file missing (expired or not persisted)")
+    return FileResponse(path, media_type="video/mp4",
+                        filename=os.path.basename(path))
 
 
 @app.post("/gc", dependencies=[Depends(auth)])

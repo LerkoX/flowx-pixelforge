@@ -8,6 +8,7 @@ services:
       MODELS_DIR: /models
       LORAS_DIR: /loras
       INPUT_DIR: /input               # image.load 算子读取服务端本地图片的目录
+      VIDEO_DIR: /videos              # VIDEO 对象 mp4 落盘目录（GET /videos/{id} 下载）
       MAX_RESIDENT_MODELS: "2"        # 显存常驻模型上限，超出按 LRU 淘汰
       ENABLE_CPU_OFFLOAD: "0"         # 1 = 淘汰前换出到内存，再换入更快
       INFERENCE_TOKEN: ""             # 非空则启用 Bearer 鉴权
@@ -15,6 +16,7 @@ services:
       - ./models:/models              # 把 safetensors/ckpt 模型文件放到 ./models
       - ./loras:/loras                # LoRA 文件放到 ./loras
       - ./input:/input                # 图生图原图放 ./input（image.load 算子读取；客户端上传走 POST /images 无需此目录）
+      - ./videos:/videos              # 视频结果 mp4 落盘目录
     restart: always
     deploy:
       resources:
