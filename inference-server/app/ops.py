@@ -176,7 +176,7 @@ def vae_encode(pipe, image):
     return {"latent": (latent * pipe.vae.config.scaling_factor).to(torch.float16)}
 
 
-def video_sample(model, prompt, neg_prompt="", image=None,
+def video_sample(model, prompt="", neg_prompt="", image=None,
                  width=832, height=480, num_frames=121, fps=24,
                  steps=50, cfg=5.0, seed=-1, decode_chunk_size=0,
                  preview_cb=None, interrupt_check=None):

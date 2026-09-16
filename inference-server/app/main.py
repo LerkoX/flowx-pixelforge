@@ -143,7 +143,7 @@ def _op_vae_encode(vae, image):
                 "SVD 纯图生视频，cfg 映射 min/max_guidance_scale，fps 进采样条件）。"
                 "分钟级任务，请经 POST /jobs 异步执行；进度经 job 轮询上报，"
                 "preview_callback_url 推进度卡片帧（preview_every>0 启用）；/interrupt 可取消")
-def _op_video_sample(model, prompt, neg_prompt="", image=None,
+def _op_video_sample(model, prompt="", neg_prompt="", image=None,
                      width=832, height=480, num_frames=121, fps=24,
                      steps=50, cfg=5.0, seed=-1, decode_chunk_size=0,
                      preview_callback_url="", preview_token="", preview_every=0):
