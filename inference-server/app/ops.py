@@ -27,6 +27,19 @@ def resolve_pipe(model):
     return model, []
 
 
+def exec_device_of(pipe):
+    """取执行设备：offload（model/sequential）模式下子模块驻留 meta/cpu，
+    pipe.device 属性会返回 meta（取第一个模块的设备），必须用 diffusers 记录的
+    _execution_device（offload 钩子的实际计算设备）。无 offload 时回退 pipe.device。"""
+    dev = getattr(pipe, "_execution_device", None)
+    if dev is not None and str(dev) != "meta":
+        return dev
+    dev = pipe.device
+    if str(dev) == "meta":  # 双保险：meta 无意义，落到可用设备
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return dev
+
+
 def _enable_adapters(pipe, patches):
     """采样前启用补丁；无补丁时确保 LoRA 全部关闭（管道是常驻共享的）。"""
     if patches:
@@ -52,7 +65,7 @@ def clip_encode(pipe, text):
         truncation=True, return_tensors="pt",
     )
     with torch.no_grad():
-        cond = pipe.text_encoder(tokens.input_ids.to(pipe.device))[0]
+        cond = pipe.text_encoder(tokens.input_ids.to(exec_device_of(pipe)))[0]
     return {"cond": cond}
 
 
@@ -85,7 +98,7 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
     _enable_adapters(pipe, patches)
 
     seed = seed if seed >= 0 else random.randint(0, 2**32 - 1)
-    device = pipe.device
+    device = exec_device_of(pipe)
     sched = make_scheduler(sampler_name, pipe.scheduler.config)
     sched.set_timesteps(steps, device=device)
     timesteps = sched.timesteps
@@ -157,7 +170,7 @@ def vae_encode(pipe, image):
     乘 scaling_factor 与 vae_decode 的除法互逆（ComfyUI VAEEncode 同语义）。"""
     images = image if isinstance(image, list) else [image]
     tensors = [pipe.image_processor.preprocess(img) for img in images]
-    img_t = torch.cat(tensors).to(device=pipe.device, dtype=pipe.vae.dtype)
+    img_t = torch.cat(tensors).to(device=exec_device_of(pipe), dtype=pipe.vae.dtype)
     with torch.no_grad():
         latent = pipe.vae.encode(img_t).latent_dist.sample()
     return {"latent": (latent * pipe.vae.config.scaling_factor).to(torch.float16)}
@@ -180,7 +193,7 @@ def video_sample(model, prompt, neg_prompt="", image=None,
     _enable_adapters(pipe, patches)
 
     seed = seed if seed >= 0 else random.randint(0, 2**32 - 1)
-    gen = torch.Generator(device=pipe.device).manual_seed(seed)
+    gen = torch.Generator(device=exec_device_of(pipe)).manual_seed(seed)
 
     kwargs = dict(prompt=prompt, negative_prompt=neg_prompt or None,
                   width=width, height=height, num_frames=num_frames,
