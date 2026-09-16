@@ -10,7 +10,7 @@ services:
       INPUT_DIR: /input               # image.load 算子读取服务端本地图片的目录
       VIDEO_DIR: /videos              # VIDEO 对象 mp4 落盘目录（GET /videos/{id} 下载）
       MAX_RESIDENT_MODELS: "2"        # 显存常驻模型上限，超出按 LRU 淘汰
-      ENABLE_CPU_OFFLOAD: "0"         # 1 = 淘汰前换出到内存，再换入更快
+      OFFLOAD_MODE: "none"            # 显存治理：none / model（子模块搬移）/ sequential（逐层搬移，视频模型用）
       INFERENCE_TOKEN: ""             # 非空则启用 Bearer 鉴权
     volumes:
       - ./models:/models              # 把 safetensors/ckpt 模型文件放到 ./models

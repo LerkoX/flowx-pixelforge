@@ -16,7 +16,7 @@
 | ModelPatcher.clone + add_patches | `ops.ModelRef`（LoRA 补丁视图，可串联） | ✅ 同构 |
 | ckpt/safetensors 加载 + key 映射 | diffusers `from_single_file()` | ✅ 免费获得 |
 | 采样器 euler/dpmpp/uni_pc 等 8 种 | `samplers.py` | ⚠️ sampler 与 schedule 未解耦 |
-| 模型显存搬移 | `ENABLE_CPU_OFFLOAD=1`（diffusers 版） | ⚠️ 粗粒度但可用 |
+| 模型显存搬移 | `OFFLOAD_MODE=none/model/sequential`（旧 `ENABLE_CPU_OFFLOAD=1` 兼容映射 model） | ✅ 三档可用 |
 | dtype 探测/fallback | 硬编码 fp16 | ❌ 未做 |
 | SDXL/SD3/Flux 架构 | 仅 SD1.x 采样/编码路径；管道类已按内容嗅探分派（sniff.py） | ⚠️ 分派机制已备，架构适配未做 |
 | MASK/CONTROL_NET/UPSCALE_MODEL 等类型 | VIDEO 已加入（共 7 种对象类型） | ⚠️ 控制/放大类未做 |
@@ -117,7 +117,8 @@ SD1.5 的 fp16 VAE 解码会偶发纯黑图，社区标准修法是 VAE 单独 f
 - 新类型 `VIDEO`；✅ 已交付——视频结果 put 时即编码 mp4 落盘（imageio-ffmpeg，
   自带静态 ffmpeg 二进制）+ `GET /videos/{id}` 下载端点（对标 `/images/{id}`），
   对象过期/清理时同步删除落盘文件
-- 显存治理升级：sequential offload 起步，fp8 量化留接口（视频模型 5B~14B 级）
+- 显存治理升级：✅ sequential offload 已交付（`OFFLOAD_MODE=sequential`），
+  fp8 量化接口已预留（`QUANTIZATION=fp8` 识别配置、告警未实现，实现后置）（视频模型 5B~14B 级）
 - 首个视频模型建议 Wan2.2-TI2V-5B（文/图生视频一体，消费级显卡可跑）；
   前后帧走 diffusers 现成 `WanFirstLastFrameToVideoPipeline`
 - FlowX 侧：视频节点先行用 `inference-op`，widget 视频播放器由节点包 UI 自行实现
@@ -137,8 +138,9 @@ SD1.5 的 fp16 VAE 解码会偶发纯黑图，社区标准修法是 VAE 单独 f
 | 阶段 | 机制 | 粒度 |
 | --- | --- | --- |
 | 现在 | `MAX_RESIDENT_MODELS` LRU 整模型淘汰 | pipe 级 |
-| 三件套起 | `ENABLE_CPU_OFFLOAD=1`（diffusers 按子模块搬移） | 子模块级 |
-| 远期（如有需要） | 参考 comfy/model_management 做张量级搬移 | 层级 |
+| 三件套起 | `OFFLOAD_MODE=model`（diffusers 按子模块搬移） | 子模块级 |
+| 视频大模型 | `OFFLOAD_MODE=sequential`（逐层搬移，吞吐最低） | 层级（diffusers 自带） |
+| 远期（如有需要） | 参考 comfy/model_management 做张量级搬移 | 张量级 |
 
 原则：diffusers 自带的 offload 够用就不自研；整模型淘汰保留作为兜底。
 

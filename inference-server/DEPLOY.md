@@ -111,7 +111,8 @@ docker compose -f docker-compose.yml -f docker-compose.pascal.yml up -d --build
 | `MODELS_DIR` | `/models` | checkpoint 目录（compose 默认挂载 `./models`） |
 | `LORAS_DIR` | `/loras` | LoRA 目录（compose 默认挂载 `./loras`） |
 | `MAX_RESIDENT_MODELS` | `2` | 显存常驻模型上限，超出按 LRU 淘汰 |
-| `ENABLE_CPU_OFFLOAD` | `0` | `1` = 淘汰前换出到内存，再次换入更快（占用宿主机内存） |
+| `OFFLOAD_MODE` | `none` | 显存治理档位：`none` 整模型驻留 / `model` 子模块级搬移 / `sequential` 逐层搬移（最省显存、吞吐最低，视频模型用）。旧开关 `ENABLE_CPU_OFFLOAD=1` 仍兼容（等价 `model`） |
+| `QUANTIZATION` | `none` | 权重量化：`fp8` 接口已预留（当前版本识别配置但未实现，加载时告警并按原 dtype 继续） |
 | `INFERENCE_TOKEN` | 空 | **非空则启用 Bearer 鉴权**，公网暴露时强烈建议设置 |
 | `OBJECT_TTL_SECONDS` | `3600` | 对象仓库（中间张量）的 TTL |
 | `INPUT_DIR` | `/input` | image.load 算子读取服务端本地图片的目录（compose 默认挂载 `./input`） |
@@ -220,7 +221,7 @@ running 任务在下一个检查点（图节点间 / 采样每步）生效。
 | 现象 | 排查 |
 | --- | --- |
 | `cuda_available: false` | 宿主机 `nvidia-smi` 是否正常 → toolkit 是否安装并 `restart docker` → compose 里 `deploy.resources` 段是否保留 |
-| 启动时报 OOM / CUDA out of memory | 降低 `MAX_RESIDENT_MODELS` 到 1；或开 `ENABLE_CPU_OFFLOAD=1`；确认没有其他进程占显存 |
+| 启动时报 OOM / CUDA out of memory | 降低 `MAX_RESIDENT_MODELS` 到 1；或 `OFFLOAD_MODE=model`（还不够再上 `sequential`）；确认没有其他进程占显存 |
 | `checkpoint.load` 报文件不存在 | 确认文件名（含扩展名）与 `models/` 内一致；容器内路径是 `/models` |
 | 401 invalid token | `INFERENCE_TOKEN` 设置后，请求头必须是 `Authorization: Bearer <token>`（注意 Bearer 后一个空格） |
 | 构建拉取基础镜像慢 | `pytorch/pytorch` 镜像约 8 GB，可预先 `docker pull`，或配置镜像加速器 |
@@ -239,6 +240,7 @@ Docker 容器 flowx-inference-server（uvicorn + FastAPI）
 ├─ app/ops.py           算子实现（纯算法，不碰网络/对象 ID）
 ├─ app/engine.py        /graph 图执行引擎：拓扑排序 + 输入哈希缓存 + 执行锁
 ├─ app/model_manager.py checkpoint/LoRA 加载，LRU 常驻缓存，按嗅探结果分派管道类
+├─ app/offload.py       显存治理配置：OFFLOAD_MODE（none/model/sequential）+ fp8 量化接口
 ├─ app/sniff.py         模型架构嗅探：safetensors 头部 key / diffusers 目录 model_index.json
 ├─ app/object_store.py  MODEL/CLIP/VAE/COND/LATENT/IMAGE/VIDEO 对象仓库（UUID，TTL；VIDEO 落盘）
 ├─ app/video.py         VIDEO 对象 mp4 编码（imageio-ffmpeg 内置静态 ffmpeg）

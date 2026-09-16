@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 
 from . import engine, execution, ops, preview
 from .jobs import JobManager
-from .model_manager import ModelManager
+from .model_manager import OFFLOAD_MODE, QUANTIZATION, ModelManager
 from .object_store import ObjectStore
 from .registry import Registry
 
@@ -163,7 +163,8 @@ class InterruptReq(BaseModel):
 @app.get("/health")
 def health():
     info = {"status": "ok", "cuda_available": torch.cuda.is_available(),
-            "resident_models": models.resident()}
+            "resident_models": models.resident(),
+            "offload_mode": OFFLOAD_MODE, "quantization": QUANTIZATION}
     if torch.cuda.is_available():
         free, total = torch.cuda.mem_get_info()
         info.update({

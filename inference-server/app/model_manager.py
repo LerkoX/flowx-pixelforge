@@ -10,12 +10,13 @@ import time
 import torch
 import diffusers
 
-from . import sniff
+from . import offload, sniff
 
 MODELS_DIR = os.environ.get("MODELS_DIR", "/models")
 LORAS_DIR = os.environ.get("LORAS_DIR", "/loras")
 MAX_RESIDENT = int(os.environ.get("MAX_RESIDENT_MODELS", "2"))
-CPU_OFFLOAD = os.environ.get("ENABLE_CPU_OFFLOAD", "0") == "1"
+OFFLOAD_MODE = offload.resolve_offload_mode()   # none / model / sequential
+QUANTIZATION = offload.resolve_quantization()   # fp8 接口预留，未实现时告警
 
 _EXTENSIONS = (".safetensors", ".ckpt")
 _LORA_EXTENSIONS = (".safetensors", ".pt", ".bin")
@@ -71,10 +72,16 @@ class ModelManager:
             else:
                 pipe = cls.from_single_file(path, torch_dtype=torch.float16,
                                             safety_checker=None)
-            if CPU_OFFLOAD:
+            if OFFLOAD_MODE == "sequential":
+                # 逐层搬移（最省显存，吞吐最低）；调用后不得再 pipe.to("cuda")
+                pipe.enable_sequential_cpu_offload()
+            elif OFFLOAD_MODE == "model":
                 pipe.enable_model_cpu_offload()
             else:
                 pipe = pipe.to("cuda")
+            if QUANTIZATION != "none":
+                print(f"[model-manager] WARNING: QUANTIZATION={QUANTIZATION} "
+                      f"接口已预留，当前版本未实现，按原 dtype 加载", flush=True)
             pipe.set_progress_bar_config(disable=True)
             self._pipes[key] = pipe
             self._archs[key] = cls_name
