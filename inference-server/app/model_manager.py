@@ -55,6 +55,39 @@ class ModelManager:
             f"model '{name}' not found in {MODELS_DIR}; available: {available or '(empty)'}"
         )
 
+    def _instantiate(self, path, loader, cls_name):
+        """按嗅探结果实例化管道（fp16、CPU 常驻；不做 offload/上卡，由调用方决定）。"""
+        cls = getattr(diffusers, cls_name, None)
+        if cls is None:
+            raise ValueError(
+                f"diffusers has no pipeline class '{cls_name}' "
+                f"(sniffed from '{path}'); 请升级 diffusers 或更换模型")
+        if loader == "pretrained":
+            # fp16 变体探测：组件带 *.fp16.safetensors 时按 variant 加载，
+            # 避免 fp32 权重先全量读内存再转半精度（大模型内存直接翻倍）
+            variant = None
+            for _root, _dirs, files in os.walk(path):
+                if any(f.endswith(".fp16.safetensors") for f in files):
+                    variant = "fp16"
+                    break
+            kwargs = {"torch_dtype": torch.float16}
+            if variant:
+                kwargs["variant"] = variant
+            return cls.from_pretrained(path, **kwargs)
+        return cls.from_single_file(path, torch_dtype=torch.float16,
+                                    safety_checker=None)
+
+    def _apply_offload(self, pipe):
+        """按 OFFLOAD_MODE 应用显存治理；none 时直接上卡。"""
+        if OFFLOAD_MODE == "sequential":
+            # 逐层搬移（最省显存，吞吐最低）；调用后不得再 pipe.to("cuda")
+            pipe.enable_sequential_cpu_offload()
+        elif OFFLOAD_MODE == "model":
+            pipe.enable_model_cpu_offload()
+        else:
+            pipe = pipe.to("cuda")
+        return pipe
+
     def load(self, name: str):
         """加载模型到显存（幂等：已常驻则直接返回）。返回 (model_id, newly_loaded)。"""
         path, key = self.resolve(name)
@@ -65,37 +98,12 @@ class ModelManager:
             self._evict_if_needed()
             t0 = time.time()
             loader, cls_name = sniff.sniff_arch(path)
-            cls = getattr(diffusers, cls_name, None)
-            if cls is None:
-                raise ValueError(
-                    f"diffusers has no pipeline class '{cls_name}' "
-                    f"(sniffed from '{path}'); 请升级 diffusers 或更换模型")
-            if loader == "pretrained":
-                # fp16 变体探测：组件带 *.fp16.safetensors 时按 variant 加载，
-                # 避免 fp32 权重先全量读内存再转半精度（大模型内存直接翻倍）
-                variant = None
-                for _root, _dirs, files in os.walk(path):
-                    if any(f.endswith(".fp16.safetensors") for f in files):
-                        variant = "fp16"
-                        break
-                kwargs = {"torch_dtype": torch.float16}
-                if variant:
-                    kwargs["variant"] = variant
-                pipe = cls.from_pretrained(path, **kwargs)
-            else:
-                pipe = cls.from_single_file(path, torch_dtype=torch.float16,
-                                            safety_checker=None)
+            pipe = self._instantiate(path, loader, cls_name)
             if VAE_FP32 and cls_name in sniff.IMAGE_ARCHS:
                 # 须在 offload 启用前转 dtype（offload 钩子只搬移不转精度）
                 pipe.vae.to(torch.float32)
                 print("[model-manager] vae -> fp32 (VAE_FP32=1, 防黑图)", flush=True)
-            if OFFLOAD_MODE == "sequential":
-                # 逐层搬移（最省显存，吞吐最低）；调用后不得再 pipe.to("cuda")
-                pipe.enable_sequential_cpu_offload()
-            elif OFFLOAD_MODE == "model":
-                pipe.enable_model_cpu_offload()
-            else:
-                pipe = pipe.to("cuda")
+            pipe = self._apply_offload(pipe)
             if QUANTIZATION != "none":
                 print(f"[model-manager] WARNING: QUANTIZATION={QUANTIZATION} "
                       f"接口已预留，当前版本未实现，按原 dtype 加载", flush=True)
