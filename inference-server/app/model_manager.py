@@ -108,6 +108,9 @@ class ModelManager:
             return key, True
 
     def get(self, name: str):
+        if name in self._pipes:  # 组合键（base+motion:x）不是文件路径，命中缓存直接返回
+            self._last_used[name] = time.time()
+            return self._pipes[name]
         key, _ = self.load(name)
         self._last_used[key] = time.time()
         return self._pipes[key]
@@ -118,6 +121,67 @@ class ModelManager:
             if p is pipe:
                 return k
         raise KeyError("pipe is not managed by ModelManager")
+
+    def resolve_motion(self, name: str):
+        """在 MODELS_DIR/motion/ 下定位 MotionAdapter（diffusers 目录或 safetensors 单文件）。"""
+        mdir = os.path.join(MODELS_DIR, "motion")
+        d = os.path.join(mdir, name)
+        if os.path.isdir(d):
+            return d
+        for c in ([name] if name.endswith(".safetensors") else [name + ".safetensors", name]):
+            p = os.path.join(mdir, c)
+            if os.path.isfile(p):
+                return p
+        available = sorted(os.listdir(mdir)) if os.path.isdir(mdir) else []
+        raise FileNotFoundError(
+            f"motion adapter '{name}' not found in {mdir}; available: {available or '(empty)'}")
+
+    def load_motion(self, base_key: str, motion: str):
+        """把 MotionAdapter 组合进已常驻的 SD1.x 管道 → AnimateDiffPipeline。
+        组合管以独立缓存键 '{base}+motion:{motion}' 常驻，参与同一 LRU。
+        返回 (key, newly_loaded)。"""
+        key = f"{base_key}+motion:{motion}"
+        with self._lock:
+            if key in self._pipes:
+                self._last_used[key] = time.time()
+                return key, False
+            if base_key not in self._pipes:
+                raise KeyError(
+                    f"base model '{base_key}' not resident; 请先 checkpoint.load")
+            base = self._pipes[base_key]  # 局部引用保住组件，供下方组装复用
+            mpath = self.resolve_motion(motion)
+            self._evict_if_needed()  # MAX_RESIDENT=1 时会顶掉 base 缓存项
+            t0 = time.time()
+            from diffusers import AnimateDiffPipeline, MotionAdapter
+            if os.path.isdir(mpath):
+                try:
+                    adapter = MotionAdapter.from_pretrained(
+                        mpath, variant="fp16", torch_dtype=torch.float16)
+                except Exception as e:
+                    print(f"[model-manager] motion fp16 variant 不可用（{e}），回退默认权重", flush=True)
+                    adapter = MotionAdapter.from_pretrained(mpath, torch_dtype=torch.float16)
+            else:
+                adapter = MotionAdapter.from_single_file(mpath, torch_dtype=torch.float16)
+            # AnimateDiffPipeline 无 from_single_file（0.30.3），但构造函数接受普通
+            # UNet2DConditionModel 并自动 UNetMotionModel.from_unet2d 转换（复制 UNet 权重 ~0.9GB）
+            pipe = AnimateDiffPipeline(
+                vae=base.vae, text_encoder=base.text_encoder, tokenizer=base.tokenizer,
+                unet=base.unet, motion_adapter=adapter, scheduler=base.scheduler,
+                feature_extractor=getattr(base, "feature_extractor", None),
+                image_encoder=None)
+            if OFFLOAD_MODE == "sequential":
+                pipe.enable_sequential_cpu_offload()
+            elif OFFLOAD_MODE == "model":
+                pipe.enable_model_cpu_offload()
+            else:
+                pipe = pipe.to("cuda")
+            pipe.set_progress_bar_config(disable=True)
+            self._pipes[key] = pipe
+            self._archs[key] = "AnimateDiffPipeline"
+            self._last_used[key] = time.time()
+            print(f"[model-manager] composed '{key}' (AnimateDiffPipeline) "
+                  f"in {time.time()-t0:.1f}s", flush=True)
+            return key, True
 
     def arch_of(self, key: str) -> str:
         """模型的管道类名（嗅探分派结果），如 StableDiffusionPipeline / WanPipeline。"""

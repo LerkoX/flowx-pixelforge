@@ -4,6 +4,7 @@
 #
 # 用法：./scripts/download-model.sh <preset|repo-id>
 #   svd        SVD-XT 1.1 图生视频（ModelScope 镜像，fp16 ~4.5GB）
+#   motion     AnimateDiff 运动模块 v1-5-2（hf-mirror，fp16 ~0.9GB，进 motion/ 子目录）
 #   其他 repo  走 HF（hf-mirror）：./scripts/download-model.sh Org/some-model
 #
 # 目标位置用 TARGET 环境变量指定（docker -v 语法，默认 D:/flowx-data/models）：
@@ -25,6 +26,19 @@ case "$1" in
       modelscope download --model '$MS_REPO' \
         --include '*.json' '*.fp16.safetensors' \
         --local_dir '/models/$DIR'
+    "
+    ;;
+  motion)
+    # AnimateDiff v1.5 系运动模块（配任意 SD1.x checkpoint）；进 motion/ 子目录，
+    # model_manager.resolve_motion 在此查找
+    REPO="guoyww/animatediff-motion-adapter-v1-5-2"
+    DIR="motion/animatediff-motion-adapter-v1-5-2"
+    echo ">> [hf-mirror] $REPO -> $TARGET/$DIR (fp16-only)"
+    docker run --rm -v "$TARGET":/models python:3.11-slim sh -c "
+      pip install -q huggingface_hub &&
+      HF_ENDPOINT=https://hf-mirror.com hf download '$REPO' \
+        --include '*.json' '*.fp16.safetensors' \
+        --local-dir '/models/$DIR'
     "
     ;;
   "")

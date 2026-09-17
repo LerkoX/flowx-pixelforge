@@ -156,6 +156,17 @@ def lora_apply(models, model, lora, strength=1.0):
             "clip": pipe}
 
 
+def motion_load(models, model, motion):
+    """Motion 加载：把 MotionAdapter 组合进 SD1.x 基础管道 → AnimateDiffPipeline（文生视频）。
+    返回与 checkpoint_load 同构的 model/clip/vae 三视图，下游节点接线方式不变。"""
+    pipe, patches = resolve_pipe(model)
+    if patches:
+        raise ValueError("motion.load 不接受打过 LoRA 补丁的 MODEL（先组合运动模块，再挂 LoRA）")
+    key, _ = models.load_motion(models.key_of(pipe), motion)
+    ad_pipe = models.get(key)
+    return {"model": ad_pipe, "clip": ad_pipe, "vae": ad_pipe}
+
+
 def vae_decode(pipe, latents):
     """VAE Decode：latent → PIL 图像（batch>1 时为列表）。
     latent 按 VAE 实际 dtype 转换（M3：VAE 可能已独立转 fp32 防黑图，

@@ -104,6 +104,16 @@ def _op_sample(model, pos, neg, latent, seed=-1, steps=20, cfg=7.0,
 
 
 @registry.register(
+    "motion.load",
+    inputs={"model": "MODEL", "motion": "STRING"},
+    outputs={"model": "MODEL", "clip": "CLIP", "vae": "VAE"},
+    description="Motion 加载：SD1.x checkpoint + MotionAdapter → AnimateDiffPipeline（文生视频）；"
+                "motion 为 MODELS_DIR/motion/ 下的 diffusers 目录名或 safetensors 文件名（可省略扩展名）")
+def _op_motion_load(model, motion):
+    return ops.motion_load(models, model, motion)
+
+
+@registry.register(
     "lora.apply",
     inputs={"model": "MODEL", "lora": "STRING", "strength": "FLOAT"},
     outputs={"model": "MODEL", "clip": "CLIP"},
