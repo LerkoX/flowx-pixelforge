@@ -156,13 +156,12 @@ def lora_apply(models, model, lora, strength=1.0):
             "clip": pipe}
 
 
-def motion_load(models, model, motion):
-    """Motion 加载：把 MotionAdapter 组合进 SD1.x 基础管道 → AnimateDiffPipeline（文生视频）。
-    返回与 checkpoint_load 同构的 model/clip/vae 三视图，下游节点接线方式不变。"""
-    pipe, patches = resolve_pipe(model)
-    if patches:
-        raise ValueError("motion.load 不接受打过 LoRA 补丁的 MODEL（先组合运动模块，再挂 LoRA）")
-    key, _ = models.load_motion(models.key_of(pipe), motion)
+def motion_load(models, ckpt, motion):
+    """Motion 加载：SD1.x checkpoint + MotionAdapter → AnimateDiffPipeline（文生视频）。
+    直接收底模名（非 MODEL 引用）：组合过程需要全新实例化底模，先 checkpoint.load
+    只会让旧底模被对象仓库钉在内存里（8GB WSL 会 OOM）。
+    返回与 checkpoint_load 同构的 model/clip/vae 三视图。"""
+    key, _ = models.load_motion(ckpt, motion)
     ad_pipe = models.get(key)
     return {"model": ad_pipe, "clip": ad_pipe, "vae": ad_pipe}
 

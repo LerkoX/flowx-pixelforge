@@ -105,12 +105,14 @@ def _op_sample(model, pos, neg, latent, seed=-1, steps=20, cfg=7.0,
 
 @registry.register(
     "motion.load",
-    inputs={"model": "MODEL", "motion": "STRING"},
+    inputs={"ckpt": "STRING", "motion": "STRING"},
     outputs={"model": "MODEL", "clip": "CLIP", "vae": "VAE"},
-    description="Motion 加载：SD1.x checkpoint + MotionAdapter → AnimateDiffPipeline（文生视频）；"
-                "motion 为 MODELS_DIR/motion/ 下的 diffusers 目录名或 safetensors 文件名（可省略扩展名）")
-def _op_motion_load(model, motion):
-    return ops.motion_load(models, model, motion)
+    description="Motion 加载：SD1.x checkpoint + MotionAdapter → AnimateDiffPipeline（文生视频）。"
+                "ckpt 为 MODELS_DIR 下底模名（同 checkpoint.load）；motion 为 MODELS_DIR/motion/ 下的"
+                " diffusers 目录名或 safetensors 文件名（可省略扩展名）。直接收底模名而非 MODEL 引用："
+                "组合需全新实例化底模，预先 checkpoint.load 会白占一份内存")
+def _op_motion_load(ckpt, motion):
+    return ops.motion_load(models, ckpt, motion)
 
 
 @registry.register(

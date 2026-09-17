@@ -1,5 +1,5 @@
 Name: sd-video-t2v-animatediff
-Description: 文生视频（AnimateDiff）：健康检查 → Checkpoint 加载（SD1.x）→ Motion 组合（AnimateDiffPipeline）→ 视频生成（异步任务，画布进度卡片）→ 保存视频 mp4。文本驱动，无需首帧图
+Description: 文生视频（AnimateDiff）：健康检查 → Motion 组合（SD1.x 底模 + 运动模块 → AnimateDiffPipeline）→ 视频生成（异步任务，画布进度卡片）→ 保存视频 mp4。文本驱动，无需首帧图
 Param:
   service_url: "https://calculated-nascar-publications-sorry.trycloudflare.com"  # 推理服务地址（cloudflared 临时隧道 → 211:8100；隧道重建后需更新）
   service_token: ""                       # 服务端 INFERENCE_TOKEN，未启用鉴权留空
@@ -17,8 +17,7 @@ Param:
 Graph: |
   stateDiagram-v2
     [*] --> Ensure
-    Ensure --> LoadCheckpoint
-    LoadCheckpoint --> MotionLoad
+    Ensure --> MotionLoad
     MotionLoad --> VideoGen
     VideoGen --> SaveVideo
     SaveVideo --> [*]
@@ -32,15 +31,6 @@ Nodes:
         service_url: "{{ Param.service_url }}"
         service_token: "{{ Param.service_token }}"
         wait_seconds: 60
-  LoadCheckpoint:
-    name: 底模加载
-    config:
-      nodeRef: checkpoint-loader@1.0.0
-      executor: local
-      params:
-        service_url: "{{ Ensure.service_url }}"
-        service_token: "{{ Param.service_token }}"
-        ckpt_name: "{{ Param.ckpt_name }}"
   MotionLoad:
     name: Motion组合
     config:
@@ -49,7 +39,7 @@ Nodes:
       params:
         service_url: "{{ Ensure.service_url }}"
         service_token: "{{ Param.service_token }}"
-        model_ref: "{{ LoadCheckpoint.model_ref }}"
+        ckpt_name: "{{ Param.ckpt_name }}"
         motion_name: "{{ Param.motion_name }}"
   VideoGen:
     name: 视频生成

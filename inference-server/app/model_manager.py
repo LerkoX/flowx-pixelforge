@@ -4,6 +4,7 @@
 管道类由 app.sniff 按内容嗅探（SD1.x / SDXL / 视频管道），不再写死 StableDiffusionPipeline。
 """
 import os
+import gc
 import threading
 import time
 
@@ -165,7 +166,9 @@ class ModelManager:
                     f"motion.load 只支持 SD1.x 图像底模（嗅探为 {cls_name}）；"
                     f"AnimateDiff v1.5 系运动模块不兼容其他架构")
             mpath = self.resolve_motion(motion)
-            self._evict_if_needed()  # MAX_RESIDENT=1 时会顶掉 base 缓存项
+            self._evict_if_needed()  # 组合前腾出常驻位（MAX_RESIDENT=1 时顶掉旧模型）
+            gc.collect()
+            torch.cuda.empty_cache()
             t0 = time.time()
             from diffusers import AnimateDiffPipeline, MotionAdapter
             base = self._instantiate(path, loader, cls_name)  # CPU 实例
@@ -186,6 +189,7 @@ class ModelManager:
                 feature_extractor=getattr(base, "feature_extractor", None),
                 image_encoder=None)
             del base  # 组件已移交组合管，底模外壳不再需要
+            gc.collect()
             pipe = self._apply_offload(pipe)
             pipe.set_progress_bar_config(disable=True)
             self._pipes[key] = pipe
