@@ -15,6 +15,10 @@ import struct
 _SD15 = "StableDiffusionPipeline"
 _SDXL = "StableDiffusionXLPipeline"
 
+# 图像管道类名集合：M3 VAE fp32 防黑图只作用于图像线；
+# 视频管道（SVD/Wan）的 VAE 解码发生在 pipeline 内部，dtype 混用会崩，不纳入。
+IMAGE_ARCHS = frozenset({_SD15, _SDXL})
+
 
 def _safetensors_keys(path):
     """读 safetensors 头部 JSON（8 字节 LE 长度 + JSON），不加载权重。"""

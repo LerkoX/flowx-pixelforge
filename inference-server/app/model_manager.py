@@ -17,6 +17,9 @@ LORAS_DIR = os.environ.get("LORAS_DIR", "/loras")
 MAX_RESIDENT = int(os.environ.get("MAX_RESIDENT_MODELS", "2"))
 OFFLOAD_MODE = offload.resolve_offload_mode()   # none / model / sequential
 QUANTIZATION = offload.resolve_quantization()   # fp8 接口预留，未实现时告警
+# M3：图像管道的 VAE 单独转 fp32 防黑图（fp16 解码溢出），代价 ~0.2GB 显存；
+# 只作用于 sniff.IMAGE_ARCHS（SD1.x/SDXL），视频管道不动。VAE_FP32=0 关闭。
+VAE_FP32 = os.environ.get("VAE_FP32", "1").lower() not in ("0", "false", "no")
 
 _EXTENSIONS = (".safetensors", ".ckpt")
 _LORA_EXTENSIONS = (".safetensors", ".pt", ".bin")
@@ -82,6 +85,10 @@ class ModelManager:
             else:
                 pipe = cls.from_single_file(path, torch_dtype=torch.float16,
                                             safety_checker=None)
+            if VAE_FP32 and cls_name in sniff.IMAGE_ARCHS:
+                # 须在 offload 启用前转 dtype（offload 钩子只搬移不转精度）
+                pipe.vae.to(torch.float32)
+                print("[model-manager] vae -> fp32 (VAE_FP32=1, 防黑图)", flush=True)
             if OFFLOAD_MODE == "sequential":
                 # 逐层搬移（最省显存，吞吐最低）；调用后不得再 pipe.to("cuda")
                 pipe.enable_sequential_cpu_offload()

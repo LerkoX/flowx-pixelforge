@@ -157,10 +157,13 @@ def lora_apply(models, model, lora, strength=1.0):
 
 
 def vae_decode(pipe, latents):
-    """VAE Decode：latent → PIL 图像（batch>1 时为列表）。"""
+    """VAE Decode：latent → PIL 图像（batch>1 时为列表）。
+    latent 按 VAE 实际 dtype 转换（M3：VAE 可能已独立转 fp32 防黑图，
+    而采样链路 latent 保持 fp16）。"""
     with torch.no_grad():
         img = pipe.vae.decode(
-            latents / pipe.vae.config.scaling_factor, return_dict=False)[0]
+            latents.to(dtype=pipe.vae.dtype) / pipe.vae.config.scaling_factor,
+            return_dict=False)[0]
     pil = pipe.image_processor.postprocess(img, output_type="pil")
     return {"image": pil[0] if len(pil) == 1 else pil}
 
