@@ -54,13 +54,15 @@ ComfyUI 把 `sampler_name`（更新公式）与 `scheduler`（sigma 曲线）拆
 - 同步在 FlowX 的 ksampler 节点加下拉项
 - 验收：同 seed 下 euler+karras 与旧 euler_karras 结果一致
 
-### 阶段 3：dtype fallback 小修（配合 VAE 类节点）
+### 阶段 3：dtype fallback 小修（配合 VAE 类节点）✅ 已交付（2026-09-17）
 
 SD1.5 的 fp16 VAE 解码会偶发纯黑图，社区标准修法是 VAE 单独 fp32。
 
-- `model_manager.py` 加载后把 `pipe.vae` 转 fp32（代价 ~0.2GB 显存，换稳定性）
-- Pascal 卡路径补 dtype 探测注释（当前兼容镜像已绕过，不深挖）
-- 验收：连续 50 次 vae.decode 无黑图
+- ✅ `model_manager.py` 加载后把图像管道（sniff.IMAGE_ARCHS）的 `pipe.vae` 转 fp32，
+  `VAE_FP32` 环境变量可控（默认开）；视频管道不动（VAE 解码在 pipeline 内部，dtype 混用会崩）
+- ✅ `ops.vae_decode` latent 按 `pipe.vae.dtype` 自适应转换（采样链 latent 保持 fp16）
+- ✅ 验收：GTX1080 真机 50 轮 sample+decode 无黑图（worst mean=104/255），
+  脚本 `scripts/accept-vae-fp32.py`
 
 ### 阶段 4：ControlNet（流行度最高的扩展类，工程量最大）
 
@@ -170,7 +172,7 @@ SD1.5 的 fp16 VAE 解码会偶发纯黑图，社区标准修法是 VAE 单独 f
 | --- | --- | --- | --- |
 | M1 图生图 | 1 ✅ | i2i / 变体生成 | 2 个算子（已交付） |
 | M2 采样器完整 | 2 | 全采样器×sigma 组合 | samplers.py 重构 |
-| M3 稳定 VAE | 3 | 无黑图 | model_manager 几行 |
+| M3 稳定 VAE | 3 ✅ | 无黑图 | model_manager 几行（已交付） |
 | M4 ControlNet | 4 | 构图控制 | 采样循环改造 |
 | M5 SDXL | 5 | 主流社区模型 | 架构分派落地 |
 | M6 高清链 | 6 | 2K/4K 出图 | 2~3 个算子 |
