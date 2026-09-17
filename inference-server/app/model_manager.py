@@ -190,6 +190,13 @@ class ModelManager:
                 image_encoder=None)
             del base  # 组件已移交组合管，底模外壳不再需要
             gc.collect()
+            # AnimateDiff 社区标准调度器：DDIM + clip_sample=False + linspace 排布；
+            # 沿用底模自带的 PNDM 默认配置会出"模糊闪动无内容"的废片（实测复现）
+            from diffusers import DDIMScheduler
+            sched_cfg = dict(pipe.scheduler.config)
+            sched_cfg.update(clip_sample=False, timestep_spacing="linspace",
+                             beta_schedule="linear")
+            pipe.scheduler = DDIMScheduler.from_config(sched_cfg)
             pipe = self._apply_offload(pipe)
             pipe.set_progress_bar_config(disable=True)
             self._pipes[key] = pipe
