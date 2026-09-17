@@ -1,7 +1,7 @@
 Name: sd-video-t2v-animatediff
 Description: 文生视频（AnimateDiff）：健康检查 → Motion 组合（SD1.x 底模 + 运动模块 → AnimateDiffPipeline）→ 视频生成（异步任务，画布进度卡片）→ 保存视频 mp4。文本驱动，无需首帧图
 Param:
-  service_url: "https://calculated-nascar-publications-sorry.trycloudflare.com"  # 推理服务地址（cloudflared 临时隧道 → 211:8100；隧道重建后需更新）
+  service_url: "https://content-queue-haven-will.trycloudflare.com"  # 推理服务地址（cloudflared 临时隧道 → 211:8100；隧道重建后需更新）
   service_token: ""                       # 服务端 INFERENCE_TOKEN，未启用鉴权留空
   ckpt_name: "v1-5-pruned-emaonly"        # SD1.x 底模（AnimateDiff v1.5 运动模块只兼容 SD1.x）
   motion_name: "animatediff-motion-adapter-v1-5-2"  # MODELS_DIR/motion/ 下的运动模块

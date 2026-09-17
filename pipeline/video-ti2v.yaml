@@ -1,7 +1,7 @@
 Name: sd-video-ti2v
 Description: 图生视频（SVD-XT 1.1）：健康检查 → Checkpoint 加载（diffusers 目录）→ 加载首帧图 → 视频生成（异步任务，画布进度卡片）→ 保存视频 mp4。SVD 为纯图生视频，无文本编码器，prompt/negative 不参与采样
 Param:
-  service_url: "https://calculated-nascar-publications-sorry.trycloudflare.com"  # 推理服务地址（cloudflared 临时隧道 → 211:8100；隧道重建后需更新）
+  service_url: "https://content-queue-haven-will.trycloudflare.com"  # 推理服务地址（cloudflared 临时隧道 → 211:8100；隧道重建后需更新）
   service_token: ""                       # 服务端 INFERENCE_TOKEN，未启用鉴权留空
   model_name: "stable-video-diffusion-img2vid-xt-1-1"  # 推理服务 MODELS_DIR 下的 diffusers 目录名
   image_path: "~/flowx-input/source.png"  # 首帧图（SVD 必填）：FlowX 侧本地图片路径
