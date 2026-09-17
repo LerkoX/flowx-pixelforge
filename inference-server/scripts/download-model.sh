@@ -36,8 +36,9 @@ case "$1" in
     echo ">> [hf-mirror] $REPO -> $TARGET/$DIR (fp16-only)"
     docker run --rm -v "$TARGET":/models python:3.11-slim sh -c "
       pip install -q huggingface_hub &&
-      HF_ENDPOINT=https://hf-mirror.com hf download '$REPO' \
-        --include '*.json' '*.fp16.safetensors' \
+      HF_ENDPOINT=https://hf-mirror.com hf download '$REPO' --include '*.json' \
+        --local-dir '/models/$DIR' &&
+      HF_ENDPOINT=https://hf-mirror.com hf download '$REPO' --include '*.fp16.safetensors' \
         --local-dir '/models/$DIR'
     "
     ;;
@@ -47,10 +48,12 @@ case "$1" in
     REPO="$1"
     DIR=$(basename "$REPO")
     echo ">> [hf-mirror] $REPO -> $TARGET/$DIR (fp16-only)"
+    # 新版 hf CLI 的 --include 只收一个值（多值会被当成文件名），拆两次下载
     docker run --rm -v "$TARGET":/models python:3.11-slim sh -c "
       pip install -q huggingface_hub &&
-      HF_ENDPOINT=https://hf-mirror.com hf download '$REPO' \
-        --include '*.json' '*.fp16.safetensors' \
+      HF_ENDPOINT=https://hf-mirror.com hf download '$REPO' --include '*.json' \
+        --local-dir '/models/$DIR' &&
+      HF_ENDPOINT=https://hf-mirror.com hf download '$REPO' --include '*.fp16.safetensors' \
         --local-dir '/models/$DIR'
     "
     ;;

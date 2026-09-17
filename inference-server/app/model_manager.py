@@ -137,22 +137,30 @@ class ModelManager:
             f"motion adapter '{name}' not found in {mdir}; available: {available or '(empty)'}")
 
     def load_motion(self, base_key: str, motion: str):
-        """把 MotionAdapter 组合进已常驻的 SD1.x 管道 → AnimateDiffPipeline。
+        """SD1.x checkpoint + MotionAdapter 组合 → AnimateDiffPipeline。
         组合管以独立缓存键 '{base}+motion:{motion}' 常驻，参与同一 LRU。
-        返回 (key, newly_loaded)。"""
+        返回 (key, newly_loaded)。
+
+        注意：不复用常驻基础管的组件——sequential offload 下基础管权重在 meta
+        设备上，UNetMotionModel.from_unet2d 复制会报 'Cannot copy out of meta
+        tensor'；且两个管道的 offload 钩子不能挂同一组件。故从磁盘全新实例化
+        CPU 管道再组合（代价 ~1-2 分钟加载）。"""
         key = f"{base_key}+motion:{motion}"
         with self._lock:
             if key in self._pipes:
                 self._last_used[key] = time.time()
                 return key, False
-            if base_key not in self._pipes:
-                raise KeyError(
-                    f"base model '{base_key}' not resident; 请先 checkpoint.load")
-            base = self._pipes[base_key]  # 局部引用保住组件，供下方组装复用
+            path, _ = self.resolve(base_key)
+            loader, cls_name = sniff.sniff_arch(path)
+            if cls_name not in sniff.IMAGE_ARCHS:
+                raise ValueError(
+                    f"motion.load 只支持 SD1.x 图像底模（嗅探为 {cls_name}）；"
+                    f"AnimateDiff v1.5 系运动模块不兼容其他架构")
             mpath = self.resolve_motion(motion)
             self._evict_if_needed()  # MAX_RESIDENT=1 时会顶掉 base 缓存项
             t0 = time.time()
             from diffusers import AnimateDiffPipeline, MotionAdapter
+            base = self._instantiate(path, loader, cls_name)  # CPU 实例
             if os.path.isdir(mpath):
                 try:
                     adapter = MotionAdapter.from_pretrained(
@@ -169,12 +177,8 @@ class ModelManager:
                 unet=base.unet, motion_adapter=adapter, scheduler=base.scheduler,
                 feature_extractor=getattr(base, "feature_extractor", None),
                 image_encoder=None)
-            if OFFLOAD_MODE == "sequential":
-                pipe.enable_sequential_cpu_offload()
-            elif OFFLOAD_MODE == "model":
-                pipe.enable_model_cpu_offload()
-            else:
-                pipe = pipe.to("cuda")
+            del base  # 组件已移交组合管，底模外壳不再需要
+            pipe = self._apply_offload(pipe)
             pipe.set_progress_bar_config(disable=True)
             self._pipes[key] = pipe
             self._archs[key] = "AnimateDiffPipeline"
