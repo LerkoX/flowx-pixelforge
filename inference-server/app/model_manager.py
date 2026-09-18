@@ -137,10 +137,12 @@ class ModelManager:
         d = os.path.join(mdir, name)
         if os.path.isdir(d):
             return d
-        for c in ([name] if name.endswith(".safetensors") else [name + ".safetensors", name]):
-            p = os.path.join(mdir, c)
-            if os.path.isfile(p):
-                return p
+        for ext in (".safetensors", ".ckpt"):
+            candidates = [name] if name.endswith(ext) else [name + ext]
+            for c in candidates:
+                p = os.path.join(mdir, c)
+                if os.path.isfile(p):
+                    return p
         available = sorted(os.listdir(mdir)) if os.path.isdir(mdir) else []
         raise FileNotFoundError(
             f"motion adapter '{name}' not found in {mdir}; available: {available or '(empty)'}")
@@ -197,6 +199,22 @@ class ModelManager:
             sched_cfg.update(clip_sample=False, timestep_spacing="linspace",
                              beta_schedule="linear")
             pipe.scheduler = DDIMScheduler.from_config(sched_cfg)
+            if VAE_FP32:
+                # 组合管不走 load()，漏掉了图像管道的 VAE fp32 防黑图处理——
+                # Pascal 上 fp16 VAE 解码出泥浆噪声废片（exec 191/195 实测）。
+                # 须在 offload 启用前转 dtype（钩子只搬移不转精度）。
+                # 注意 decode_latents 直接把 fp16 latent 传给 vae.decode，dtype
+                # 不匹配会 RuntimeError，故包一层统一转 fp32（ops.vae_decode 已
+                # 按 vae.dtype 自适应，无需改动；preview 走 latent 投影不经过 VAE）。
+                pipe.vae.to(torch.float32)
+                _orig_decode = pipe.vae.decode
+
+                def _decode_fp32(z, *args, **kwargs):
+                    return _orig_decode(z.to(torch.float32), *args, **kwargs)
+
+                pipe.vae.decode = _decode_fp32
+                print("[model-manager] composed vae -> fp32 (VAE_FP32=1, 防黑图)",
+                      flush=True)
             pipe = self._apply_offload(pipe)
             pipe.set_progress_bar_config(disable=True)
             self._pipes[key] = pipe
