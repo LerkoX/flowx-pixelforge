@@ -1,20 +1,21 @@
-"""采样实时预览：latent → RGB 近似投影（对齐 ComfyUI Latent2RGBPreviewer）+ HTTP 推送。
+"""采样实时预览：latent → RGB 近似投影（对齐 ComfyUI Latent2RGBPreviewer）+ 帧缓冲。
 
-预览帧由 sample 算子在采样循环中逐（N）步产生，POST 到 FlowX Studio 的节点预览
-回调地址（FLOWX_CALLBACK_URL），画布上实时渲染——等效 ComfyUI 前端的采样实时图。
+预览帧由 sample 算子在采样循环中逐（N）步产生，写入内存缓冲（按 job_id  keyed，
+只留最新一帧），经 GET /preview/{key} 以 HTTP 二进制提供；FlowX Studio 从节点
+stdout 标记（FLOWX_PREVIEW）拿到帧地址后中转拉取给画布——媒体全程 HTTP，
+不走 base64，服务端也不再向 Studio 推送回调。
 
 投影矩阵来自 ComfyUI comfy/latent_formats.py（SD15 / SDXL）；
 本模块不感知对象仓库与算子注册表。
 """
-import base64
 import io
-import json
-import urllib.request
+import threading
+import time
 
 from PIL import Image
 
 # torch 延迟导入：仅 latent_to_jpeg 的投影矩阵需要；
-# progress_card / PreviewPusher.push_pil 在无 GPU/torch 环境也可用。
+# progress_card / PreviewRecorder.push_pil 在无 GPU/torch 环境也可用。
 
 # ComfyUI latent_rgb_factors：# R G B
 SD15_FACTORS = [
@@ -81,44 +82,68 @@ def progress_card(step, total, width=256, height=144):
     return img
 
 
-class PreviewPusher:
-    """把采样中间 latent 推送为 Studio 预览帧；推送失败静默忽略（不影响采样）。"""
+class PreviewBuffer:
+    """预览帧内存缓冲：key（=job_id，uuid 不可猜）→ 最新一帧 (jpeg, progress, ts)。
 
-    def __init__(self, callback_url, token="", every=1, hint="sd15"):
-        self.url = callback_url
-        self.token = token
+    只留每 key 最新帧；写入时顺带淘汰超 TTL 的条目。帧是采样中间产物，
+    瞬态数据，不落盘。
+    """
+
+    def __init__(self, ttl_seconds=3600):
+        self._ttl = ttl_seconds
+        self._frames = {}  # key -> (jpeg bytes, progress float, updated_at)
+        self._lock = threading.Lock()
+
+    def put(self, key, jpeg: bytes, progress: float):
+        now = time.time()
+        with self._lock:
+            self._frames[key] = (jpeg, progress, now)
+            expired = [k for k, (_, _, ts) in self._frames.items()
+                       if now - ts > self._ttl]
+            for k in expired:
+                del self._frames[k]
+
+    def get(self, key):
+        """返回 (jpeg, progress)；无帧返回 None。"""
+        with self._lock:
+            item = self._frames.get(key)
+        if item is None:
+            return None
+        jpeg, progress, _ = item
+        return jpeg, progress
+
+
+BUFFER = PreviewBuffer()
+
+
+class PreviewRecorder:
+    """把采样中间 latent 录制为预览帧写入 BUFFER；编码失败静默忽略（不影响采样）。"""
+
+    def __init__(self, key, every=1, hint="sd15"):
+        self.key = key
         self.every = max(1, int(every))
         self.hint = hint
 
     def want(self, step_index, total) -> bool:
-        """当前步（0 起）是否需要推预览：每 every 步 + 最后一步必推。"""
+        """当前步（0 起）是否需要录预览：每 every 步 + 最后一步必录。"""
         return step_index % self.every == 0 or step_index == total - 1
 
     def push(self, latents, progress):
-        """推送 latent 预览帧（SD 系 2D latent 的 RGB 近似投影）。"""
+        """录制 latent 预览帧（SD 系 2D latent 的 RGB 近似投影）。"""
         try:
             jpeg = latent_to_jpeg(latents, hint=self.hint)
         except Exception as e:
             print(f"[preview] latent->jpeg failed (ignored): {e}", flush=True)
             return
-        self._post(jpeg, progress)
+        BUFFER.put(self.key, jpeg, progress)
 
     def push_pil(self, img, progress):
-        """推送已渲染的 PIL 帧（视频进度卡片/关键帧等）。"""
+        """录制已渲染的 PIL 帧（视频进度卡片/关键帧等）。"""
         buf = io.BytesIO()
         img.convert("RGB").save(buf, format="JPEG", quality=75)
-        self._post(buf.getvalue(), progress)
+        BUFFER.put(self.key, buf.getvalue(), progress)
 
-    def _post(self, jpeg, progress):
-        payload = {"image": base64.b64encode(jpeg).decode(),
-                   "mime": "image/jpeg",
-                   "progress": round(progress, 4)}
-        req = urllib.request.Request(self.url, data=json.dumps(payload).encode())
-        req.add_header("Content-Type", "application/json")
-        if self.token:
-            req.add_header("Authorization", "Bearer " + self.token)
-        try:
-            with urllib.request.urlopen(req, timeout=10) as r:
-                r.read()
-        except Exception as e:
-            print(f"[preview] push failed (ignored): {e}", flush=True)
+
+def recorder_for(key, every=1, hint="sd15") -> PreviewRecorder:
+    """按 key（通常为当前 job_id）构造录制器；构造廉价，可按需逐步调用。"""
+    return PreviewRecorder(key, every=every, hint=hint)

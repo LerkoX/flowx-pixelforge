@@ -84,7 +84,7 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
     """KSampler：手动采样循环，返回 {'latent': ..., 'seed': 实际种子}。
     model 可为裸 pipe 或带 LoRA 补丁的 ModelRef（采样前启用、采样后关闭）。
     preview_cb 可选：签名 preview_cb(latents, step_index, total)，在每一步
-    去噪后回调（由调用方注入预览推送，如 app.preview.PreviewPusher），
+    去噪后回调（由调用方注入预览录制，如 app.preview.PreviewRecorder），
     本层不感知网络。
     interrupt_check 可选：无参回调，每步采样前调用，抛异常即中断
     （由调用方注入取消检查，如 app.execution.check_cancelled）。"""

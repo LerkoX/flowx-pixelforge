@@ -76,27 +76,27 @@ def _op_latent_empty(width=512, height=512, batch_size=1):
     inputs={"model": "MODEL", "pos": "COND", "neg": "COND", "latent": "LATENT",
             "seed": "INT", "steps": "INT", "cfg": "FLOAT",
             "sampler_name": "STRING", "denoise": "FLOAT",
-            "preview_callback_url": "STRING", "preview_token": "STRING",
             "preview_every": "INT"},
     outputs={"latent": "LATENT", "seed": "INT"},
     description="KSampler：seed/steps/cfg/sampler_name/denoise 均有默认值；"
-                "提供 preview_callback_url 时逐步 POST latent 预览帧（JPEG）到该地址")
+                "异步 job 执行且 preview_every>0 时，逐步把 latent 预览帧（JPEG）"
+                "留在 GET /preview/{job_id}（只留最新一帧），供 Studio 中转拉取")
 def _op_sample(model, pos, neg, latent, seed=-1, steps=20, cfg=7.0,
-               sampler_name="euler", denoise=1.0, preview_callback_url="",
-               preview_token="", preview_every=1):
-    pusher = None
-    if preview_callback_url:
+               sampler_name="euler", denoise=1.0, preview_every=1):
+    hint = "sd15"
+    if preview_every > 0:
         pipe, _ = ops.resolve_pipe(model)
-        pusher = preview.PreviewPusher(
-            preview_callback_url, preview_token, every=preview_every,
-            hint=preview.model_hint_of(pipe))
+        hint = preview.model_hint_of(pipe)
 
     def on_step(latents, i, total):
         job = execution.current()
-        if job is not None:
-            job.set_progress(i + 1, total)  # 异步 job 进度（无需预览回调也上报）
-        if pusher is not None and pusher.want(i, total):
-            pusher.push(latents, (i + 1) / total)
+        if job is None:
+            return  # 同步 /op 调用无 job 上下文：不录预览（预览走异步 job 通道）
+        job.set_progress(i + 1, total)  # 异步 job 进度（无需预览也上报）
+        if preview_every > 0:
+            rec = preview.recorder_for(job.id, preview_every, hint)
+            if rec.want(i, total):
+                rec.push(latents, (i + 1) / total)
 
     return ops.sample(model, pos, neg, latent, seed, steps, cfg,
                       sampler_name, denoise, preview_cb=on_step,
@@ -148,29 +148,27 @@ def _op_vae_encode(vae, image):
             "image": "IMAGE", "width": "INT", "height": "INT",
             "num_frames": "INT", "fps": "INT", "steps": "INT", "cfg": "FLOAT",
             "seed": "INT", "decode_chunk_size": "INT",
-            "preview_callback_url": "STRING",
-            "preview_token": "STRING", "preview_every": "INT"},
+            "preview_every": "INT"},
     outputs={"video": "VIDEO", "seed": "INT"},
     description="Video Sample：文/图生视频，按管道签名自适应（Wan TI2V 文本+可选首帧 / "
                 "SVD 纯图生视频，cfg 映射 min/max_guidance_scale，fps 进采样条件）。"
                 "分钟级任务，请经 POST /jobs 异步执行；进度经 job 轮询上报，"
-                "preview_callback_url 推进度卡片帧（preview_every>0 启用）；/interrupt 可取消")
+                "preview_every>0 时进度卡片帧留在 GET /preview/{job_id}；"
+                "/interrupt 可取消")
 def _op_video_sample(model, prompt="", neg_prompt="", image=None,
                      width=832, height=480, num_frames=121, fps=24,
                      steps=50, cfg=5.0, seed=-1, decode_chunk_size=0,
-                     preview_callback_url="", preview_token="", preview_every=0):
-    pusher = None
-    if preview_callback_url and preview_every > 0:
-        pusher = preview.PreviewPusher(preview_callback_url, preview_token,
-                                       every=preview_every)
-
+                     preview_every=0):
     def on_step(latents, i, total):
         job = execution.current()
-        if job is not None:
-            job.set_progress(i + 1, total)  # 异步 job 进度（轮询通道）
-        if pusher is not None and pusher.want(i, total):
-            # 视频 3D latent 无法廉价投影成图，推纯渲染的进度卡片帧
-            pusher.push_pil(preview.progress_card(i + 1, total), (i + 1) / total)
+        if job is None:
+            return  # 同步 /op 调用无 job 上下文：不录预览
+        job.set_progress(i + 1, total)  # 异步 job 进度（轮询通道）
+        if preview_every > 0:
+            rec = preview.recorder_for(job.id, preview_every)
+            if rec.want(i, total):
+                # 视频 3D latent 无法廉价投影成图，录纯渲染的进度卡片帧
+                rec.push_pil(preview.progress_card(i + 1, total), (i + 1) / total)
 
     return ops.video_sample(model, prompt, neg_prompt, image, width, height,
                             num_frames, fps, steps, cfg, seed, decode_chunk_size,
@@ -263,6 +261,20 @@ def get_image(image_id: str, index: int = 0, thumb: int = 0):
     buf = io.BytesIO()
     pil.save(buf, format="PNG")
     return Response(content=buf.getvalue(), media_type="image/png")
+
+
+@app.get("/preview/{key}", dependencies=[Depends(auth)])
+def get_preview(key: str):
+    """采样实时预览帧：key 为异步 job_id（uuid 不可猜）。返回最新一帧 JPEG
+    （每 job 只留一帧），X-Preview-Progress 头带进度；无帧 404。
+    Studio 从节点 stdout 的 FLOWX_PREVIEW 标记拿到本地址后中转拉取给画布。"""
+    frame = preview.BUFFER.get(key)
+    if frame is None:
+        raise HTTPException(status_code=404, detail="preview frame not found")
+    jpeg, progress = frame
+    return Response(content=jpeg, media_type="image/jpeg",
+                    headers={"Cache-Control": "no-cache",
+                             "X-Preview-Progress": f"{progress:.4f}"})
 
 
 @app.get("/videos/{video_id}", dependencies=[Depends(auth)])
