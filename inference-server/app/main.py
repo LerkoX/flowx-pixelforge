@@ -146,6 +146,21 @@ def _op_vae_encode(vae, image):
     return ops.vae_encode(vae, image)
 
 
+def _video_on_step(preview_every):
+    """视频采样逐步回调：job 进度上报 + 进度卡片预览（3D latent 无法廉价投影）。"""
+    def on_step(latents, i, total):
+        job = execution.current()
+        if job is None:
+            return  # 同步 /op 调用无 job 上下文：不录预览
+        job.set_progress(i + 1, total)  # 异步 job 进度（轮询通道）
+        if preview_every > 0:
+            rec = preview.recorder_for(job.id, preview_every)
+            if rec.want(i, total):
+                # 视频 3D latent 无法廉价投影成图，录纯渲染的进度卡片帧
+                rec.push_pil(preview.progress_card(i + 1, total), (i + 1) / total)
+    return on_step
+
+
 @registry.register(
     "video.sample",
     inputs={"model": "MODEL", "prompt": "STRING", "neg_prompt": "STRING",
@@ -163,21 +178,43 @@ def _op_video_sample(model, prompt="", neg_prompt="", image=None,
                      width=832, height=480, num_frames=121, fps=24,
                      steps=50, cfg=5.0, seed=-1, decode_chunk_size=0,
                      preview_every=0):
-    def on_step(latents, i, total):
-        job = execution.current()
-        if job is None:
-            return  # 同步 /op 调用无 job 上下文：不录预览
-        job.set_progress(i + 1, total)  # 异步 job 进度（轮询通道）
-        if preview_every > 0:
-            rec = preview.recorder_for(job.id, preview_every)
-            if rec.want(i, total):
-                # 视频 3D latent 无法廉价投影成图，录纯渲染的进度卡片帧
-                rec.push_pil(preview.progress_card(i + 1, total), (i + 1) / total)
-
     return ops.video_sample(model, prompt, neg_prompt, image, width, height,
                             num_frames, fps, steps, cfg, seed, decode_chunk_size,
-                            preview_cb=on_step,
+                            preview_cb=_video_on_step(preview_every),
                             interrupt_check=execution.check_cancelled)
+
+
+@registry.register(
+    "video.sample_latent",
+    inputs={"model": "MODEL", "prompt": "STRING", "neg_prompt": "STRING",
+            "image": "IMAGE", "width": "INT", "height": "INT",
+            "num_frames": "INT", "fps": "INT", "steps": "INT", "cfg": "FLOAT",
+            "seed": "INT", "preview_every": "INT"},
+    outputs={"latent": "LATENT", "seed": "INT"},
+    description="Video Sample（latent 模式）：只采样不解码，输出 3D latent 供 "
+                "vae.decode_video 接力——decode 精度（fp32）与分块成为流水线可调参数。"
+                "分钟级任务，请经 POST /jobs 异步执行")
+def _op_video_sample_latent(model, prompt="", neg_prompt="", image=None,
+                            width=832, height=480, num_frames=121, fps=24,
+                            steps=50, cfg=5.0, seed=-1, preview_every=0):
+    return ops.video_sample(model, prompt, neg_prompt, image, width, height,
+                            num_frames, fps, steps, cfg, seed,
+                            output_type="latent",
+                            preview_cb=_video_on_step(preview_every),
+                            interrupt_check=execution.check_cancelled)
+
+
+@registry.register(
+    "vae.decode_video",
+    inputs={"vae": "VAE", "latents": "LATENT", "num_frames": "INT",
+            "decode_chunk_size": "INT", "force_fp32": "BOOL", "fps": "INT"},
+    outputs={"video": "VIDEO"},
+    description="VAE Decode（视频）：3D latent → VIDEO。force_fp32 防 Pascal fp16 "
+                "解码过曝/亮度漂移；decode_chunk_size 分块控制显存峰值（SVD 有效）")
+def _op_vae_decode_video(vae, latents, num_frames=0, decode_chunk_size=14,
+                         force_fp32=True, fps=24):
+    return ops.vae_decode_video(vae, latents, num_frames, decode_chunk_size,
+                                force_fp32, fps)
 
 
 @registry.register(

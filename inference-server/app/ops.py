@@ -192,9 +192,11 @@ def vae_encode(pipe, image):
 def video_sample(model, prompt="", neg_prompt="", image=None,
                  width=832, height=480, num_frames=121, fps=24,
                  steps=50, cfg=5.0, seed=-1, decode_chunk_size=0,
-                 preview_cb=None, interrupt_check=None):
+                 output_type="pil", preview_cb=None, interrupt_check=None):
     """Video Sample：文/图生视频，一个算子兼容多种视频管道。
-    返回 {'video': {'frames': [PIL...], 'fps': n}, 'seed': 实际种子}。
+    output_type="pil"（默认）：返回 {'video': {'frames': [PIL...], 'fps': n}, 'seed': 实际种子}；
+    output_type="latent"：不解码，返回 {'latent': 3D latent, 'seed': 实际种子}，
+    交给 vae_decode_video 接力（decode 精度/分块成为流水线可调参数）。
 
     管道差异适配（不堆 if-else，按 __call__ 签名过滤参数）：
     - Wan TI2V 系：prompt 文本条件，image 可选（首帧）
@@ -235,7 +237,7 @@ def video_sample(model, prompt="", neg_prompt="", image=None,
         "num_inference_steps": steps,
         "guidance_scale": cfg,
         "generator": gen,
-        "output_type": "pil",
+        "output_type": output_type,
         "fps": fps,  # SVD 的采样条件参数；Wan 无此参（fps 只进 mp4 元数据）
     }
     if "guidance_scale" not in sig and "min_guidance_scale" in sig:
@@ -276,10 +278,52 @@ def video_sample(model, prompt="", neg_prompt="", image=None,
                 pipe.disable_lora()
             except Exception:
                 pass
+    if output_type == "latent":
+        # latent 模式：out.frames 即未解码的 3D latent
+        # （SVD: (b,f,c,h,w)；AnimateDiff/Wan: (b,c,f,h,w)，布局交由下游自适应）
+        latents = out.frames
+        print(f"[video.sample] done in {time.time()-t0:.1f}s "
+              f"latent={tuple(latents.shape)} seed={seed}", flush=True)
+        return {"latent": latents, "seed": seed}
     frames = out.frames[0]
     print(f"[video.sample] done in {time.time()-t0:.1f}s "
           f"frames={len(frames)} seed={seed}", flush=True)
     return {"video": {"frames": frames, "fps": fps}, "seed": seed}
+
+
+def vae_decode_video(pipe, latents, num_frames=0, decode_chunk_size=14,
+                     force_fp32=True, fps=24):
+    """VAE Decode(视频)：3D latent → PIL 帧序列。
+    与管道内置 decode 等价，但把两个关键点变成显式参数：
+    - force_fp32：VAE 转 fp32 解码（Pascal fp16 解码过曝/亮度漂移的修法，
+      与图像管道 VAE_FP32 防黑图同源）；幂等，offload 钩子只搬设备不转 dtype
+    - decode_chunk_size：分块解码控显存峰值（SVD 内置默认 14）
+    复用管道私有 decode_latents（内部处理 scaling_factor 与帧维布局），
+    按签名过滤参数兼容 SVD(num_frames+chunk)/AnimateDiff(无参)差异。
+    num_frames<=0 时按 latent 通道维(=4)推断帧维位置。"""
+    import inspect
+
+    if force_fp32 and pipe.vae.dtype != torch.float32:
+        pipe.vae.to(torch.float32)
+        print("[vae.decode_video] vae -> fp32（防过曝漂移）", flush=True)
+    dtype = pipe.vae.dtype
+    latents = latents.to(device=exec_device_of(pipe), dtype=dtype)
+    if num_frames <= 0:
+        num_frames = (latents.shape[2] if latents.shape[1] == 4
+                      else latents.shape[1])
+    sig = inspect.signature(pipe.decode_latents).parameters
+    cands = {"num_frames": num_frames, "decode_chunk_size": decode_chunk_size}
+    kwargs = {k: v for k, v in cands.items() if k in sig}
+    with torch.no_grad():
+        video = pipe.decode_latents(latents, **kwargs)
+    vp = getattr(pipe, "video_processor", None)
+    if vp is None:
+        raise ValueError(
+            f"{type(pipe).__name__} 无 video_processor，无法后处理视频帧")
+    frames = vp.postprocess_video(video, output_type="pil")[0]
+    print(f"[vae.decode_video] frames={len(frames)} fp32={force_fp32} "
+          f"chunk={decode_chunk_size}", flush=True)
+    return {"video": {"frames": frames, "fps": fps}}
 
 
 def image_load(input_dir, name):
