@@ -33,6 +33,10 @@ class ModelManager:
         self._archs = {}  # pipe_key -> 管道类名（嗅探结果，供诊断/分派）
         self._adapters = {}  # pipe_key -> set(已加载的 adapter 名)
         self._lock = threading.Lock()
+        # 淘汰回调 fn(pipe)：装配层注入，用于断开外部引用
+        # （如 ObjectStore 中 model/clip/vae 视图持有的管道本体）。
+        # 顺序关键：必须先断外部引用，再 gc.collect 才能回收循环引用。
+        self.on_evict = None
 
     def resolve(self, name: str):
         """按名称在 MODELS_DIR 中定位模型：diffusers 目录 或 safetensors/ckpt 文件
@@ -263,10 +267,20 @@ class ModelManager:
         while len(self._pipes) >= MAX_RESIDENT:
             victim = min(self._last_used, key=self._last_used.get)
             print(f"[model-manager] evicting '{victim}' (LRU)", flush=True)
-            del self._pipes[victim]
+            pipe = self._pipes.pop(victim)
             del self._last_used[victim]
             self._archs.pop(victim, None)
             self._adapters.pop(victim, None)
+            # 先断开外部引用（ObjectStore 中的 model/clip/vae 视图等）：
+            # 不断引用直接 GC 收不掉；引用计数为 0 但组件/钩子互相引用形成
+            # 循环时也必须 gc.collect（sequential offload 下 CPU 权重可达数 GB）。
+            if self.on_evict is not None:
+                try:
+                    self.on_evict(pipe)
+                except Exception as e:
+                    print(f"[model-manager] on_evict failed (ignored): {e}", flush=True)
+            del pipe
+            gc.collect()
             torch.cuda.empty_cache()
 
     def resident(self):

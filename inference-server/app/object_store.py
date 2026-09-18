@@ -65,6 +65,18 @@ class ObjectStore:
                 self._discard_file(self._items[k])
                 del self._items[k]
 
+    def discard_where(self, pred) -> int:
+        """按谓词删除条目，返回删除数。
+        用于模型淘汰时联动清理：删除 data 为该管道本体的 model/clip/vae 视图
+        （checkpoint.load/motion.load 输出的三视图与管道是同一对象），
+        否则已淘汰模型的权重会被仓库钉住无法回收（TTL 要等 1 小时）。"""
+        with self._lock:
+            victims = [k for k, v in self._items.items() if pred(v.get("data"))]
+            for k in victims:
+                self._discard_file(self._items[k])
+                del self._items[k]
+        return len(victims)
+
     @staticmethod
     def _discard_file(item):
         """对象淘汰时删除落盘文件（VIDEO mp4）；失败静默（文件可能已被外部清理）。"""

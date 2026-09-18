@@ -9,6 +9,7 @@
 
 新增能力只需在下方注册一个算子函数，无需新增端点。
 """
+import gc as _gc  # 别名：与下方 /gc 端点函数名冲突
 import io
 import os
 
@@ -33,6 +34,9 @@ app = FastAPI(title="flowx-inference-server")
 models = ModelManager()
 store = ObjectStore(ttl_seconds=int(os.environ.get("OBJECT_TTL_SECONDS", "3600")),
                     video_dir=VIDEO_DIR)
+# 模型淘汰联动：LRU 顶掉的管道仍被对象仓库的 model/clip/vae 视图钉住，
+# 必须在 evict 时按对象身份断开引用（先断引用后 GC，见 ModelManager._evict_if_needed）
+models.on_evict = lambda pipe: store.discard_where(lambda d: d is pipe)
 registry = Registry()
 os.makedirs(VIDEO_DIR, exist_ok=True)
 
@@ -295,7 +299,12 @@ def get_video(video_id: str):
 @app.post("/gc", dependencies=[Depends(auth)])
 def gc():
     engine.clear_cache()
-    return {"cleared": store.clear()}
+    n = store.clear()
+    # 清了引用还不够：管道组件/offload 钩子互相引用形成循环，
+    # 必须 gc.collect 才真正回收（名字里叫 gc 就要做全套）。
+    _gc.collect()
+    torch.cuda.empty_cache()
+    return {"cleared": n}
 
 
 # ---------- 能力运行时端点（同步） ----------
