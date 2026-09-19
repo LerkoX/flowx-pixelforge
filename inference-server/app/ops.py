@@ -334,6 +334,91 @@ _RESAMPLE = {
 }
 
 
+_DETECTOR_CACHE = {}
+
+
+def _detector(detector_dir, name):
+    """YOLO 检测器缓存（ultralytics 惰性导入，未装时报错提示）。"""
+    if name not in _DETECTOR_CACHE:
+        # 精确 <name>.pt，否则前缀匹配 <name>*.pt（如 face → face_yolov8n.pt）
+        path = os.path.join(detector_dir, name + ".pt")
+        if not os.path.isfile(path):
+            import glob
+            hits = sorted(glob.glob(os.path.join(detector_dir, name + "*.pt")))
+            if hits:
+                path = hits[0]
+        if not os.path.isfile(path):
+            available = (sorted(os.listdir(detector_dir))
+                         if os.path.isdir(detector_dir) else [])
+            raise FileNotFoundError(
+                f"detector '{name}' not found: {path}; "
+                f"available: {available or '(empty)'}")
+        try:
+            from ultralytics import YOLO
+        except ImportError as e:
+            raise RuntimeError(
+                "detail.refine 需要 ultralytics（容器内 pip install ultralytics）") from e
+        _DETECTOR_CACHE[name] = YOLO(path)
+    return _DETECTOR_CACHE[name]
+
+
+def detail_refine(model, pos, neg, image, detector_dir, detector="face",
+                  conf=0.3, padding=0.4, denoise=0.4, steps=20, cfg=7.0,
+                  sampler_name=DEFAULT_SAMPLER, seed=-1, guide_size=512,
+                  max_targets=4, feather=16):
+    """ADetailer 式局部重绘：YOLO 检测脸/手 → 裁剪外扩 → 放大到 guide_size →
+    img2img 重绘（denoise<1）→ 羽化贴回原图。修脸/修手专用。
+    正/反 conditioning 复用主管线（负面 embedding 在重绘中同样生效）。"""
+    from PIL import ImageDraw, ImageFilter
+
+    yolo = _detector(detector_dir, detector)
+    results = yolo.predict(image, conf=conf, verbose=False)
+    boxes = results[0].boxes
+    if boxes is None or len(boxes) == 0:
+        print(f"[detail.refine] {detector}: no target detected", flush=True)
+        return {"image": image, "count": 0}
+
+    xyxy = boxes.xyxy.tolist()
+    confs = boxes.conf.tolist()
+    order = sorted(range(len(xyxy)), key=lambda i: -confs[i])[:max_targets]
+
+    pipe, _ = resolve_pipe(model)
+    img = image.copy()
+    W, H = img.size
+    n = 0
+    for i in order:
+        x1, y1, x2, y2 = xyxy[i]
+        bw, bh = x2 - x1, y2 - y1
+        px, py = bw * padding, bh * padding
+        cx1, cy1 = max(0, int(x1 - px)), max(0, int(y1 - py))
+        cx2, cy2 = min(W, int(x2 + px)), min(H, int(y2 + py))
+        if cx2 - cx1 < 32 or cy2 - cy1 < 32:
+            continue
+        crop = img.crop((cx1, cy1, cx2, cy2))
+        # 短边放大到 guide_size，对齐 8（VAE 要求）
+        scale = guide_size / min(crop.size)
+        tw = max(64, round(crop.width * scale) // 8 * 8)
+        th = max(64, round(crop.height * scale) // 8 * 8)
+        crop_big = crop.resize((tw, th), Image.Resampling.LANCZOS)
+        # img2img 重绘
+        lat = vae_encode(pipe, crop_big)["latent"]
+        out = sample(model, pos, neg, lat, seed=seed, steps=steps, cfg=cfg,
+                     sampler_name=sampler_name, denoise=denoise)
+        refined = vae_decode(pipe, out["latent"])["image"]
+        refined = refined.resize(crop.size, Image.Resampling.LANCZOS)
+        # 羽化 mask 贴回（边缘渐变避免拼接痕）
+        mask = Image.new("L", crop.size, 0)
+        ImageDraw.Draw(mask).rectangle(
+            [feather, feather, crop.width - feather, crop.height - feather],
+            fill=255)
+        mask = mask.filter(ImageFilter.GaussianBlur(feather / 2))
+        img.paste(refined, (cx1, cy1), mask)
+        n += 1
+        print(f"[detail.refine] {detector}#{n} conf={confs[i]:.2f} "
+              f"box=({cx1},{cy1},{cx2},{cy2}) -> {tw}x{th} redraw", flush=True)
+    return {"image": img, "count": n}
+
+
 def embedding_load(pipe, embeddings_dir, names):
     """Textual Inversion 加载：把 embedding 文件（badhandv4/EasyNegative 等）
     载进 CLIP 文本编码器，之后在正/反提示词里直接写该词即生效（常用于负面）。

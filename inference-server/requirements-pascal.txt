@@ -19,3 +19,15 @@ imageio>=2.34
 imageio-ffmpeg>=0.5
 # LoRA 挂载（load_lora_weights）依赖 PEFT 后端；缺失时 lora.apply 报 400
 peft==0.12.0
+# detail.refine 算子（ADetailer 式局部重绘）：YOLO 检测依赖。
+# 宿主直连 pypi 被断时容器内用阿里云镜像装：
+#   pip install -i https://mirrors.aliyun.com/pypi/simple/ --no-deps ultralytics
+#   pip install -i https://mirrors.aliyun.com/pypi/simple/ opencv-python-headless \
+#     --upgrade filelock psutil py-cpuinfo pandas scipy
+ultralytics>=8.3
+opencv-python-headless>=4.8
+filelock>=3.13
+psutil
+py-cpuinfo
+pandas
+scipy

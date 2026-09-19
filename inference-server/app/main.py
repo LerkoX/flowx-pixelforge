@@ -29,6 +29,7 @@ TOKEN = os.environ.get("INFERENCE_TOKEN", "")
 INPUT_DIR = os.environ.get("INPUT_DIR", "/input")
 VIDEO_DIR = os.environ.get("VIDEO_DIR", "/videos")
 EMBEDDINGS_DIR = os.environ.get("EMBEDDINGS_DIR", "/models/embeddings")
+DETECTOR_DIR = os.environ.get("DETECTOR_DIR", "/models/detectors")
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_MB", "32")) * 1024 * 1024
 
 app = FastAPI(title="flowx-inference-server")
@@ -227,6 +228,26 @@ def _op_vae_decode_video(vae, latents, num_frames=0, decode_chunk_size=14,
                 "该词生效（常用于负面压制缺陷）。幂等，已加载自动跳过")
 def _op_embedding_load(clip, names):
     return ops.embedding_load(clip, EMBEDDINGS_DIR, names)
+
+
+@registry.register(
+    "detail.refine",
+    inputs={"model": "MODEL", "pos": "COND", "neg": "COND", "image": "IMAGE",
+            "detector": "STRING", "conf": "FLOAT", "padding": "FLOAT",
+            "denoise": "FLOAT", "steps": "INT", "cfg": "FLOAT",
+            "sampler_name": "STRING", "seed": "INT", "guide_size": "INT",
+            "max_targets": "INT", "feather": "INT"},
+    outputs={"image": "IMAGE", "count": "INT"},
+    description="ADetailer 式局部重绘：YOLO 检测（detector=face/hand，模型在 DETECTOR_DIR）"
+                "→ 裁剪外扩 padding → 放大到 guide_size → img2img 重绘(denoise) → "
+                "羽化贴回原图。修脸/修手专用；conditioning 复用主管线，负面 embedding 同样生效")
+def _op_detail_refine(model, pos, neg, image, detector="face", conf=0.3,
+                      padding=0.4, denoise=0.4, steps=20, cfg=7.0,
+                      sampler_name="euler", seed=-1, guide_size=512,
+                      max_targets=4, feather=16):
+    return ops.detail_refine(model, pos, neg, image, DETECTOR_DIR, detector,
+                             conf, padding, denoise, steps, cfg, sampler_name,
+                             seed, guide_size, max_targets, feather)
 
 
 @registry.register(
