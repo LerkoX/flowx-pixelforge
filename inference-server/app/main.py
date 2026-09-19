@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, Response
 from PIL import Image
 from pydantic import BaseModel, Field
 
-from . import engine, execution, ops, preview
+from . import engine, execution, ops, plugins, preview
 from .jobs import JobManager
 from .model_manager import OFFLOAD_MODE, QUANTIZATION, ModelManager
 from .object_store import ObjectStore
@@ -30,6 +30,10 @@ INPUT_DIR = os.environ.get("INPUT_DIR", "/input")
 VIDEO_DIR = os.environ.get("VIDEO_DIR", "/videos")
 EMBEDDINGS_DIR = os.environ.get("EMBEDDINGS_DIR", "/models/embeddings")
 DETECTOR_DIR = os.environ.get("DETECTOR_DIR", "/models/detectors")
+# 插件算子目录：默认放 MODELS_DIR 下（bind-mount 持久化，重建容器不丢）
+PLUGINS_DIR = os.environ.get("PLUGINS_DIR", "/models/plugins.d")
+# 插件算子名 -> {"file": 文件名, "sha256": 内容哈希}；/ops 透出供客户端版本比对
+plugin_ops = {}
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_MB", "32")) * 1024 * 1024
 
 app = FastAPI(title="flowx-inference-server")
@@ -45,6 +49,17 @@ os.makedirs(VIDEO_DIR, exist_ok=True)
 
 def auth(authorization: str = Header(default="")):
     if TOKEN and authorization != f"Bearer {TOKEN}":
+        raise HTTPException(status_code=401, detail="invalid token")
+
+
+def admin_auth(authorization: str = Header(default="")):
+    """管理接口闸门：TOKEN 未配置时整个 /admin/* 不可用（404 而非 401，
+    避免暴露能力存在性）；配置后与 auth 同规则。代码上传=远程执行能力，
+    公网隧道场景必须配 token 才允许开启。"""
+    if not TOKEN:
+        raise HTTPException(status_code=404, detail="admin API disabled "
+                            "(set INFERENCE_TOKEN to enable)")
+    if authorization != f"Bearer {TOKEN}":
         raise HTTPException(status_code=401, detail="invalid token")
 
 
@@ -231,26 +246,6 @@ def _op_embedding_load(clip, names):
 
 
 @registry.register(
-    "detail.refine",
-    inputs={"model": "MODEL", "pos": "COND", "neg": "COND", "image": "IMAGE",
-            "detector": "STRING", "conf": "FLOAT", "padding": "FLOAT",
-            "denoise": "FLOAT", "steps": "INT", "cfg": "FLOAT",
-            "sampler_name": "STRING", "seed": "INT", "guide_size": "INT",
-            "max_targets": "INT", "feather": "INT"},
-    outputs={"image": "IMAGE", "count": "INT"},
-    description="ADetailer 式局部重绘：YOLO 检测（detector=face/hand，模型在 DETECTOR_DIR）"
-                "→ 裁剪外扩 padding → 放大到 guide_size → img2img 重绘(denoise) → "
-                "羽化贴回原图。修脸/修手专用；conditioning 复用主管线，负面 embedding 同样生效")
-def _op_detail_refine(model, pos, neg, image, detector="face", conf=0.3,
-                      padding=0.4, denoise=0.4, steps=20, cfg=7.0,
-                      sampler_name="euler", seed=-1, guide_size=512,
-                      max_targets=4, feather=16):
-    return ops.detail_refine(model, pos, neg, image, DETECTOR_DIR, detector,
-                             conf, padding, denoise, steps, cfg, sampler_name,
-                             seed, guide_size, max_targets, feather)
-
-
-@registry.register(
     "image.upscale",
     inputs={"image": "IMAGE", "scale": "FLOAT", "width": "INT",
             "height": "INT", "method": "STRING"},
@@ -269,6 +264,87 @@ def _op_image_upscale(image, scale=2.0, width=0, height=0, method="lanczos"):
     description="Load Image：读 INPUT_DIR 下的服务端本地图片（仅文件名）；客户端上传用 POST /images")
 def _op_image_load(name):
     return ops.image_load(INPUT_DIR, name)
+
+
+# ---------- 插件算子（启动扫描 + 运行时上传热加载） ----------
+
+# 启动扫描：plugins.d 下既有插件全量注册
+for _fn, _op_names in plugins.scan_plugins(PLUGINS_DIR, registry).items():
+    _p = os.path.join(PLUGINS_DIR, _fn)
+    with open(_p, "rb") as _f:
+        _h = plugins.sha256_of(_f.read())
+    for _n in _op_names:
+        plugin_ops[_n] = {"file": _fn, "sha256": _h}
+
+
+class PluginUpload(BaseModel):
+    filename: str
+    content: str
+    sha256: str
+
+
+@app.post("/admin/plugins", dependencies=[Depends(admin_auth)])
+def upload_plugin(p: PluginUpload):
+    """上传插件（节点自注册通道）：hash 校验 → 语法检查 → 原子落盘 → 热加载。
+    加载失败回滚文件；覆盖已有插件时同名算子以新插件为准。"""
+    content = p.content.encode("utf-8")
+    if plugins.sha256_of(content) != p.sha256:
+        raise HTTPException(status_code=400, detail="sha256 mismatch")
+    err = plugins.check_plugin_source(p.filename, content)
+    if err:
+        raise HTTPException(status_code=400, detail=err)
+    os.makedirs(PLUGINS_DIR, exist_ok=True)
+    path = os.path.join(PLUGINS_DIR, p.filename)
+    backup = None
+    if os.path.isfile(path):
+        with open(path, "rb") as f:
+            backup = f.read()
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(content)
+    os.replace(tmp, path)
+    try:
+        new_ops = plugins.load_plugin(path, registry)
+    except Exception as e:
+        # 回滚：恢复旧文件或删除；已注册的算子名一并摘除
+        if backup is not None:
+            with open(path, "wb") as f:
+                f.write(backup)
+        else:
+            os.unlink(path)
+        raise HTTPException(status_code=400,
+                            detail=f"plugin load failed (rolled back): {e}")
+    h = plugins.sha256_of(content)
+    for n in new_ops:
+        plugin_ops[n] = {"file": p.filename, "sha256": h}
+    print(f"[plugins] uploaded {p.filename} -> {new_ops}", flush=True)
+    return {"plugin": p.filename, "ops": new_ops, "sha256": h}
+
+
+@app.get("/admin/plugins", dependencies=[Depends(admin_auth)])
+def list_plugins():
+    files = {}
+    for name, info in plugin_ops.items():
+        files.setdefault(info["file"], {"sha256": info["sha256"],
+                                          "ops": []})["ops"].append(name)
+    return {"plugins_dir": PLUGINS_DIR, "plugins": files}
+
+
+@app.delete("/admin/plugins/{filename}", dependencies=[Depends(admin_auth)])
+def delete_plugin(filename: str):
+    """卸载插件：删文件 + 从注册表摘除其算子（被引用中的执行不受影响）。"""
+    if os.path.basename(filename) != filename:
+        raise HTTPException(status_code=400, detail="bad filename")
+    path = os.path.join(PLUGINS_DIR, filename)
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="plugin not found")
+    removed = [n for n, info in list(plugin_ops.items())
+               if info["file"] == filename]
+    for n in removed:
+        registry._ops.pop(n, None)
+        plugin_ops.pop(n, None)
+    os.unlink(path)
+    return {"deleted": filename, "unregistered": removed}
 
 
 # ---------- schemas ----------
@@ -393,7 +469,13 @@ def gc():
 
 @app.get("/ops", dependencies=[Depends(auth)])
 def list_ops():
-    return {"ops": registry.list()}
+    specs = registry.list()
+    for s in specs:
+        info = plugin_ops.get(s["name"])
+        if info:
+            s["plugin_hash"] = info["sha256"]
+            s["plugin_file"] = info["file"]
+    return {"ops": specs}
 
 
 @app.post("/op", dependencies=[Depends(auth)])
