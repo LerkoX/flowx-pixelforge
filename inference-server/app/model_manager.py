@@ -80,7 +80,35 @@ class ModelManager:
                 kwargs["variant"] = variant
             return cls.from_pretrained(path, **kwargs)
         return cls.from_single_file(path, torch_dtype=torch.float16,
-                                    safety_checker=None)
+                                    safety_checker=None, **self._single_file_kwargs(cls_name))
+
+    @staticmethod
+    def _single_file_kwargs(cls_name):
+        """from_single_file 的额外参数：传 config=本地 diffusers 目录可完全避开
+        hub 配置下载（宿主机 huggingface.co 不可达时的离线兜底——不传时 diffusers
+        会去 hub 拉 Lykon/dreamshaper-8 之类的默认配置，网络被断即 500）。
+        在 MODELS_DIR 下找 _class_name 匹配的 diffusers 目录（model_index.json）；
+        找不到则返回空 dict，保持原 hub 行为。"""
+        import json
+        try:
+            entries = sorted(os.listdir(MODELS_DIR))
+        except OSError:
+            return {}
+        for entry in entries:
+            d = os.path.join(MODELS_DIR, entry)
+            idx = os.path.join(d, "model_index.json")
+            if not os.path.isdir(d) or not os.path.isfile(idx):
+                continue
+            try:
+                with open(idx, encoding="utf-8") as f:
+                    meta = json.load(f)
+            except (OSError, ValueError):
+                continue
+            if meta.get("_class_name") == cls_name:
+                print(f"[model-manager] single-file config <- {d}"
+                      f"（离线兜底，免 hub 配置下载）", flush=True)
+                return {"config": d}
+        return {}
 
     def _apply_offload(self, pipe):
         """按 OFFLOAD_MODE 应用显存治理；none 时直接上卡。"""
