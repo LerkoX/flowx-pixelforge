@@ -326,6 +326,42 @@ def vae_decode_video(pipe, latents, num_frames=0, decode_chunk_size=14,
     return {"video": {"frames": frames, "fps": fps}}
 
 
+_RESAMPLE = {
+    "nearest": Image.Resampling.NEAREST,
+    "bilinear": Image.Resampling.BILINEAR,
+    "bicubic": Image.Resampling.BICUBIC,
+    "lanczos": Image.Resampling.LANCZOS,
+}
+
+
+def image_upscale(image, scale=2.0, width=0, height=0, method="lanczos"):
+    """Image Upscale：图像放大，hires.fix 的前置（放大 → vae.encode →
+    sample(denoise 0.3~0.5) 精修细节）。纯重采样本身不新增细节，细节由后续
+    img2img 精修在更高分辨率上补出。
+    尺寸二选一：width/height 均 >0 时按目标尺寸，否则按 scale 倍率；
+    结果一律向下对齐 8 的倍数（VAE 编码要求尺寸可被 8 整除）。
+    method 支持 lanczos（默认，质量最好）/bicubic/bilinear/nearest。
+    batch 列表输入逐张处理（与 vae_decode 的 batch 输出对齐）。"""
+    if method not in _RESAMPLE:
+        raise ValueError(
+            f"unknown method '{method}', available: {sorted(_RESAMPLE)}")
+
+    def _up(img):
+        w, h = img.size
+        if width > 0 and height > 0:
+            tw, th = width, height
+        else:
+            if scale <= 0:
+                raise ValueError(f"scale must be > 0, got {scale}")
+            tw, th = round(w * scale), round(h * scale)
+        tw, th = max(8, tw // 8 * 8), max(8, th // 8 * 8)
+        return img.resize((tw, th), _RESAMPLE[method])
+
+    if isinstance(image, list):
+        return {"image": [_up(i) for i in image]}
+    return {"image": _up(image)}
+
+
 def image_load(input_dir, name):
     """Load Image：读服务端 INPUT_DIR 下的本地图片 → PIL（RGB）。
     仅接受纯文件名（防路径穿越）；客户端上传走 POST /images 端点。"""
