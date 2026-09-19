@@ -17,3 +17,5 @@ uvicorn[standard]>=0.29
 pillow>=10.0
 imageio>=2.34
 imageio-ffmpeg>=0.5
+# LoRA 挂载（load_lora_weights）依赖 PEFT 后端；缺失时 lora.apply 报 400
+peft==0.12.0
