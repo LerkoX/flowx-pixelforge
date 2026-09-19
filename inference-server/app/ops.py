@@ -334,6 +334,31 @@ _RESAMPLE = {
 }
 
 
+def embedding_load(pipe, embeddings_dir, names):
+    """Textual Inversion 加载：把 embedding 文件（badhandv4/EasyNegative 等）
+    载进 CLIP 文本编码器，之后在正/反提示词里直接写该词即生效（常用于负面）。
+    names 逗号分隔；文件按 <EMBEDDINGS_DIR>/<name>.safetensors/.pt/.bin 查找。
+    幂等：token 已在词表则跳过（管道常驻共享，加载一次全局生效）。"""
+    loaded = []
+    for name in [n.strip() for n in names.split(",") if n.strip()]:
+        if name in pipe.tokenizer.get_vocab():
+            print(f"[embedding.load] '{name}' 已在词表，跳过", flush=True)
+            continue
+        base = os.path.join(embeddings_dir, name)
+        path = next((base + ext for ext in (".safetensors", ".pt", ".bin")
+                     if os.path.isfile(base + ext)), None)
+        if path is None:
+            available = (sorted(os.listdir(embeddings_dir))
+                         if os.path.isdir(embeddings_dir) else [])
+            raise FileNotFoundError(
+                f"embedding '{name}' not found in {embeddings_dir}; "
+                f"available: {available or '(empty)'}")
+        pipe.load_textual_inversion(path, token=name)
+        loaded.append(name)
+        print(f"[embedding.load] loaded {path}", flush=True)
+    return {"clip": pipe}
+
+
 def image_upscale(image, scale=2.0, width=0, height=0, method="lanczos"):
     """Image Upscale：图像放大，hires.fix 的前置（放大 → vae.encode →
     sample(denoise 0.3~0.5) 精修细节）。纯重采样本身不新增细节，细节由后续

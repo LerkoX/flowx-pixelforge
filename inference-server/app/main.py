@@ -28,6 +28,7 @@ from .registry import Registry
 TOKEN = os.environ.get("INFERENCE_TOKEN", "")
 INPUT_DIR = os.environ.get("INPUT_DIR", "/input")
 VIDEO_DIR = os.environ.get("VIDEO_DIR", "/videos")
+EMBEDDINGS_DIR = os.environ.get("EMBEDDINGS_DIR", "/models/embeddings")
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_MB", "32")) * 1024 * 1024
 
 app = FastAPI(title="flowx-inference-server")
@@ -215,6 +216,17 @@ def _op_vae_decode_video(vae, latents, num_frames=0, decode_chunk_size=14,
                          force_fp32=True, fps=24):
     return ops.vae_decode_video(vae, latents, num_frames, decode_chunk_size,
                                 force_fp32, fps)
+
+
+@registry.register(
+    "embedding.load",
+    inputs={"clip": "CLIP", "names": "STRING"},
+    outputs={"clip": "CLIP"},
+    description="Textual Inversion 加载：把 EMBEDDINGS_DIR 下的 embedding（逗号分隔，"
+                "如 badhandv4,EasyNegative）载进 CLIP 文本编码器；之后正/反提示词里直接写"
+                "该词生效（常用于负面压制缺陷）。幂等，已加载自动跳过")
+def _op_embedding_load(clip, names):
+    return ops.embedding_load(clip, EMBEDDINGS_DIR, names)
 
 
 @registry.register(
