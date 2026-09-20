@@ -67,11 +67,16 @@ def admin_auth(authorization: str = Header(default="")):
 
 @registry.register(
     "checkpoint.load",
-    inputs={"ckpt": "STRING"},
+    inputs={"ckpt": "STRING", "dtype": "STRING", "offload": "STRING",
+            "use_t5": "STRING"},
     outputs={"model": "MODEL", "clip": "CLIP", "vae": "VAE"},
-    description="加载 checkpoint 到显存（幂等），输出 model/clip/vae 三个对象")
-def _op_checkpoint_load(ckpt):
-    return ops.checkpoint_load(models, ckpt)
+    description="加载 checkpoint 到显存（幂等），输出 model/clip/vae 三个对象。"
+                "性能旋钮（dev-plan 9.6 纪律 #3）：dtype=auto/fp16/bf16/fp32、"
+                "offload=auto/none/model/sequential、use_t5=auto/on/off（仅 SD3 生效，"
+                "auto 继承 SD3_USE_T5 环境变量，默认弃用 T5-XXL）；auto 继承服务端环境变量，"
+                "不同旋钮组合是独立常驻条目（同一 LRU 管理）")
+def _op_checkpoint_load(ckpt, dtype="auto", offload="auto", use_t5="auto"):
+    return ops.checkpoint_load(models, ckpt, dtype, offload, use_t5)
 
 
 @registry.register(
@@ -255,6 +260,25 @@ def _op_embedding_load(clip, names):
                 "hires.fix 前置：放大 → vae.encode → sample(denoise 0.3~0.5) 精修细节")
 def _op_image_upscale(image, scale=2.0, width=0, height=0, method="lanczos"):
     return ops.image_upscale(image, scale, width, height, method)
+
+
+@registry.register(
+    "sd3.txt2img",
+    inputs={"model": "MODEL", "prompt": "STRING", "negative_prompt": "STRING",
+            "width": "INT", "height": "INT", "steps": "INT", "cfg": "FLOAT",
+            "seed": "INT", "preview_every": "INT"},
+    outputs={"image": "IMAGE", "seed": "INT"},
+    description="SD3.5 文生图（MMDiT 新架构，dev-plan 9.6）：管道全包，prompt 直进、"
+                "IMAGE 直出。模型经 checkpoint.load 加载（默认弃 T5-XXL，CLIP-L/G 保底）。"
+                "分钟~小时级任务，请经 POST /jobs 异步执行；preview_every>0 时进度卡片帧"
+                "留在 GET /preview/{job_id}（16ch latent 无法廉价投影成图）；"
+                "/interrupt 可取消")
+def _op_sd3_txt2img(model, prompt="", negative_prompt="", width=512, height=512,
+                    steps=28, cfg=4.5, seed=-1, preview_every=1):
+    return ops.sd3_txt2img(model, prompt, negative_prompt, width, height,
+                           steps, cfg, seed,
+                           preview_cb=_video_on_step(preview_every),
+                           interrupt_check=execution.check_cancelled)
 
 
 @registry.register(

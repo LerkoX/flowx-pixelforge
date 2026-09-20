@@ -22,6 +22,50 @@ QUANTIZATION = offload.resolve_quantization()   # fp8 接口预留，未实现�
 # 只作用于 sniff.IMAGE_ARCHS（SD1.x/SDXL），视频管道不动。VAE_FP32=0 关闭。
 VAE_FP32 = os.environ.get("VAE_FP32", "1").lower() not in ("0", "false", "no")
 
+# SD3.5（MMDiT 新架构，dev-plan 9.6）：T5-XXL fp16 ~9.5GB，超小内存环境预算，
+# 默认弃用（CLIP-L/G 双编码器保底，prompt 理解力打折但管线完整）。
+# SD3_USE_T5=1 且内存足够（≥12GB WSL + 错峰/fp8 手段）时再开；
+# 节点/算子级可用 use_t5 参数逐次覆盖本默认值（旋钮节点化纪律 #3）。
+SD3_CLASS = "StableDiffusion3Pipeline"
+SD3_USE_T5 = os.environ.get("SD3_USE_T5", "0").lower() in ("1", "true", "yes")
+
+# 性能旋钮可选值（旋钮节点化：环境变量给默认，算子参数可逐次覆盖）
+_DTYPES = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32}
+_OFFLOAD_MODES = ("none", "model", "sequential")
+
+
+def _resolve_dtype(dtype):
+    """dtype 旋钮：auto/空 → fp16（Pascal 无 bf16 硬件，fp16 是唯一实用默认）。"""
+    if dtype in (None, "", "auto"):
+        return "fp16"
+    if dtype not in _DTYPES:
+        raise ValueError(f"unknown dtype '{dtype}' (expect auto/fp16/bf16/fp32)")
+    return dtype
+
+
+def _resolve_offload(mode):
+    """offload 旋钮：auto/空 → 进程级 OFFLOAD_MODE 环境变量。"""
+    if mode in (None, "", "auto"):
+        return OFFLOAD_MODE
+    if mode not in _OFFLOAD_MODES:
+        raise ValueError(
+            f"unknown offload mode '{mode}' (expect auto/none/model/sequential)")
+    return mode
+
+
+def _resolve_use_t5(use_t5):
+    """use_t5 旋钮：auto/空 → 进程级 SD3_USE_T5 环境变量（默认弃用）。"""
+    if use_t5 in (None, "", "auto"):
+        return SD3_USE_T5
+    if isinstance(use_t5, bool):
+        return use_t5
+    s = str(use_t5).lower()
+    if s in ("1", "true", "yes", "on"):
+        return True
+    if s in ("0", "false", "no", "off"):
+        return False
+    raise ValueError(f"unknown use_t5 '{use_t5}' (expect auto/on/off)")
+
 _EXTENSIONS = (".safetensors", ".ckpt")
 _LORA_EXTENSIONS = (".safetensors", ".pt", ".bin")
 
@@ -60,8 +104,10 @@ class ModelManager:
             f"model '{name}' not found in {MODELS_DIR}; available: {available or '(empty)'}"
         )
 
-    def _instantiate(self, path, loader, cls_name):
-        """按嗅探结果实例化管道（fp16、CPU 常驻；不做 offload/上卡，由调用方决定）。"""
+    def _instantiate(self, path, loader, cls_name, dtype=torch.float16,
+                     use_t5=False):
+        """按嗅探结果实例化管道（CPU 常驻；不做 offload/上卡，由调用方决定）。
+        dtype 为加载精度旋钮；use_t5 仅作用于 SD3（False 时弃用 T5-XXL）。"""
         cls = getattr(diffusers, cls_name, None)
         if cls is None:
             raise ValueError(
@@ -69,17 +115,26 @@ class ModelManager:
                 f"(sniffed from '{path}'); 请升级 diffusers 或更换模型")
         if loader == "pretrained":
             # fp16 变体探测：组件带 *.fp16.safetensors 时按 variant 加载，
-            # 避免 fp32 权重先全量读内存再转半精度（大模型内存直接翻倍）
+            # 避免 fp32 权重先全量读内存再转半精度（大模型内存直接翻倍）。
+            # 仅 fp16 有社区 variant 惯例，其他精度不按 variant 加载。
             variant = None
-            for _root, _dirs, files in os.walk(path):
-                if any(f.endswith(".fp16.safetensors") for f in files):
-                    variant = "fp16"
-                    break
-            kwargs = {"torch_dtype": torch.float16}
+            if dtype == torch.float16:
+                for _root, _dirs, files in os.walk(path):
+                    if any(f.endswith(".fp16.safetensors") for f in files):
+                        variant = "fp16"
+                        break
+            kwargs = {"torch_dtype": dtype}
             if variant:
                 kwargs["variant"] = variant
+            if cls_name == SD3_CLASS and not use_t5:
+                # 弃用 T5-XXL（~9.5GB）：从_pretrained 显式置 None 跳过加载，
+                # 管道编码时 T5 支路自动输出空 embed（diffusers 官方支持的用法）
+                kwargs["text_encoder_3"] = None
+                kwargs["tokenizer_3"] = None
+                print("[model-manager] SD3: T5-XXL dropped (use_t5=off, "
+                      "CLIP-L/G only)", flush=True)
             return cls.from_pretrained(path, **kwargs)
-        return cls.from_single_file(path, torch_dtype=torch.float16,
+        return cls.from_single_file(path, torch_dtype=dtype,
                                     safety_checker=None, **self._single_file_kwargs(cls_name))
 
     @staticmethod
@@ -110,20 +165,31 @@ class ModelManager:
                 return {"config": d}
         return {}
 
-    def _apply_offload(self, pipe):
-        """按 OFFLOAD_MODE 应用显存治理；none 时直接上卡。"""
-        if OFFLOAD_MODE == "sequential":
+    def _apply_offload(self, pipe, mode=None):
+        """按 offload 模式应用显存治理；mode=None 时用进程级 OFFLOAD_MODE；
+        none 时直接上卡。"""
+        mode = mode or OFFLOAD_MODE
+        if mode == "sequential":
             # 逐层搬移（最省显存，吞吐最低）；调用后不得再 pipe.to("cuda")
             pipe.enable_sequential_cpu_offload()
-        elif OFFLOAD_MODE == "model":
+        elif mode == "model":
             pipe.enable_model_cpu_offload()
         else:
             pipe = pipe.to("cuda")
         return pipe
 
-    def load(self, name: str):
-        """加载模型到显存（幂等：已常驻则直接返回）。返回 (model_id, newly_loaded)。"""
+    def load(self, name: str, dtype="auto", offload="auto", use_t5="auto"):
+        """加载模型到显存（幂等：已常驻则直接返回）。返回 (model_id, newly_loaded)。
+        dtype/offload/use_t5 为性能旋钮（auto 继承进程级环境变量）；全默认时缓存键
+        即模型名（历史行为），任一显式指定则缓存键扩展为 '名字|dtype=..|offload=..|t5=..'，
+        同模型不同旋钮 = 独立常驻条目（同一 LRU 管理）。"""
         path, key = self.resolve(name)
+        dt = _resolve_dtype(dtype)
+        om = _resolve_offload(offload)
+        t5 = _resolve_use_t5(use_t5)
+        if dtype not in (None, "", "auto") or offload not in (None, "", "auto") \
+                or use_t5 not in (None, "", "auto"):
+            key = f"{key}|dtype={dt}|offload={om}|t5={int(t5)}"
         with self._lock:
             if key in self._pipes:
                 self._last_used[key] = time.time()
@@ -131,12 +197,13 @@ class ModelManager:
             self._evict_if_needed()
             t0 = time.time()
             loader, cls_name = sniff.sniff_arch(path)
-            pipe = self._instantiate(path, loader, cls_name)
+            pipe = self._instantiate(path, loader, cls_name,
+                                     dtype=_DTYPES[dt], use_t5=t5)
             if VAE_FP32 and cls_name in sniff.IMAGE_ARCHS:
                 # 须在 offload 启用前转 dtype（offload 钩子只搬移不转精度）
                 pipe.vae.to(torch.float32)
                 print("[model-manager] vae -> fp32 (VAE_FP32=1, 防黑图)", flush=True)
-            pipe = self._apply_offload(pipe)
+            pipe = self._apply_offload(pipe, mode=om)
             if QUANTIZATION != "none":
                 print(f"[model-manager] WARNING: QUANTIZATION={QUANTIZATION} "
                       f"接口已预留，当前版本未实现，按原 dtype 加载", flush=True)

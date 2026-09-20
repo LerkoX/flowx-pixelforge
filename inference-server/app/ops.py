@@ -51,10 +51,13 @@ def _enable_adapters(pipe, patches):
             pass  # 未加载过任何 LoRA
 
 
-def checkpoint_load(models, ckpt):
-    """Checkpoint Loader：加载 checkpoint，返回同一 workflow 的 model/clip/vae 三个视图。"""
-    key, _newly = models.load(ckpt)
+def checkpoint_load(models, ckpt, dtype="auto", offload="auto", use_t5="auto"):
+    """Checkpoint Loader：加载 checkpoint，返回同一 workflow 的 model/clip/vae 三个视图。
+    dtype/offload/use_t5 为性能旋钮（auto 继承服务端环境变量）——旋钮节点化
+    （dev-plan 9.6 纪律 #3）：算子参数可逐次覆盖，不同旋钮组合是独立常驻条目。"""
+    key, _newly = models.load(ckpt, dtype=dtype, offload=offload, use_t5=use_t5)
     pipe = models.get(key)
+    return {"model": pipe, "clip": pipe, "vae": pipe}
     return {"model": pipe, "clip": pipe, "vae": pipe}
 
 
@@ -398,3 +401,70 @@ def image_load(input_dir, name):
         raise FileNotFoundError(
             f"image '{name}' not found in {input_dir}; available: {available or '(empty)'}")
     return {"image": Image.open(path).convert("RGB")}
+
+
+SD3_CLASS = "StableDiffusion3Pipeline"
+
+
+def sd3_txt2img(model, prompt="", neg_prompt="", width=512, height=512,
+                steps=28, cfg=4.5, seed=-1, preview_cb=None,
+                interrupt_check=None):
+    """SD3.5 文生图（MMDiT 新架构，dev-plan 9.6）：管道全包——prompt 直接进
+    pipe、IMAGE 直接出，照 video.sample 模式（采样循环由 diffusers 承接，
+    flow matching 细节不进本仓库）。不与 SD1.x 的 clip.encode/latent 体系
+    混用（SD3 是 16ch latent + pooled embed，形状不同，MVP 不拆 COND）。
+
+    分钟~小时级任务——调用方应经异步 job（POST /jobs）执行；preview_cb /
+    interrupt_check 语义同 sample()，经 callback_on_step_end 每步回调
+    （管道不支持该回调时降级为任务边界的粗粒度取消，打日志告警）。"""
+    import inspect
+
+    pipe, patches = resolve_pipe(model)
+    cls_name = type(pipe).__name__
+    if cls_name != SD3_CLASS:
+        raise ValueError(
+            f"sd3.txt2img 只接受 {SD3_CLASS} 模型（当前 {cls_name}）；"
+            f"SD1.x/SDXL 请走 sample 算子")
+    if patches:
+        raise ValueError("SD3 LoRA 本期不支持（MVP 边界），请直连未打补丁的 MODEL")
+    if width % 16 or height % 16:
+        raise ValueError("SD3 要求 width/height 为 16 的倍数（VAE 8x + patchify 2x）")
+
+    seed = seed if seed >= 0 else random.randint(0, 2**32 - 1)
+    gen = torch.Generator(device=exec_device_of(pipe)).manual_seed(seed)
+
+    sig = inspect.signature(pipe.__call__).parameters
+    candidates = {
+        "prompt": prompt or None,
+        "negative_prompt": neg_prompt or None,
+        "width": width, "height": height,
+        "num_inference_steps": steps,
+        "guidance_scale": cfg,
+        "generator": gen,
+        "output_type": "pil",
+    }
+    call = {k: v for k, v in candidates.items() if k in sig and v is not None}
+
+    def on_step_end(p, i, t, cb_kwargs):
+        if interrupt_check is not None:
+            interrupt_check()  # 取消检查点：抛 JobCancelled 即中断
+        if preview_cb is not None:
+            try:
+                preview_cb(cb_kwargs.get("latents"), i, steps)
+            except Exception as e:
+                print(f"[sd3.txt2img] preview callback failed (ignored): {e}",
+                      flush=True)
+        return cb_kwargs
+
+    if "callback_on_step_end" in sig:
+        call["callback_on_step_end"] = on_step_end
+    else:
+        print("[sd3.txt2img] 管道不支持 callback_on_step_end："
+              "进度上报/取消降级为任务边界（粗粒度）", flush=True)
+
+    t0 = time.time()
+    out = pipe(**call)
+    image = out.images[0]
+    print(f"[sd3.txt2img] done in {time.time()-t0:.1f}s "
+          f"size={image.size} seed={seed}", flush=True)
+    return {"image": image, "seed": seed}
