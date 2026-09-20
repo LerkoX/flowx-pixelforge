@@ -1,8 +1,8 @@
 Name: sd3-txt2img
-Description: SD3.5 Medium 文生图（MMDiT 新架构，dev-plan 9.6 MVP）：健康检查 → Checkpoint 加载（默认弃 T5-XXL）→ SD3.5 采样（管道全包）→ 保存图像
+Description: SD3.5 Medium 文生图细分链（dev-plan 9.6 细分版）：健康检查 → Checkpoint 加载 → CLIP 编码(正/反) → 空 Latent(16ch) → SD3 采样器 → VAE 解码 → 保存图像
 Param:
   service_url: "http://127.0.0.1:8100"   # 推理服务地址（cpolar 隧道每次重建会变，跑前更新）
-  service_token: ""                       # 服务端 INFERENCE_TOKEN，未启用鉴权留空
+  service_token: ""                       # 服务端 INFERENCE_TOKEN
   ckpt_name: "sd3.5-medium"               # MODELS_DIR 下的 SD3.5 diffusers 目录名
   prompt: "a cute cat sitting on a windowsill, soft light, masterpiece, best quality"
   negative: "lowres, blurry, worst quality, watermark, text"
@@ -15,8 +15,14 @@ Graph: |
   stateDiagram-v2
     [*] --> Ensure
     Ensure --> LoadCheckpoint
-    LoadCheckpoint --> SD3Sample
-    SD3Sample --> SaveImage
+    Ensure --> EmptyLatent
+    LoadCheckpoint --> EncodePos
+    LoadCheckpoint --> EncodeNeg
+    EncodePos --> SD3Sampler
+    EncodeNeg --> SD3Sampler
+    EmptyLatent --> SD3Sampler
+    SD3Sampler --> SD3Decode
+    SD3Decode --> SaveImage
     SaveImage --> [*]
 Nodes:
   Ensure:
@@ -35,21 +41,58 @@ Nodes:
         service_url: "{{ Ensure.service_url }}"
         service_token: "{{ Param.service_token }}"
         ckpt_name: "{{ Param.ckpt_name }}"
-  SD3Sample:
-    name: SD3.5采样
+  EncodePos:
+    name: 正向提示词
     config:
-      nodeRef: sd3-txt2img@1.0.0
+      nodeRef: sd3-clip-encode@1.0.0
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        clip_ref: "{{ LoadCheckpoint.clip_ref }}"
+        text: "{{ Param.prompt }}"
+  EncodeNeg:
+    name: 反向提示词
+    config:
+      nodeRef: sd3-clip-encode@1.0.0
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        clip_ref: "{{ LoadCheckpoint.clip_ref }}"
+        text: "{{ Param.negative }}"
+  EmptyLatent:
+    name: 空Latent
+    config:
+      nodeRef: sd3-empty-latent@1.0.0
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        width: "{{ Param.width }}"
+        height: "{{ Param.height }}"
+        batch_size: 1
+  SD3Sampler:
+    name: SD3采样器
+    config:
+      nodeRef: sd3-sampler@1.0.0
       params:
         service_url: "{{ Ensure.service_url }}"
         service_token: "{{ Param.service_token }}"
         model_ref: "{{ LoadCheckpoint.model_ref }}"
-        prompt: "{{ Param.prompt }}"
-        negative_prompt: "{{ Param.negative }}"
-        width: "{{ Param.width }}"
-        height: "{{ Param.height }}"
+        positive: "{{ EncodePos.cond }}"
+        negative: "{{ EncodeNeg.cond }}"
+        latent: "{{ EmptyLatent.latent }}"
         seed: "{{ Param.seed }}"
         steps: "{{ Param.steps }}"
         cfg: "{{ Param.cfg }}"
+        denoise: 1.0
+  SD3Decode:
+    name: VAE解码
+    config:
+      nodeRef: sd3-vae-decode@1.0.0
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        vae_ref: "{{ LoadCheckpoint.vae_ref }}"
+        latent: "{{ SD3Sampler.latent }}"
   SaveImage:
     name: 保存图像
     config:
@@ -57,6 +100,6 @@ Nodes:
       params:
         service_url: "{{ Ensure.service_url }}"
         service_token: "{{ Param.service_token }}"
-        image: "{{ SD3Sample.image }}"
+        image: "{{ SD3Decode.image }}"
         filename_prefix: "flowx_sd3"
         output_dir: "~/flowx-output"
