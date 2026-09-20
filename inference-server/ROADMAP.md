@@ -24,7 +24,16 @@
 
 ## 1. 扩展方法论（贯穿所有阶段）
 
-新增能力的固定路径，全程无引擎改动：
+**⚡ 插件优先（2026-09-20 起生效）：完全新的算子默认走节点自注册（插件化），
+不动服务端核心代码**：节点包携带 `server_op.py`（模块级 `register(registry)`），
+节点运行时经 `flowx_client.ensure_plugin()` 比对 hash 自动上传热加载，零部署、
+可独立迭代。参考实现：`nodes/detail-refine/`、`nodes/sd3-txt2img/`。
+只有以下情况才动服务端核心（`main.py`/`ops.py`/`model_manager.py`）：
+- 扩展核心原语/加载层（如 dtype/offload/use_t5 旋钮、新架构的模型装载路径）
+- 新对象类型（`registry.py` 的 `OBJ_TYPES`）
+- 插件机制本身无法满足的性能/生命周期需求
+
+核心扩展的固定路径（仅在上述例外时使用），全程无引擎改动：
 
 1. `app/ops.py` 加一个纯函数（张量/PIL 进出，不碰网络与 ID）
 2. `app/main.py` 用 `@registry.register(...)` 注册一行
