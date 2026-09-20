@@ -5,12 +5,15 @@
 # 因此 Pascal 机型必须使用 torch <= 2.6。这里与基础镜像保持一致，固定为 2.3.1。
 torch==2.3.1
 # 下列版本与 torch 2.3.1 同时代，验证可用。
-# 不要放开上界：diffusers 新版引用 torch>=2.5 的 flex_attention，会在导入期崩溃；
-# huggingface_hub 1.x 有破坏性变更，与 diffusers 0.30 不兼容。
-diffusers==0.30.3
+# 不要放开上界：diffusers ≥0.36 引用 torch>=2.5 的 flex_attention，会在导入期崩溃；
+# huggingface_hub 1.x 有破坏性变更，与 diffusers 不兼容。
+# diffusers 0.30.3 → 0.35.2（2026-09-20）：SD3.5 需要 ≥0.31（qk_norm/dual_attention_layers，
+# SD3.5 Medium transformer 在 0.30 下 shape mismatch 无法加载）；0.35.2 已在 Pascal
+# 实测跑通全部既有代码（AnimateDiff 排障期对照实验，dev-plan 遗留清单 #6）。
+diffusers==0.35.2
 transformers==4.44.2
 accelerate==0.33.0
-huggingface-hub==0.24.7
+huggingface-hub==0.34.4
 safetensors==0.4.5
 fastapi>=0.110
 uvicorn[standard]>=0.29
@@ -18,7 +21,7 @@ pillow>=10.0
 imageio>=2.34
 imageio-ffmpeg>=0.5
 # LoRA 挂载（load_lora_weights）依赖 PEFT 后端；缺失时 lora.apply 报 400
-peft==0.12.0
+peft==0.17.1
 # detail.refine 算子（ADetailer 式局部重绘）：YOLO 检测依赖。
 # 宿主直连 pypi 被断时容器内用阿里云镜像装：
 #   pip install -i https://mirrors.aliyun.com/pypi/simple/ --no-deps ultralytics
