@@ -9,3 +9,4 @@ pillow>=10.0
 imageio>=2.34
 imageio-ffmpeg>=0.5
 peft>=0.12
+ultralytics>=8.2  # detail.refine 算子（detail-refine 插件节点）的脸/手 YOLO 检测器依赖
