@@ -3,15 +3,6 @@ Description: ComfyUI 风格文生图：健康检查 → Checkpoint 加载 → CL
 Param:
   service_url: "http://127.0.0.1:8100"   # 远程 GPU 机器上的推理服务地址
   service_token: ""                       # 服务端 INFERENCE_TOKEN，未启用鉴权留空
-  ckpt_name: "v1-5-pruned-emaonly"        # 推理服务 MODELS_DIR 下的模型文件名（可省略扩展名）
-  prompt: "a cute cat sitting on a windowsill, soft light, masterpiece, best quality"
-  negative: "lowres, blurry, worst quality, watermark, text"
-  width: 512
-  height: 512
-  seed: -1
-  steps: 20
-  cfg: 7.0
-  sampler: "euler"
 Graph: |
   stateDiagram-v2
     [*] --> Ensure
@@ -41,7 +32,7 @@ Nodes:
       params:
         service_url: "{{ Ensure.service_url }}"
         service_token: "{{ Param.service_token }}"
-        ckpt_name: "{{ Param.ckpt_name }}"
+        ckpt_name: "v1-5-pruned-emaonly"
   EncodePos:
     name: 正向提示词
     config:
@@ -50,7 +41,7 @@ Nodes:
         service_url: "{{ Ensure.service_url }}"
         service_token: "{{ Param.service_token }}"
         clip_ref: "{{ LoadCheckpoint.clip_ref }}"
-        text: "{{ Param.prompt }}"
+        text: "a cute cat sitting on a windowsill, soft light, masterpiece, best quality"
   EncodeNeg:
     name: 反向提示词
     config:
@@ -59,7 +50,7 @@ Nodes:
         service_url: "{{ Ensure.service_url }}"
         service_token: "{{ Param.service_token }}"
         clip_ref: "{{ LoadCheckpoint.clip_ref }}"
-        text: "{{ Param.negative }}"
+        text: "lowres, blurry, worst quality, watermark, text"
   EmptyLatent:
     name: 空Latent
     config:
@@ -67,8 +58,8 @@ Nodes:
       params:
         service_url: "{{ Ensure.service_url }}"
         service_token: "{{ Param.service_token }}"
-        width: "{{ Param.width }}"
-        height: "{{ Param.height }}"
+        width: 512
+        height: 512
         batch_size: 1
   KSampler:
     name: KSampler采样
@@ -81,10 +72,10 @@ Nodes:
         positive: "{{ EncodePos.conditioning }}"
         negative: "{{ EncodeNeg.conditioning }}"
         latent: "{{ EmptyLatent.latent }}"
-        seed: "{{ Param.seed }}"
-        steps: "{{ Param.steps }}"
-        cfg: "{{ Param.cfg }}"
-        sampler_name: "{{ Param.sampler }}"
+        seed: -1
+        steps: 20
+        cfg: 7.0
+        sampler_name: "euler"
         denoise: 1.0
   VAEDecode:
     name: VAE解码

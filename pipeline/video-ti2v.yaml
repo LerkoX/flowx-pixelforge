@@ -3,17 +3,6 @@ Description: 图生视频（SVD-XT 1.1）：健康检查 → Checkpoint 加载�
 Param:
   service_url: "https://content-queue-haven-will.trycloudflare.com"  # 推理服务地址（cloudflared 临时隧道 → 211:8100；隧道重建后需更新）
   service_token: ""                       # 服务端 INFERENCE_TOKEN，未启用鉴权留空
-  model_name: "stable-video-diffusion-img2vid-xt-1-1"  # 推理服务 MODELS_DIR 下的 diffusers 目录名
-  image_path: "~/flowx-input/source.png"  # 首帧图（SVD 必填）：FlowX 侧本地图片路径
-  prompt: "a cat walking through a sunlit garden, gentle camera pan, cinematic"
-  negative: "blur, distortion, low quality, watermark"
-  width: 512
-  height: 512
-  num_frames: 25                          # SVD 短 clip；25 帧 @7fps ≈ 3.5 秒
-  fps: 7
-  steps: 25
-  cfg: 3.0                                # SVD 自适应映射为 min/max_guidance_scale
-  seed: -1
 Graph: |
   stateDiagram-v2
     [*] --> Ensure
@@ -41,7 +30,7 @@ Nodes:
       params:
         service_url: "{{ Ensure.service_url }}"
         service_token: "{{ Param.service_token }}"
-        ckpt_name: "{{ Param.model_name }}"
+        ckpt_name: "stable-video-diffusion-img2vid-xt-1-1"
   LoadImage:
     name: 加载首帧（可选）
     config:
@@ -50,7 +39,7 @@ Nodes:
       params:
         service_url: "{{ Ensure.service_url }}"
         service_token: "{{ Param.service_token }}"
-        image_path: "{{ Param.image_path }}"
+        image_path: "~/flowx-input/source.png"
   VideoGen:
     name: 视频生成
     config:
@@ -60,16 +49,16 @@ Nodes:
         service_url: "{{ Ensure.service_url }}"
         service_token: "{{ Param.service_token }}"
         model_ref: "{{ LoadCheckpoint.model_ref }}"
-        prompt: "{{ Param.prompt }}"
-        negative_prompt: "{{ Param.negative }}"
+        prompt: "a cat walking through a sunlit garden, gentle camera pan, cinematic"
+        negative_prompt: "blur, distortion, low quality, watermark"
         image: "{{ LoadImage.image }}"
-        width: "{{ Param.width }}"
-        height: "{{ Param.height }}"
-        num_frames: "{{ Param.num_frames }}"
-        fps: "{{ Param.fps }}"
-        steps: "{{ Param.steps }}"
-        cfg: "{{ Param.cfg }}"
-        seed: "{{ Param.seed }}"
+        width: 512
+        height: 512
+        num_frames: 25
+        fps: 7
+        steps: 25
+        cfg: 3.0
+        seed: -1
   SaveVideo:
     name: 保存视频
     config:

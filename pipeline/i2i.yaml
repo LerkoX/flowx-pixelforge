@@ -3,15 +3,6 @@ Description: ComfyUI 风格图生图：健康检查 → Checkpoint 加载 → CL
 Param:
   service_url: "http://127.0.0.1:8100"   # 远程 GPU 机器上的推理服务地址
   service_token: ""                       # 服务端 INFERENCE_TOKEN，未启用鉴权留空
-  ckpt_name: "v1-5-pruned-emaonly"        # 推理服务 MODELS_DIR 下的模型文件名（可省略扩展名）
-  image_path: "~/flowx-input/source.png"  # FlowX 侧本地图片（PNG/JPEG，宽高建议为 8 的倍数）
-  prompt: "a cute cat sitting on a windowsill, soft light, masterpiece, best quality"
-  negative: "lowres, blurry, worst quality, watermark, text"
-  seed: -1
-  steps: 20
-  cfg: 7.0
-  sampler: "euler"
-  denoise: 0.6                            # 图生图重绘幅度：越大越偏离原图（1.0 = 纯文生图）
 Graph: |
   stateDiagram-v2
     [*] --> Ensure
@@ -43,7 +34,7 @@ Nodes:
       params:
         service_url: "{{ Ensure.service_url }}"
         service_token: "{{ Param.service_token }}"
-        ckpt_name: "{{ Param.ckpt_name }}"
+        ckpt_name: "v1-5-pruned-emaonly"
   EncodePos:
     name: 正向提示词
     config:
@@ -52,7 +43,7 @@ Nodes:
         service_url: "{{ Ensure.service_url }}"
         service_token: "{{ Param.service_token }}"
         clip_ref: "{{ LoadCheckpoint.clip_ref }}"
-        text: "{{ Param.prompt }}"
+        text: "a cute cat sitting on a windowsill, soft light, masterpiece, best quality"
   EncodeNeg:
     name: 反向提示词
     config:
@@ -61,7 +52,7 @@ Nodes:
         service_url: "{{ Ensure.service_url }}"
         service_token: "{{ Param.service_token }}"
         clip_ref: "{{ LoadCheckpoint.clip_ref }}"
-        text: "{{ Param.negative }}"
+        text: "lowres, blurry, worst quality, watermark, text"
   LoadImage:
     name: 加载原图
     config:
@@ -69,7 +60,7 @@ Nodes:
       params:
         service_url: "{{ Ensure.service_url }}"
         service_token: "{{ Param.service_token }}"
-        image_path: "{{ Param.image_path }}"
+        image_path: "~/flowx-input/source.png"
   VAEEncode:
     name: VAE编码
     config:
@@ -90,11 +81,11 @@ Nodes:
         positive: "{{ EncodePos.conditioning }}"
         negative: "{{ EncodeNeg.conditioning }}"
         latent: "{{ VAEEncode.latent }}"
-        seed: "{{ Param.seed }}"
-        steps: "{{ Param.steps }}"
-        cfg: "{{ Param.cfg }}"
-        sampler_name: "{{ Param.sampler }}"
-        denoise: "{{ Param.denoise }}"
+        seed: -1
+        steps: 20
+        cfg: 7.0
+        sampler_name: "euler"
+        denoise: 0.6
   VAEDecode:
     name: VAE解码
     config:
