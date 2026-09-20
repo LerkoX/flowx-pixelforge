@@ -7,3 +7,6 @@ inference-server/models/
 inference-server/loras/
 inference-server/input/
 inference-server/videos/
+
+# 验收抽图产物
+inference-server/scripts/accept-*-out/

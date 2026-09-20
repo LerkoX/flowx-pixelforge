@@ -15,7 +15,7 @@
 | `/prompt` `/object_info` `/view` | `/graph` `/ops` `/images/{id}` | ✅ 对应 |
 | ModelPatcher.clone + add_patches | `ops.ModelRef`（LoRA 补丁视图，可串联） | ✅ 同构 |
 | ckpt/safetensors 加载 + key 映射 | diffusers `from_single_file()` | ✅ 免费获得 |
-| 采样器 euler/dpmpp/uni_pc 等 8 种 | `samplers.py` | ⚠️ sampler 与 schedule 未解耦 |
+| 采样器 euler/dpmpp/uni_pc 等 7 种 × sigma 排布 4 种自由组合 | `samplers.py`（M2 解耦：sampler_name × scheduler 双参数，旧一体名兼容） | ✅ 已解耦 |
 | 模型显存搬移 | `OFFLOAD_MODE=none/model/sequential`（旧 `ENABLE_CPU_OFFLOAD=1` 兼容映射 model） | ✅ 三档可用 |
 | dtype 探测/fallback | 硬编码 fp16 | ❌ 未做 |
 | SDXL/SD3/Flux 架构 | 仅 SD1.x 采样/编码路径；管道类已按内容嗅探分派（sniff.py） | ⚠️ 分派机制已备，架构适配未做 |
@@ -53,15 +53,20 @@
 - FlowX 侧新节点 `load-image` / `vae-encode`，示例 `pipeline/i2i.yaml`
 - 验收：txt2img 出图 → vae.encode → denoise=0.6 重采样 → 构图保留、风格可变
 
-### 阶段 2：sigma 排布与采样算法解耦（越早越便宜的重构）
+### 阶段 2：sigma 排布与采样算法解耦（越早越便宜的重构）✅ 已交付（2026-09-21）
 
 ComfyUI 把 `sampler_name`（更新公式）与 `scheduler`（sigma 曲线）拆成两个参数自由组合。
 当前 `samplers.py` 把两者揉在一个名字里（如 `dpmpp_2m_karras`），组合一多会爆炸。
 
-- `sample` 算子签名增加 `scheduler` 参数（uniform/karras/exponential/sgm_uniform），
-  旧名字保留兼容映射
-- 同步在 FlowX 的 ksampler 节点加下拉项
-- 验收：同 seed 下 euler+karras 与旧 euler_karras 结果一致
+- ✅ `sample` 算子签名增加 `scheduler` 参数（normal/karras/exponential/beta），
+  旧名 `dpmpp_2m_karras` 兼容映射（scheduler 缺省/normal 时生效，显式值优先）
+- ✅ 组合支持性按 scheduler 类 `__init__` 签名动态判定（不写死矩阵）：
+  euler/lms/dpmpp_2m/dpmpp_2m_sde/uni_pc 支持全 4 种，euler_a/ddim 仅 normal，
+  非法组合明确报错（diffusers v0.35.2 源码核实）
+- ✅ ksampler 节点加 scheduler 下拉（1.3.0，bundle v1.4.0）；detail-refine 透传（1.2.0）
+- 未纳入：sgm_uniform/simple/ddim_uniform（diffusers 无原生开关，需自注 sigmas）
+- ✅ 验收：真机 `scripts/accept-m2-samplers.py` 全过——同 seed 下旧名与新写法
+  逐字节一致；4 个新组合出图内容正常；euler_a+karras 明确报错；euler 回归正常
 
 ### 阶段 3：dtype fallback 小修（配合 VAE 类节点）✅ 已交付（2026-09-17）
 
@@ -180,7 +185,7 @@ SD1.5 的 fp16 VAE 解码会偶发纯黑图，社区标准修法是 VAE 单独 f
 | 里程碑 | 阶段 | 解锁能力 | 预估侵入面 |
 | --- | --- | --- | --- |
 | M1 图生图 | 1 ✅ | i2i / 变体生成 | 2 个算子（已交付） |
-| M2 采样器完整 | 2 | 全采样器×sigma 组合 | samplers.py 重构 |
+| M2 采样器完整 | 2 ✅ | 全采样器×sigma 组合 | samplers.py 重构（已交付） |
 | M3 稳定 VAE | 3 ✅ | 无黑图 | model_manager 几行（已交付） |
 | M4 ControlNet | 4 | 构图控制 | 采样循环改造 |
 | M5 SDXL | 5 | 主流社区模型 | 架构分派落地 |

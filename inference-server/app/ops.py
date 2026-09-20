@@ -8,7 +8,8 @@ import time
 import torch
 from PIL import Image
 
-from .samplers import SAMPLERS, DEFAULT_SAMPLER, make_scheduler
+from .samplers import (DEFAULT_SAMPLER, DEFAULT_SCHEDULER,
+                       make_scheduler, resolve_sampler)
 
 
 class ModelRef:
@@ -82,17 +83,18 @@ def latent_empty(width=512, height=512, batch_size=1):
 
 
 def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
-           sampler_name=DEFAULT_SAMPLER, denoise=1.0, preview_cb=None,
-           interrupt_check=None):
+           sampler_name=DEFAULT_SAMPLER, scheduler=DEFAULT_SCHEDULER,
+           denoise=1.0, preview_cb=None, interrupt_check=None):
     """KSampler：手动采样循环，返回 {'latent': ..., 'seed': 实际种子}。
+    sampler_name（更新公式）× scheduler（sigma 曲线：normal/karras/exponential/beta）
+    自由组合（M2 解耦）；旧一体名 dpmpp_2m_karras 兼容（见 app.samplers）。
     model 可为裸 pipe 或带 LoRA 补丁的 ModelRef（采样前启用、采样后关闭）。
     preview_cb 可选：签名 preview_cb(latents, step_index, total)，在每一步
     去噪后回调（由调用方注入预览录制，如 app.preview.PreviewRecorder），
     本层不感知网络。
     interrupt_check 可选：无参回调，每步采样前调用，抛异常即中断
     （由调用方注入取消检查，如 app.execution.check_cancelled）。"""
-    if sampler_name not in SAMPLERS:
-        raise ValueError(f"unknown sampler '{sampler_name}', available: {sorted(SAMPLERS)}")
+    sampler_name, scheduler = resolve_sampler(sampler_name, scheduler)
 
     pipe, patches = resolve_pipe(model)
     if patches:
@@ -102,7 +104,9 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
 
     seed = seed if seed >= 0 else random.randint(0, 2**32 - 1)
     device = exec_device_of(pipe)
-    sched = make_scheduler(sampler_name, pipe.scheduler.config)
+    sched = make_scheduler(sampler_name, scheduler, pipe.scheduler.config)
+    print(f"[sample] sampler={sampler_name} scheduler={scheduler} "
+          f"steps={steps} cfg={cfg}", flush=True)
     sched.set_timesteps(steps, device=device)
     timesteps = sched.timesteps
 

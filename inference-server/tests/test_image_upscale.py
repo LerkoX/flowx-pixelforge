@@ -11,9 +11,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 # 本地无 GPU 环境桩掉这两个重依赖即可测试纯图像逻辑。
 sys.modules.setdefault("torch", types.ModuleType("torch"))
 _fake_samplers = types.ModuleType("app.samplers")
-_fake_samplers.SAMPLERS = {}
 _fake_samplers.DEFAULT_SAMPLER = "euler"
+_fake_samplers.DEFAULT_SCHEDULER = "normal"
 _fake_samplers.make_scheduler = lambda *a, **k: None
+_fake_samplers.resolve_sampler = lambda name, sched="normal": (name, sched)
 sys.modules.setdefault("app.samplers", _fake_samplers)
 
 from PIL import Image

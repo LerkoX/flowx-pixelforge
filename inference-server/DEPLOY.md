@@ -251,5 +251,5 @@ Docker 容器 flowx-inference-server（uvicorn + FastAPI）
 ```
 
 - 节点间只传对象 ID，张量驻留 GPU 内存；`?thumb=256` 可取 JPEG 缩略图
-- 采样器支持：`euler` / `euler_a` / `ddim` / `lms` / `dpmpp_2m` / `dpmpp_2m_karras` / `dpmpp_2m_sde` / `uni_pc`
+- 采样器（sampler_name × scheduler 自由组合）：`euler` / `euler_a` / `ddim` / `lms` / `dpmpp_2m` / `dpmpp_2m_sde` / `uni_pc` × `normal` / `karras` / `exponential` / `beta`（euler_a、ddim 仅 normal；兼容旧名 `dpmpp_2m_karras`）
 - 多机器扩展：在 FlowX 节点前加一层按模型名路由的反向代理即可，节点零改动

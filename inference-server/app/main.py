@@ -101,14 +101,19 @@ def _op_latent_empty(width=512, height=512, batch_size=1):
     "sample",
     inputs={"model": "MODEL", "pos": "COND", "neg": "COND", "latent": "LATENT",
             "seed": "INT", "steps": "INT", "cfg": "FLOAT",
-            "sampler_name": "STRING", "denoise": "FLOAT",
+            "sampler_name": "STRING", "scheduler": "STRING", "denoise": "FLOAT",
             "preview_every": "INT"},
     outputs={"latent": "LATENT", "seed": "INT"},
-    description="KSampler：seed/steps/cfg/sampler_name/denoise 均有默认值；"
+    description="KSampler：sampler_name（更新公式：euler/euler_a/ddim/lms/dpmpp_2m/"
+                "dpmpp_2m_sde/uni_pc）× scheduler（sigma 曲线：normal/karras/"
+                "exponential/beta）自由组合，组合支持性按 sampler 类能力校验；"
+                "seed/steps/cfg/sampler_name/scheduler/denoise 均有默认值；"
+                "兼容旧一体名 dpmpp_2m_karras；"
                 "异步 job 执行且 preview_every>0 时，逐步把 latent 预览帧（JPEG）"
                 "留在 GET /preview/{job_id}（只留最新一帧），供 Studio 中转拉取")
 def _op_sample(model, pos, neg, latent, seed=-1, steps=20, cfg=7.0,
-               sampler_name="euler", denoise=1.0, preview_every=1):
+               sampler_name="euler", scheduler="normal", denoise=1.0,
+               preview_every=1):
     hint = "sd15"
     if preview_every > 0:
         pipe, _ = ops.resolve_pipe(model)
@@ -125,7 +130,7 @@ def _op_sample(model, pos, neg, latent, seed=-1, steps=20, cfg=7.0,
                 rec.push(latents, (i + 1) / total)
 
     return ops.sample(model, pos, neg, latent, seed, steps, cfg,
-                      sampler_name, denoise, preview_cb=on_step,
+                      sampler_name, scheduler, denoise, preview_cb=on_step,
                       interrupt_check=execution.check_cancelled)
 
 
