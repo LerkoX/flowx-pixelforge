@@ -1,16 +1,8 @@
 Name: sd3-txt2img
 Description: SD3.5 Medium 文生图细分链（dev-plan 9.6 细分版）：健康检查 → Checkpoint 加载 → CLIP 编码(正/反) → 空 Latent(16ch) → SD3 采样器 → VAE 解码 → 保存图像
 Param:
-  service_url: "http://127.0.0.1:8100"   # 推理服务地址（cpolar 隧道每次重建会变，跑前更新）
-  service_token: ""                       # 服务端 INFERENCE_TOKEN
-  ckpt_name: "sd3.5-medium"               # MODELS_DIR 下的 SD3.5 diffusers 目录名
-  prompt: "a cute cat sitting on a windowsill, soft light, masterpiece, best quality"
-  negative: "lowres, blurry, worst quality, watermark, text"
-  width: 512
-  height: 512
-  seed: -1
-  steps: 28
-  cfg: 4.5
+  service_url: "http://127.0.0.1:8100"   # 推理服务地址（公共参数：全节点共享）
+  service_token: ""                       # 服务端 INFERENCE_TOKEN（公共参数）
 Graph: |
   stateDiagram-v2
     [*] --> Ensure
@@ -40,7 +32,7 @@ Nodes:
       params:
         service_url: "{{ Ensure.service_url }}"
         service_token: "{{ Param.service_token }}"
-        ckpt_name: "{{ Param.ckpt_name }}"
+        ckpt_name: "sd3.5-medium"
   EncodePos:
     name: 正向提示词
     config:
@@ -49,7 +41,7 @@ Nodes:
         service_url: "{{ Ensure.service_url }}"
         service_token: "{{ Param.service_token }}"
         clip_ref: "{{ LoadCheckpoint.clip_ref }}"
-        text: "{{ Param.prompt }}"
+        text: "a cute cat sitting on a windowsill, soft light, masterpiece, best quality"
   EncodeNeg:
     name: 反向提示词
     config:
@@ -58,7 +50,7 @@ Nodes:
         service_url: "{{ Ensure.service_url }}"
         service_token: "{{ Param.service_token }}"
         clip_ref: "{{ LoadCheckpoint.clip_ref }}"
-        text: "{{ Param.negative }}"
+        text: "lowres, blurry, worst quality, watermark, text"
   EmptyLatent:
     name: 空Latent
     config:
@@ -66,8 +58,8 @@ Nodes:
       params:
         service_url: "{{ Ensure.service_url }}"
         service_token: "{{ Param.service_token }}"
-        width: "{{ Param.width }}"
-        height: "{{ Param.height }}"
+        width: 512
+        height: 512
         batch_size: 1
   SD3Sampler:
     name: SD3采样器
@@ -80,9 +72,9 @@ Nodes:
         positive: "{{ EncodePos.cond }}"
         negative: "{{ EncodeNeg.cond }}"
         latent: "{{ EmptyLatent.latent }}"
-        seed: "{{ Param.seed }}"
-        steps: "{{ Param.steps }}"
-        cfg: "{{ Param.cfg }}"
+        seed: -1
+        steps: 28
+        cfg: 4.5
         denoise: 1.0
   SD3Decode:
     name: VAE解码
