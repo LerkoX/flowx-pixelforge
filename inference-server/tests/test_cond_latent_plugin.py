@@ -29,11 +29,15 @@ EXPECTED = {
     "cond.combine": ({"cond_a": "COND", "cond_b": "COND"}, {"cond": "COND"}),
     "cond.average": ({"cond_a": "COND", "cond_b": "COND", "weight": "FLOAT"},
                      {"cond": "COND"}),
+    "cond.set_area": ({"cond": "COND", "x": "INT", "y": "INT", "width": "INT",
+                       "height": "INT", "strength": "FLOAT"}, {"cond": "COND"}),
     "latent.upscale": ({"latent": "LATENT", "scale": "FLOAT", "width": "INT",
                         "height": "INT", "method": "STRING"},
                        {"latent": "LATENT"}),
     "latent.composite": ({"dst": "LATENT", "src": "LATENT", "x": "INT",
                           "y": "INT", "feather": "INT"}, {"latent": "LATENT"}),
+    "latent.set_noise_mask": ({"latent": "LATENT", "mask": "IMAGE"},
+                              {"latent": "LATENT"}),
 }
 
 

@@ -176,6 +176,36 @@ def main_component():
             json.dump({"_class_name": "CLIPTextModel"}, f)
         expect_comp_error(cdir, "unsupported component")
 
+        # --- ControlNet 单文件：lllyasviel 原版/ComfyUI 格式（input_hint_block.*） ---
+        p = os.path.join(d, "control_v11p_sd15_canny_fp16.safetensors")
+        fake_safetensors(p, ["input_blocks.0.0.weight",
+                             "input_hint_block.0.weight",
+                             "middle_block_out.0.weight",
+                             "zero_convs.0.0.weight"])
+        expect_comp(p, "controlnet", "single_file")
+
+        # --- ControlNet 单文件：ComfyUI 重打包格式（control_model.* 统一前缀，
+        #     comfyanonymous fp16_safetensors 仓库实测布局） ---
+        p = os.path.join(d, "control_v11p_sd15_canny_fp16_comfy.safetensors")
+        fake_safetensors(p, ["control_model.input_blocks.0.0.weight",
+                             "control_model.input_hint_block.0.weight",
+                             "control_model.zero_convs.0.0.weight"])
+        expect_comp(p, "controlnet", "single_file")
+
+        # --- ControlNet 单文件：diffusers 格式（controlnet_down_blocks.*） ---
+        p = os.path.join(d, "controlnet-diffusers.safetensors")
+        fake_safetensors(p, ["conv_in.weight", "time_embedding.linear_1.weight",
+                             "controlnet_down_blocks.0.resnets.0.norm1.weight",
+                             "controlnet_mid_block.resnets.0.norm1.weight"])
+        expect_comp(p, "controlnet", "single_file")
+
+        # --- ControlNet diffusers 组件目录 ---
+        cndir = os.path.join(d, "cn-dir")
+        os.makedirs(cndir)
+        with open(os.path.join(cndir, "config.json"), "w") as f:
+            json.dump({"_class_name": "ControlNetModel"}, f)
+        expect_comp(cndir, "controlnet", "pretrained")
+
         # --- 不支持的扩展名 ---
         p = os.path.join(d, "vae.ckpt")
         open(p, "wb").write(b"\x80\x04")

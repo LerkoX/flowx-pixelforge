@@ -248,6 +248,40 @@ class ModelManager:
                   flush=True)
             return key, True
 
+    def load_controlnet(self, name: str, dtype="auto"):
+        """单独加载 ControlNet 组件（ControlNet Loader，对标 ComfyUI ControlNetLoader）。
+        auto 默认 fp16（与底模计算精度对齐，残差注人 unet 前向）；
+        组件不做 offload（fp16 ~0.72GB），常驻进同一 LRU（key 前缀 cn:）。
+        返回 (key, newly_loaded)；ControlNetModel 本体经 get(key) 取，
+        交 ops.controlnet_apply 捆绑 hint 图后在 sample 循环内逐步前向。"""
+        path, key = self.resolve(name)
+        dt = "fp16" if dtype in (None, "", "auto") else _resolve_dtype(dtype)
+        key = f"cn:{key}|dtype={dt}"
+        with self._lock:
+            if key in self._pipes:
+                self._last_used[key] = time.time()
+                return key, False
+            kind, loader = sniff.sniff_component(path)
+            if kind != "controlnet":
+                raise ValueError(
+                    f"'{name}' 嗅探为 {kind} 组件，controlnet.load 只支持 controlnet")
+            self._evict_if_needed()
+            t0 = time.time()
+            from diffusers import ControlNetModel
+            if loader == "pretrained":
+                cn = ControlNetModel.from_pretrained(path, torch_dtype=_DTYPES[dt])
+            else:
+                # from_single_file 内置 lllyasviel 原版（control_v11*）转换
+                cn = ControlNetModel.from_single_file(path, torch_dtype=_DTYPES[dt])
+            if torch.cuda.is_available():
+                cn = cn.to("cuda")
+            self._pipes[key] = cn
+            self._archs[key] = f"ControlNetModel({loader})"
+            self._last_used[key] = time.time()
+            print(f"[model-manager] loaded controlnet '{key}' "
+                  f"in {time.time()-t0:.1f}s", flush=True)
+            return key, True
+
     def get(self, name: str):
         if name in self._pipes:  # 组合键（base+motion:x）不是文件路径，命中缓存直接返回
             self._last_used[name] = time.time()

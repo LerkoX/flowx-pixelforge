@@ -45,6 +45,98 @@ def resolve_pipe(model):
     return model, []
 
 
+class LatentBundle:
+    """latent.set_noise_mask 的产物（LATENT 对象）：samples + noise_mask。
+    noise_mask 为 (1,1,h/8,w/8) 0..1 张量；sample 循环内每步后把 mask 外区域
+    混回原始 latent 的当步加噪版（局部重绘核心，对标 ComfyUI SetLatentNoiseMask）。
+    其余算子经 resolve_latent 取 samples（mask 仅作用于采样）。"""
+
+    def __init__(self, samples, noise_mask):
+        self.samples = samples
+        self.noise_mask = noise_mask
+
+
+def resolve_latent(latent):
+    """LATENT 对象统一解包：裸张量 → (tensor, None)；
+    LatentBundle → (samples, noise_mask)。"""
+    if isinstance(latent, LatentBundle):
+        return latent.samples, latent.noise_mask
+    return latent, None
+
+
+class ControlBundle:
+    """controlnet.apply 的产物（CONTROL 对象）：ControlNetModel + hint 图 +
+    强度 + 步窗口（start/end_percent，按执行步数区间计）。
+    hint 存 PIL（apply 时不知采样分辨率），sample 内按 latent 尺寸×8 转张量。"""
+
+    def __init__(self, controlnet, image, strength=1.0,
+                 start_percent=0.0, end_percent=1.0):
+        self.controlnet = controlnet
+        self.image = image
+        self.strength = strength
+        self.start_percent = start_percent
+        self.end_percent = end_percent
+
+
+def controlnet_apply(control_net, image, strength=1.0,
+                     start_percent=0.0, end_percent=1.0):
+    """ControlNet Apply：把 ControlNetModel 与 hint 图（边缘/姿态等线稿）捆绑，
+    输出 CONTROL 对象喂 sample 的 control 端口（对标 ComfyUI ControlNetApply）。
+    strength=残差强度（0 ≡ 关闭）；start/end_percent 为生效步窗口
+    （按 sample 实际执行步数计，[start,end)），ComfyUI 同名参数语义。"""
+    if not hasattr(control_net, "forward") or not hasattr(control_net, "dtype"):
+        raise ValueError(
+            f"controlnet.apply: control_net 需为 ControlNetModel，"
+            f"got {type(control_net).__name__}")
+    if isinstance(image, list):
+        if len(image) != 1:
+            raise ValueError(
+                f"controlnet.apply: hint 图需单张（batch hint 暂不支持），"
+                f"got {len(image)} 张")
+        image = image[0]
+    if not isinstance(image, Image.Image):
+        raise ValueError(
+            f"controlnet.apply: image 需为 PIL 图像，got {type(image).__name__}")
+    if not 0.0 <= start_percent < 1.0:
+        raise ValueError(f"start_percent 需在 [0,1)，got {start_percent}")
+    if not 0.0 < end_percent <= 1.0:
+        raise ValueError(f"end_percent 需在 (0,1]，got {end_percent}")
+    if end_percent <= start_percent:
+        raise ValueError(
+            f"步窗口为空：[{start_percent},{end_percent})")
+    print(f"[controlnet.apply] strength={strength} "
+          f"window=[{start_percent},{end_percent}) hint={image.size}", flush=True)
+    return {"control": ControlBundle(control_net, image, float(strength),
+                                     float(start_percent), float(end_percent))}
+
+
+def as_cond_segments(cond, name="cond"):
+    """COND 归一化为段列表 [(tensor, area|None, strength), ...]：
+    裸张量 → 单个整图段；cond.set_area 产物（段列表）原样校验通过；
+    SD3 dict 形式明确拒绝。area = (ly, lx, lh, lw) latent 像素坐标。"""
+    if isinstance(cond, dict):
+        raise ValueError(
+            f"{name}: 暂不支持 SD3 dict 形式 COND（embeds+pooled），"
+            f"仅支持 SD1.x/SDXL 张量形式")
+    if isinstance(cond, list):
+        segs = []
+        for item in cond:
+            if not (isinstance(item, (list, tuple)) and len(item) == 3):
+                raise ValueError(
+                    f"{name}: COND 段需为 (tensor, area, strength) 三元组，"
+                    f"got {type(item).__name__}")
+            t, area, s = item
+            if not torch.is_tensor(t):
+                raise ValueError(f"{name}: COND 段张量缺失，got {type(t).__name__}")
+            segs.append((t, area, float(s)))
+        if not segs:
+            raise ValueError(f"{name}: COND 段列表为空")
+        return segs
+    if not torch.is_tensor(cond):
+        raise ValueError(f"{name}: COND 需为张量，got {type(cond).__name__}")
+    return [(cond, None, 1.0)]
+
+
 def exec_device_of(pipe):
     """取执行设备：offload（model/sequential）模式下子模块驻留 meta/cpu，
     pipe.device 属性会返回 meta（取第一个模块的设备），必须用 diffusers 记录的
@@ -124,7 +216,7 @@ def resolve_span(steps, denoise=1.0, start_at_step=0, end_at_step=0):
 def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
            sampler_name=DEFAULT_SAMPLER, scheduler=DEFAULT_SCHEDULER,
            denoise=1.0, start_at_step=0, end_at_step=0, add_noise=True,
-           preview_cb=None, interrupt_check=None):
+           control=None, preview_cb=None, interrupt_check=None):
     """KSampler：手动采样循环，返回 {'latent': ..., 'seed': 实际种子}。
     sampler_name（更新公式）× scheduler（sigma 曲线：normal/karras/exponential/beta）
     自由组合（M2 解耦）；旧一体名 dpmpp_2m_karras 兼容（见 app.samplers）。
@@ -138,6 +230,16 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
     - add_noise=False 且 start_at_step=0/denoise=1：输入 latent 原样起步
       （ComfyUI disable noise 语义，使用者自负）
     - 默认值（0/0/True + denoise）下与历史行为逐字节一致
+
+    注入三类（M4 采样循环改造；均为可选，全缺省时走既有快速路径，逐字节不变）：
+    - control（CONTROL 对象，controlnet.apply 产物）：步窗口内逐步跑 ControlNet
+      前向，残差×strength 注入 unet（down/mid_block_additional_residuals）；
+      整图 cond 且正/负等长时按 diffusers CFG 惯例拼批（单次 cn+unet 前向）
+    - COND 段列表（cond.set_area 产物）：每段单独前向，按区域 mask×strength
+      加权混合（ComfyUI 同款求和语义：重叠区域影响叠加，不归一化）；
+      与 control 互斥（每段都跑 controlnet 成本×N，明确报错）
+    - noise_mask（LatentBundle，latent.set_noise_mask 产物）：每步后把 mask
+      外区域混回原始 latent 的当步加噪版（局部重绘）
 
     preview_cb 可选：签名 preview_cb(latents, step_index, total)，在每一步
     去噪后回调（由调用方注入预览录制，如 app.preview.PreviewRecorder），
@@ -160,8 +262,10 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
     sched.set_timesteps(steps, device=device)
     timesteps = sched.timesteps
 
+    base_samples, noise_mask = resolve_latent(base)
     gen = torch.Generator(device=device).manual_seed(seed)
-    noise = torch.randn(base.shape, generator=gen, device=device, dtype=base.dtype)
+    noise = torch.randn(base_samples.shape, generator=gen, device=device,
+                        dtype=base_samples.dtype)
 
     start, end = resolve_span(steps, denoise, start_at_step, end_at_step)
     if start_at_step > 0 and denoise < 0.999:
@@ -170,33 +274,135 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
     ts = timesteps[start:end]
     if not add_noise:
         # 接力模式：输入 latent 已是 start 步的状态（含残余噪声），不再加噪
-        latents = base.clone()
+        latents = base_samples.clone()
         print(f"[sample] add_noise=False -> 接力输入 latent，"
               f"span=[{start},{end})", flush=True)
     elif start_at_step <= 0 and denoise >= 0.999:
-        latents = (noise * sched.init_noise_sigma).to(base.dtype)
+        latents = (noise * sched.init_noise_sigma).to(base_samples.dtype)
     else:
-        latents = sched.add_noise(base, noise,
-                                  timesteps[start:start + 1]).to(base.dtype)
+        latents = sched.add_noise(base_samples, noise,
+                                  timesteps[start:start + 1]).to(base_samples.dtype)
         print(f"[sample] denoise={denoise} start_at_step={start_at_step} "
               f"-> skip first {start} steps", flush=True)
     if end < steps:
         print(f"[sample] end_at_step={end} -> 提前停，latent 带残余噪声可接力",
               flush=True)
 
-    b = base.shape[0]
-    pos_e = pos.expand(b, -1, -1)
-    neg_e = neg.expand(b, -1, -1)
-    # 正/负 cond 序列长度不一致（cond.combine 拼接产物）：分两次 UNet 前向，
-    # 不做零填充（pad 会作为额外 token 参与注意力污染语义）；长度一致时
-    # 保持既有的 neg/pos 拼批单次前向（行为逐字节不变）
-    split_cond = pos_e.shape[1] != neg_e.shape[1]
+    b = base_samples.shape[0]
+
+    # noise_mask（局部重绘）：mask 外区域每步混回原始 latent 的当步加噪版
+    if noise_mask is not None:
+        noise_mask = noise_mask.to(device=latents.device, dtype=latents.dtype)
+        if tuple(noise_mask.shape[-2:]) != tuple(latents.shape[-2:]):
+            raise ValueError(
+                f"noise_mask 尺寸 {tuple(noise_mask.shape[-2:])} 与 latent "
+                f"{tuple(latents.shape[-2:])} 不符（需同分辨率 latent）")
+        if noise_mask.shape[0] == 1 and b > 1:
+            noise_mask = noise_mask.expand(b, -1, -1, -1)
+        print("[sample] noise_mask 生效：mask 外区域每步混回原 latent", flush=True)
+
+    # COND 归一化为段列表；裸张量（无区域、strength=1）为 plain
+    pos_segs = as_cond_segments(pos, "pos")
+    neg_segs = as_cond_segments(neg, "neg")
+    pos_plain = len(pos_segs) == 1 and pos_segs[0][1] is None \
+        and pos_segs[0][2] == 1.0
+    neg_plain = len(neg_segs) == 1 and neg_segs[0][1] is None \
+        and neg_segs[0][2] == 1.0
+    if control is not None and not (pos_plain and neg_plain):
+        raise ValueError(
+            "controlnet 暂不与 cond.set_area 组合（每段都要跑 controlnet，"
+            "成本×N）；请仅用整图 cond 或先去掉 control")
+
+    # ControlNet 预准备：hint 按采样分辨率转张量 + 步窗口
+    hint = None
+    win_lo = win_hi = 0
+    if control is not None:
+        import numpy as np  # 懒加载：模块级保持纯 torch 面（无 GPU 单测可导入）
+        hp, wp = latents.shape[2] * 8, latents.shape[3] * 8
+        img = control.image
+        if img.size != (wp, hp):
+            img = img.resize((wp, hp), Image.BILINEAR)
+        arr = np.asarray(img.convert("RGB"), dtype=np.float32) / 255.0
+        hint = torch.from_numpy(arr).permute(2, 0, 1)[None]
+        hint = hint.to(device=device, dtype=pipe.unet.dtype)
+        hint = hint.expand(b, -1, -1, -1)
+        win_lo = round(control.start_percent * len(ts))
+        win_hi = round(control.end_percent * len(ts))
+        print(f"[sample] controlnet strength={control.strength} "
+              f"window=[{win_lo},{win_hi}) of {len(ts)} steps", flush=True)
+
+    def cn_residuals(i, inp, t, hidden):
+        """当前步的 controlnet 残差（窗口外/无 control 返回 None）。
+        inp/hidden 批数与 unet 输入一致（cat 拼批 2b 时 hint 复制两份）。"""
+        if control is None or not (win_lo <= i < win_hi):
+            return None
+        h = hint if hidden.shape[0] == b else torch.cat([hint, hint])
+        down, mid = control.controlnet(
+            inp, t, encoder_hidden_states=hidden, controlnet_cond=h,
+            conditioning_scale=control.strength, return_dict=False)
+        return down, mid
+
+    def unet_forward(inp, t, hidden, res):
+        """带可选残差注入的 unet 前向。"""
+        if res is None:
+            return pipe.unet(inp, t, encoder_hidden_states=hidden).sample
+        down, mid = res
+        return pipe.unet(inp, t, encoder_hidden_states=hidden,
+                         down_block_additional_residuals=down,
+                         mid_block_additional_residual=mid).sample
+
+    # 前向路径分派：cat（既有拼批，逐字节不变）/ split（既有双前向）/ area（分段混合）
     hidden = None
-    if split_cond:
-        print(f"[sample] cond 长度不一致 pos={pos_e.shape[1]} "
-              f"neg={neg_e.shape[1]}：分两次 UNet 前向", flush=True)
+    seg_mode = "cat"
+    if pos_plain and neg_plain:
+        pos_e = pos_segs[0][0].expand(b, -1, -1)
+        neg_e = neg_segs[0][0].expand(b, -1, -1)
+        # 正/负 cond 序列长度不一致（cond.combine 拼接产物）：分两次 UNet 前向，
+        # 不做零填充（pad 会作为额外 token 参与注意力污染语义）；长度一致时
+        # 保持既有的 neg/pos 拼批单次前向（行为逐字节不变）
+        if pos_e.shape[1] != neg_e.shape[1]:
+            seg_mode = "split"
+            print(f"[sample] cond 长度不一致 pos={pos_e.shape[1]} "
+                  f"neg={neg_e.shape[1]}：分两次 UNet 前向", flush=True)
+        else:
+            hidden = torch.cat([neg_e, pos_e])
     else:
-        hidden = torch.cat([neg_e, pos_e])
+        seg_mode = "area"
+        # 区域 mask 预编译（latent 分辨率），裁剪到 latent 范围内
+        h_l, w_l = latents.shape[-2:]
+
+        def _seg_mask(area):
+            ly, lx, lh, lw = area
+            y0, x0 = max(0, ly), max(0, lx)
+            y1, x1 = min(h_l, ly + lh), min(w_l, lx + lw)
+            if y1 <= y0 or x1 <= x0:
+                raise ValueError(
+                    f"cond.set_area: 区域 {tuple(area)} 与 latent "
+                    f"{h_l}x{w_l} 无交集")
+            m = latents.new_zeros(1, 1, h_l, w_l)
+            m[0, 0, y0:y1, x0:x1] = 1.0
+            return m
+
+        pos_masks = [None if a is None else _seg_mask(a)
+                     for _, a, _ in pos_segs]
+        neg_masks = [None if a is None else _seg_mask(a)
+                     for _, a, _ in neg_segs]
+        print(f"[sample] cond 分段：pos={len(pos_segs)} 段 "
+              f"neg={len(neg_segs)} 段，按区域 mask×strength 混合", flush=True)
+
+        def blend_side(segs, masks, inp, t):
+            """逐段前向 + 区域加权混合（求和语义，不归一化——与 ComfyUI 一致，
+            重叠区域影响叠加；无 area 的段视为整图）。"""
+            out = None
+            for (tensor, _area, s), m in zip(segs, masks):
+                e = tensor.expand(b, -1, -1)
+                o = pipe.unet(inp, t, encoder_hidden_states=e).sample
+                if m is not None:
+                    o = o * m
+                if s != 1.0:
+                    o = o * s
+                out = o if out is None else out + o
+            return out
 
     t0 = time.time()
     try:
@@ -204,19 +410,27 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
             for i, t in enumerate(ts):
                 if interrupt_check is not None:
                     interrupt_check()  # 取消检查点：抛异常即中断采样
-                if split_cond:
-                    inp = sched.scale_model_input(latents, t)
-                    uncond = pipe.unet(inp, t,
-                                       encoder_hidden_states=neg_e).sample
-                    cond = pipe.unet(inp, t,
-                                     encoder_hidden_states=pos_e).sample
-                else:
+                if seg_mode == "cat":
                     inp = sched.scale_model_input(torch.cat([latents] * 2), t)
-                    noise_pred = pipe.unet(inp, t,
-                                           encoder_hidden_states=hidden).sample
+                    res = cn_residuals(i, inp, t, hidden)
+                    noise_pred = unet_forward(inp, t, hidden, res)
                     uncond, cond = noise_pred.chunk(2)
+                elif seg_mode == "split":
+                    inp = sched.scale_model_input(latents, t)
+                    uncond = unet_forward(
+                        inp, t, neg_e, cn_residuals(i, inp, t, neg_e))
+                    cond = unet_forward(
+                        inp, t, pos_e, cn_residuals(i, inp, t, pos_e))
+                else:
+                    inp = sched.scale_model_input(latents, t)
+                    uncond = blend_side(neg_segs, neg_masks, inp, t)
+                    cond = blend_side(pos_segs, pos_masks, inp, t)
                 guided = uncond + cfg * (cond - uncond)
                 latents = sched.step(guided, t, latents).prev_sample
+                if noise_mask is not None:
+                    orig_noisy = sched.add_noise(
+                        base_samples, noise, t.reshape(1)).to(latents.dtype)
+                    latents = latents * noise_mask + orig_noisy * (1 - noise_mask)
                 print(f"[sample] step {i+1}/{len(ts)}", flush=True)
                 if preview_cb is not None:
                     try:
@@ -257,7 +471,9 @@ def motion_load(models, ckpt, motion):
 def vae_decode(pipe, latents):
     """VAE Decode：latent → PIL 图像（batch>1 时为列表）。
     latent 按 VAE 实际 dtype 转换（M3：VAE 可能已独立转 fp32 防黑图，
-    而采样链路 latent 保持 fp16）。"""
+    而采样链路 latent 保持 fp16）。LatentBundle（带 noise_mask）取 samples
+    解码——mask 仅作用于采样。"""
+    latents, _mask = resolve_latent(latents)
     with torch.no_grad():
         img = pipe.vae.decode(
             latents.to(dtype=pipe.vae.dtype) / pipe.vae.config.scaling_factor,
@@ -268,7 +484,8 @@ def vae_decode(pipe, latents):
 
 def vae_encode(pipe, image):
     """VAE Encode：PIL 图像（或列表）→ latent，供图生图（denoise<1）重采样。
-    乘 scaling_factor 与 vae_decode 的除法互逆（ComfyUI VAEEncode 同语义）。"""
+    乘 scaling_factor 与 vae_decode 的除法互逆（ComfyUI VAEEncode 同语义）。
+    输出裸张量；局部重绘请再经 latent.set_noise_mask 包 mask。"""
     images = image if isinstance(image, list) else [image]
     tensors = [pipe.image_processor.preprocess(img) for img in images]
     img_t = torch.cat(tensors).to(device=exec_device_of(pipe), dtype=pipe.vae.dtype)

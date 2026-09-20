@@ -103,7 +103,7 @@ def _op_latent_empty(width=512, height=512, batch_size=1):
             "seed": "INT", "steps": "INT", "cfg": "FLOAT",
             "sampler_name": "STRING", "scheduler": "STRING", "denoise": "FLOAT",
             "start_at_step": "INT", "end_at_step": "INT", "add_noise": "BOOL",
-            "preview_every": "INT"},
+            "control": "CONTROL", "preview_every": "INT"},
     outputs={"latent": "LATENT", "seed": "INT"},
     description="KSampler：sampler_name（更新公式：euler/euler_a/ddim/lms/dpmpp_2m/"
                 "dpmpp_2m_sde/uni_pc）× scheduler（sigma 曲线：normal/karras/"
@@ -113,12 +113,16 @@ def _op_latent_empty(width=512, height=512, batch_size=1):
                 "分段采样（KSampler Advanced）：start_at_step>0 从该步开始（优先于 "
                 "denoise），end_at_step>0 提前停（latent 带残余噪声可接力），"
                 "add_noise=false 不加噪直接接力上一段输出；"
+                "control 可选（controlnet.apply 产物）：ControlNet 残差注入，"
+                "正/负等长时按 CFG 拼批单次前向；"
+                "COND 支持 cond.set_area 分段（区域条件混合）；"
+                "latent 支持 latent.set_noise_mask 包裹（局部重绘，mask 外混回原图）；"
                 "异步 job 执行且 preview_every>0 时，逐步把 latent 预览帧（JPEG）"
                 "留在 GET /preview/{job_id}（只留最新一帧），供 Studio 中转拉取")
 def _op_sample(model, pos, neg, latent, seed=-1, steps=20, cfg=7.0,
                sampler_name="euler", scheduler="normal", denoise=1.0,
                start_at_step=0, end_at_step=0, add_noise=True,
-               preview_every=1):
+               control=None, preview_every=1):
     hint = "sd15"
     if preview_every > 0:
         pipe, _ = ops.resolve_pipe(model)
@@ -136,7 +140,8 @@ def _op_sample(model, pos, neg, latent, seed=-1, steps=20, cfg=7.0,
 
     return ops.sample(model, pos, neg, latent, seed, steps, cfg,
                       sampler_name, scheduler, denoise, start_at_step,
-                      end_at_step, add_noise, preview_cb=on_step,
+                      end_at_step, add_noise, control=control,
+                      preview_cb=on_step,
                       interrupt_check=execution.check_cancelled)
 
 
@@ -151,6 +156,35 @@ def _op_sample(model, pos, neg, latent, seed=-1, steps=20, cfg=7.0,
 def _op_vae_load(name, dtype="auto"):
     key, _newly = models.load_vae(name, dtype)
     return {"vae": models.get(key)}
+
+
+@registry.register(
+    "controlnet.load",
+    inputs={"name": "STRING", "dtype": "STRING"},
+    outputs={"control_net": "CONTROL_NET"},
+    description="ControlNet Loader：单独加载 ControlNet 组件（MODELS_DIR 下 "
+                "control_v11* 等 safetensors 单文件或 diffusers 组件目录），"
+                "dtype=auto/fp16/bf16/fp32，auto 默认 fp16；进同一 LRU 常驻管理。"
+                "输出经 controlnet.apply 捆绑 hint 图后喂 sample 的 control 端口")
+def _op_controlnet_load(name, dtype="auto"):
+    key, _newly = models.load_controlnet(name, dtype)
+    return {"control_net": models.get(key)}
+
+
+@registry.register(
+    "controlnet.apply",
+    inputs={"control_net": "CONTROL_NET", "image": "IMAGE",
+            "strength": "FLOAT", "start_percent": "FLOAT",
+            "end_percent": "FLOAT"},
+    outputs={"control": "CONTROL"},
+    description="ControlNet Apply：ControlNetModel + hint 图（边缘/姿态等线稿，"
+                "预处理器产出）捆绑为 CONTROL；strength=残差强度（默认 1.0，"
+                "0 ≡ 关闭）；start/end_percent 为生效步窗口（默认全程）。"
+                "暂不与 cond.set_area 组合")
+def _op_controlnet_apply(control_net, image, strength=1.0,
+                         start_percent=0.0, end_percent=1.0):
+    return ops.controlnet_apply(control_net, image, strength,
+                                start_percent, end_percent)
 
 
 @registry.register(
