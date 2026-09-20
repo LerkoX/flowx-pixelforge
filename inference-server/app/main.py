@@ -102,6 +102,7 @@ def _op_latent_empty(width=512, height=512, batch_size=1):
     inputs={"model": "MODEL", "pos": "COND", "neg": "COND", "latent": "LATENT",
             "seed": "INT", "steps": "INT", "cfg": "FLOAT",
             "sampler_name": "STRING", "scheduler": "STRING", "denoise": "FLOAT",
+            "start_at_step": "INT", "end_at_step": "INT", "add_noise": "BOOL",
             "preview_every": "INT"},
     outputs={"latent": "LATENT", "seed": "INT"},
     description="KSampler：sampler_name（更新公式：euler/euler_a/ddim/lms/dpmpp_2m/"
@@ -109,10 +110,14 @@ def _op_latent_empty(width=512, height=512, batch_size=1):
                 "exponential/beta）自由组合，组合支持性按 sampler 类能力校验；"
                 "seed/steps/cfg/sampler_name/scheduler/denoise 均有默认值；"
                 "兼容旧一体名 dpmpp_2m_karras；"
+                "分段采样（KSampler Advanced）：start_at_step>0 从该步开始（优先于 "
+                "denoise），end_at_step>0 提前停（latent 带残余噪声可接力），"
+                "add_noise=false 不加噪直接接力上一段输出；"
                 "异步 job 执行且 preview_every>0 时，逐步把 latent 预览帧（JPEG）"
                 "留在 GET /preview/{job_id}（只留最新一帧），供 Studio 中转拉取")
 def _op_sample(model, pos, neg, latent, seed=-1, steps=20, cfg=7.0,
                sampler_name="euler", scheduler="normal", denoise=1.0,
+               start_at_step=0, end_at_step=0, add_noise=True,
                preview_every=1):
     hint = "sd15"
     if preview_every > 0:
@@ -130,8 +135,22 @@ def _op_sample(model, pos, neg, latent, seed=-1, steps=20, cfg=7.0,
                 rec.push(latents, (i + 1) / total)
 
     return ops.sample(model, pos, neg, latent, seed, steps, cfg,
-                      sampler_name, scheduler, denoise, preview_cb=on_step,
+                      sampler_name, scheduler, denoise, start_at_step,
+                      end_at_step, add_noise, preview_cb=on_step,
                       interrupt_check=execution.check_cancelled)
+
+
+@registry.register(
+    "vae.load",
+    inputs={"name": "STRING", "dtype": "STRING"},
+    outputs={"vae": "VAE"},
+    description="Load VAE：单独加载 VAE 组件（MODELS_DIR 下 safetensors 单文件或 "
+                "diffusers 组件目录），输出可直接喂 vae.decode/vae.encode 替代管道内置 "
+                "VAE（外挂 vae-ft-mse 等提升解码质量）。dtype=auto/fp16/fp32，auto "
+                "默认 fp32（外挂 VAE 的意义即解码质量）；进同一 LRU 常驻管理")
+def _op_vae_load(name, dtype="auto"):
+    key, _newly = models.load_vae(name, dtype)
+    return {"vae": models.get(key)}
 
 
 @registry.register(

@@ -9,7 +9,7 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from app.sniff import sniff_arch
+from app.sniff import sniff_arch, sniff_component
 
 
 def fake_safetensors(path, keys):
@@ -101,5 +101,89 @@ def main():
     print("\nALL SNIFF TESTS PASSED")
 
 
+def expect_comp(path, kind, loader):
+    got = sniff_component(path)
+    assert got == (kind, loader), f"{path}: expect ({kind}, {loader}), got {got}"
+    print(f"OK: {os.path.basename(path)} -> component {got}")
+
+
+def expect_comp_error(path, needle=""):
+    try:
+        got = sniff_component(path)
+        raise AssertionError(f"{path}: expect ValueError, got {got}")
+    except ValueError as e:
+        if needle:
+            assert needle in str(e), f"{path}: '{needle}' not in {e}"
+        print(f"OK: {os.path.basename(path)} -> ValueError: {str(e)[:60]}...")
+
+
+def main_component():
+    """组件级嗅探（Load VAE）用例。"""
+    with tempfile.TemporaryDirectory() as d:
+        # --- ComfyUI 格式 VAE 单文件 ---
+        p = os.path.join(d, "vae-ft-mse-840000.safetensors")
+        fake_safetensors(p, ["first_stage_model.encoder.conv_in.weight",
+                             "first_stage_model.decoder.conv_in.weight",
+                             "first_stage_model.quant_conv.weight"])
+        expect_comp(p, "vae", "single_file")
+
+        # --- diffusers 格式 VAE 单文件（裸组件 key） ---
+        p = os.path.join(d, "vae-diffusers.safetensors")
+        fake_safetensors(p, ["encoder.conv_in.weight", "decoder.conv_in.weight",
+                             "quant_conv.weight"])
+        expect_comp(p, "vae", "single_file")
+
+        # --- 完整 checkpoint 明确拒绝（ComfyUI / diffusers 两种布局） ---
+        p = os.path.join(d, "full-comfy.safetensors")
+        fake_safetensors(p, ["first_stage_model.encoder.conv_in.weight",
+                             "model.diffusion_model.input_blocks.0.0.weight",
+                             "cond_stage_model.transformer.text_model.encoder.layers.0.self_attn.q_proj.weight"])
+        expect_comp_error(p, "完整 checkpoint")
+
+        p = os.path.join(d, "full-diffusers.safetensors")
+        fake_safetensors(p, ["vae.encoder.conv_in.weight", "unet.conv_in.weight",
+                             "text_encoder.text_model.encoder.layers.0.self_attn.q_proj.weight"])
+        expect_comp_error(p, "完整 checkpoint")
+
+        # --- 无法识别的组件 key ---
+        p = os.path.join(d, "mystery-comp.safetensors")
+        fake_safetensors(p, ["some.random.weight"])
+        expect_comp_error(p, "unknown state_dict key layout")
+
+        # --- diffusers 组件目录（config.json 无 model_index.json） ---
+        vdir = os.path.join(d, "vae-dir")
+        os.makedirs(vdir)
+        with open(os.path.join(vdir, "config.json"), "w") as f:
+            json.dump({"_class_name": "AutoencoderKL"}, f)
+        expect_comp(vdir, "vae", "pretrained")
+
+        # --- 整管目录拒绝 ---
+        pdir = os.path.join(d, "pipe-dir")
+        os.makedirs(pdir)
+        with open(os.path.join(pdir, "model_index.json"), "w") as f:
+            json.dump({"_class_name": "StableDiffusionPipeline"}, f)
+        expect_comp_error(pdir, "checkpoint.load")
+
+        # --- 两无目录 ---
+        edir = os.path.join(d, "empty-dir")
+        os.makedirs(edir)
+        expect_comp_error(edir, "config.json")
+
+        # --- 不支持的组件类 ---
+        cdir = os.path.join(d, "clip-dir")
+        os.makedirs(cdir)
+        with open(os.path.join(cdir, "config.json"), "w") as f:
+            json.dump({"_class_name": "CLIPTextModel"}, f)
+        expect_comp_error(cdir, "unsupported component")
+
+        # --- 不支持的扩展名 ---
+        p = os.path.join(d, "vae.ckpt")
+        open(p, "wb").write(b"\x80\x04")
+        expect_comp_error(p, "unsupported component file")
+
+    print("\nALL SNIFF COMPONENT TESTS PASSED")
+
+
 if __name__ == "__main__":
     main()
+    main_component()

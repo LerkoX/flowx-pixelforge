@@ -12,6 +12,23 @@ from .samplers import (DEFAULT_SAMPLER, DEFAULT_SCHEDULER,
                        make_scheduler, resolve_sampler)
 
 
+class VAEShim:
+    """独立加载的 VAE 组件的管道视图（Load VAE，对标 ComfyUI VAELoader）。
+    duck-type 对齐 ops.vae_decode / vae_encode 的使用面（.vae /
+    .image_processor / .device），算子零改动即可把外挂 VAE（vae-ft-mse 等）
+    接入解码/编码链路；与常驻管道解耦（不动管道内置 VAE）。"""
+
+    def __init__(self, vae):
+        from diffusers.image_processor import VaeImageProcessor
+        self.vae = vae
+        scale = 2 ** (len(vae.config.block_out_channels) - 1)
+        self.image_processor = VaeImageProcessor(vae_scale_factor=scale)
+
+    @property
+    def device(self):
+        return next(self.vae.parameters()).device
+
+
 class ModelRef:
     """打过 LoRA 补丁的 MODEL 视图，对应 ComfyUI ModelPatcher.clone + add_patches：
     不改原管道，只记录补丁列表，采样时才按需启用。可串联叠加多个 LoRA。"""
@@ -82,13 +99,46 @@ def latent_empty(width=512, height=512, batch_size=1):
     return {"latent": latent}
 
 
+def resolve_span(steps, denoise=1.0, start_at_step=0, end_at_step=0):
+    """KSampler Advanced 步区间解析（纯函数，便于无 GPU 单测）。
+    返回采样要执行的时间步区间 [start, end)：
+    - start_at_step>0：显式分段起点（封顶 steps-1），优先于 denoise
+    - 否则 denoise>=0.999 从头（start=0）；denoise<1 按既有语义推算起点
+    - end_at_step<=0 或越界时跑到尾（end=steps）
+    区间为空（end<=start）抛 ValueError。"""
+    if steps < 1:
+        raise ValueError(f"steps must be >= 1, got {steps}")
+    if start_at_step > 0:
+        start = min(start_at_step, steps - 1)
+    elif denoise >= 0.999:
+        start = 0
+    else:
+        start = min(int(round(steps * (1 - denoise))), steps - 1)
+    end = steps if end_at_step <= 0 else min(end_at_step, steps)
+    if end <= start:
+        raise ValueError(
+            f"empty sampling span: start={start} end={end} (steps={steps})")
+    return start, end
+
+
 def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
            sampler_name=DEFAULT_SAMPLER, scheduler=DEFAULT_SCHEDULER,
-           denoise=1.0, preview_cb=None, interrupt_check=None):
+           denoise=1.0, start_at_step=0, end_at_step=0, add_noise=True,
+           preview_cb=None, interrupt_check=None):
     """KSampler：手动采样循环，返回 {'latent': ..., 'seed': 实际种子}。
     sampler_name（更新公式）× scheduler（sigma 曲线：normal/karras/exponential/beta）
     自由组合（M2 解耦）；旧一体名 dpmpp_2m_karras 兼容（见 app.samplers）。
     model 可为裸 pipe 或带 LoRA 补丁的 ModelRef（采样前启用、采样后关闭）。
+
+    分段采样（KSampler Advanced，对标 ComfyUI）：
+    - start_at_step>0：从该步开始（优先于 denoise），输入 latent 按该步
+      噪声水平加噪（add_noise=True）或直接当作该步状态接力（add_noise=False，
+      用于接上一段 end_at_step 提前停下的输出——此时 latent 天然带残余噪声）
+    - end_at_step>0：跑到该步停下（不含），返回带残余噪声的 latent 供接力
+    - add_noise=False 且 start_at_step=0/denoise=1：输入 latent 原样起步
+      （ComfyUI disable noise 语义，使用者自负）
+    - 默认值（0/0/True + denoise）下与历史行为逐字节一致
+
     preview_cb 可选：签名 preview_cb(latents, step_index, total)，在每一步
     去噪后回调（由调用方注入预览录制，如 app.preview.PreviewRecorder），
     本层不感知网络。
@@ -113,17 +163,40 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
     gen = torch.Generator(device=device).manual_seed(seed)
     noise = torch.randn(base.shape, generator=gen, device=device, dtype=base.dtype)
 
-    if denoise >= 0.999:
+    start, end = resolve_span(steps, denoise, start_at_step, end_at_step)
+    if start_at_step > 0 and denoise < 0.999:
+        print(f"[sample] start_at_step={start_at_step} 优先，denoise={denoise} "
+              f"被忽略", flush=True)
+    ts = timesteps[start:end]
+    if not add_noise:
+        # 接力模式：输入 latent 已是 start 步的状态（含残余噪声），不再加噪
+        latents = base.clone()
+        print(f"[sample] add_noise=False -> 接力输入 latent，"
+              f"span=[{start},{end})", flush=True)
+    elif start_at_step <= 0 and denoise >= 0.999:
         latents = (noise * sched.init_noise_sigma).to(base.dtype)
-        ts = timesteps
     else:
-        start = min(int(round(steps * (1 - denoise))), steps - 1)
-        ts = timesteps[start:]
-        latents = sched.add_noise(base, noise, timesteps[start:start + 1]).to(base.dtype)
-        print(f"[sample] denoise={denoise} -> skip first {start} steps", flush=True)
+        latents = sched.add_noise(base, noise,
+                                  timesteps[start:start + 1]).to(base.dtype)
+        print(f"[sample] denoise={denoise} start_at_step={start_at_step} "
+              f"-> skip first {start} steps", flush=True)
+    if end < steps:
+        print(f"[sample] end_at_step={end} -> 提前停，latent 带残余噪声可接力",
+              flush=True)
 
     b = base.shape[0]
-    hidden = torch.cat([neg.expand(b, -1, -1), pos.expand(b, -1, -1)])
+    pos_e = pos.expand(b, -1, -1)
+    neg_e = neg.expand(b, -1, -1)
+    # 正/负 cond 序列长度不一致（cond.combine 拼接产物）：分两次 UNet 前向，
+    # 不做零填充（pad 会作为额外 token 参与注意力污染语义）；长度一致时
+    # 保持既有的 neg/pos 拼批单次前向（行为逐字节不变）
+    split_cond = pos_e.shape[1] != neg_e.shape[1]
+    hidden = None
+    if split_cond:
+        print(f"[sample] cond 长度不一致 pos={pos_e.shape[1]} "
+              f"neg={neg_e.shape[1]}：分两次 UNet 前向", flush=True)
+    else:
+        hidden = torch.cat([neg_e, pos_e])
 
     t0 = time.time()
     try:
@@ -131,9 +204,17 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
             for i, t in enumerate(ts):
                 if interrupt_check is not None:
                     interrupt_check()  # 取消检查点：抛异常即中断采样
-                inp = sched.scale_model_input(torch.cat([latents] * 2), t)
-                noise_pred = pipe.unet(inp, t, encoder_hidden_states=hidden).sample
-                uncond, cond = noise_pred.chunk(2)
+                if split_cond:
+                    inp = sched.scale_model_input(latents, t)
+                    uncond = pipe.unet(inp, t,
+                                       encoder_hidden_states=neg_e).sample
+                    cond = pipe.unet(inp, t,
+                                     encoder_hidden_states=pos_e).sample
+                else:
+                    inp = sched.scale_model_input(torch.cat([latents] * 2), t)
+                    noise_pred = pipe.unet(inp, t,
+                                           encoder_hidden_states=hidden).sample
+                    uncond, cond = noise_pred.chunk(2)
                 guided = uncond + cfg * (cond - uncond)
                 latents = sched.step(guided, t, latents).prev_sample
                 print(f"[sample] step {i+1}/{len(ts)}", flush=True)

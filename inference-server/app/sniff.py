@@ -5,6 +5,9 @@
 - safetensors 单文件：读头部 JSON 的 state_dict key 前缀嗅探 → from_single_file
 - .ckpt（pickle）无法廉价嗅探，回退 SD1.x（历史行为兼容）
 
+组件级嗅探（sniff_component，Load VAE 用）：识别独立的 VAE 组件
+（单文件 / diffusers 组件目录），与整管嗅探互斥（完整 checkpoint 会被明确拒绝）。
+
 新架构（SD3/Flux/视频）在此加一条嗅探规则即可，引擎与算子零改动。
 """
 import json
@@ -69,3 +72,55 @@ def sniff_arch(path):
 
     raise ValueError(f"unsupported model file '{path}' "
                      f"(expect .safetensors / .ckpt / diffusers directory)")
+
+
+# ---------- 组件级嗅探（Load VAE：独立 VAE 单文件/组件目录） ----------
+
+_VAE_CLS = "AutoencoderKL"
+
+
+def sniff_component(path):
+    """组件级嗅探（Load VAE 用）。返回 (kind, loader)：
+    kind='vae'；loader='pretrained'（diffusers 组件目录，有 config.json
+    无 model_index.json）/ 'single_file'（safetensors 单文件）。
+    完整 checkpoint（含 unet/text_encoder key）与整管目录会被明确拒绝。"""
+    if os.path.isdir(path):
+        if os.path.isfile(os.path.join(path, "model_index.json")):
+            raise ValueError(
+                f"'{path}' 是整管 diffusers 目录（含 model_index.json），"
+                f"请用 checkpoint.load；vae.load 只接受独立 VAE 组件")
+        cfg = os.path.join(path, "config.json")
+        if not os.path.isfile(cfg):
+            raise ValueError(
+                f"directory '{path}' has neither model_index.json nor "
+                f"config.json (not a diffusers component directory)")
+        with open(cfg) as f:
+            cls = json.load(f).get("_class_name")
+        if cls == _VAE_CLS:
+            return "vae", "pretrained"
+        raise ValueError(
+            f"unsupported component '{cls}' in '{cfg}' "
+            f"(vae.load 当前只支持 {_VAE_CLS})")
+
+    if path.endswith(".safetensors"):
+        keys = _safetensors_keys(path)
+
+        def has(*prefixes):
+            return any(k.startswith(prefixes) for k in keys)
+
+        # 完整 checkpoint 明确拒绝（防止误传整模被当成 VAE 加载）
+        if has("model.diffusion_model.", "unet.", "cond_stage_model.",
+               "text_encoder.", "conditioner.embedders."):
+            raise ValueError(
+                f"'{path}' 是完整 checkpoint（含 unet/text_encoder key），"
+                f"不是独立 VAE 组件；请用 checkpoint.load")
+        # ComfyUI 格式 VAE 单文件 / diffusers 格式 VAE 单文件
+        if has("first_stage_model.encoder.", "first_stage_model.decoder.") \
+                or has("encoder.conv_in.", "decoder.conv_in."):
+            return "vae", "single_file"
+        raise ValueError(
+            f"cannot sniff component of '{path}' (unknown state_dict key "
+            f"layout)；vae.load 支持 ComfyUI/diffusers 格式 VAE 单文件")
+
+    raise ValueError(f"unsupported component file '{path}' "
+                     f"(expect .safetensors / diffusers component directory)")

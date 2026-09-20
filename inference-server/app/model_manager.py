@@ -11,7 +11,7 @@ import time
 import torch
 import diffusers
 
-from . import offload, sniff
+from . import offload, ops, sniff
 
 MODELS_DIR = os.environ.get("MODELS_DIR", "/models")
 LORAS_DIR = os.environ.get("LORAS_DIR", "/loras")
@@ -212,6 +212,39 @@ class ModelManager:
             self._archs[key] = cls_name
             self._last_used[key] = time.time()
             print(f"[model-manager] loaded '{key}' ({cls_name}) in {time.time()-t0:.1f}s",
+                  flush=True)
+            return key, True
+
+    def load_vae(self, name: str, dtype="auto"):
+        """单独加载 VAE 组件（Load VAE，对标 ComfyUI VAELoader）。
+        外挂 VAE（vae-ft-mse 等）的意义是解码质量，故 auto 默认 fp32（非 fp16）；
+        dtype 旋钮可显式覆盖（缓存键随 dtype 区分）。
+        返回 (key, newly_loaded)；VAE 对象本体经 get(key) 取（VAEShim 管道视图，
+        可直接喂 ops.vae_decode / vae_encode）。与管道进同一 LRU 常驻管理。"""
+        path, key = self.resolve(name)
+        dt = "fp32" if dtype in (None, "", "auto") else _resolve_dtype(dtype)
+        key = f"vae:{key}|dtype={dt}"
+        with self._lock:
+            if key in self._pipes:
+                self._last_used[key] = time.time()
+                return key, False
+            kind, loader = sniff.sniff_component(path)
+            if kind != "vae":
+                raise ValueError(f"'{name}' 嗅探为 {kind} 组件，vae.load 只支持 vae")
+            self._evict_if_needed()
+            t0 = time.time()
+            from diffusers import AutoencoderKL
+            if loader == "pretrained":
+                vae = AutoencoderKL.from_pretrained(path, torch_dtype=_DTYPES[dt])
+            else:
+                vae = AutoencoderKL.from_single_file(path, torch_dtype=_DTYPES[dt])
+            if torch.cuda.is_available():
+                vae = vae.to("cuda")  # 组件不做 offload（fp32 也只 ~670MB）
+            shim = ops.VAEShim(vae)
+            self._pipes[key] = shim
+            self._archs[key] = f"AutoencoderKL({loader})"
+            self._last_used[key] = time.time()
+            print(f"[model-manager] loaded vae '{key}' in {time.time()-t0:.1f}s",
                   flush=True)
             return key, True
 
