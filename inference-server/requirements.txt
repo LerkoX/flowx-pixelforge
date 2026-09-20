@@ -10,3 +10,4 @@ imageio>=2.34
 imageio-ffmpeg>=0.5
 peft>=0.12
 ultralytics>=8.2  # detail.refine 算子（detail-refine 插件节点）的脸/手 YOLO 检测器依赖
+opencv-python-headless>=4.8  # ultralytics 的 cv2 依赖；必须用 headless 版（容器无 libGL，opencv-python 会 import 失败）
