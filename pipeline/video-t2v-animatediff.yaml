@@ -1,7 +1,7 @@
 Name: sd-video-t2v-animatediff
 Description: 文生视频（AnimateDiff）：健康检查 → Motion 组合（SD1.x 底模 + 运动模块 → AnimateDiffPipeline）→ 视频生成（异步任务，画布进度卡片）→ 保存视频 mp4。文本驱动，无需首帧图
 Param:
-  service_url: "https://content-queue-haven-will.trycloudflare.com"  # 推理服务地址（cloudflared 临时隧道 → 211:8100；隧道重建后需更新）
+  service_url: "http://127.0.0.1:8100"  # 推理服务地址（跑前按当前接入方式更新：cpolar 隧道/局域网）
   service_token: ""                       # 服务端 INFERENCE_TOKEN，未启用鉴权留空
 Graph: |
   stateDiagram-v2
@@ -29,11 +29,11 @@ Nodes:
         service_url: "{{ Ensure.service_url }}"
         service_token: "{{ Param.service_token }}"
         ckpt_name: "v1-5-pruned-emaonly"
-        motion_name: "animatediff-motion-adapter-v1-5-2"
+        motion_name: "mm_sd_v15_v2.ckpt"   # 原始 ckpt（diffusers 格式目录计算结果错误，已弃用删除）
   VideoGen:
     name: 视频生成
     config:
-      nodeRef: video-gen@1.0.0
+      nodeRef: video-gen@1.1.0
       executor: local
       params:
         service_url: "{{ Ensure.service_url }}"
@@ -48,10 +48,11 @@ Nodes:
         steps: 20
         cfg: 7.5
         seed: -1
+        decode_chunk_size: 8   # diffusers 0.35.2 下 fp32 VAE 16帧单块解码 OOM（exec 309），分块砍峰值
   SaveVideo:
     name: 保存视频
     config:
-      nodeRef: save-video@1.0.0
+      nodeRef: save-video@1.1.0
       executor: local
       params:
         service_url: "{{ Ensure.service_url }}"
