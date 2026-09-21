@@ -19,7 +19,8 @@ from fastapi.responses import FileResponse, Response
 from PIL import Image
 from pydantic import BaseModel, Field
 
-from . import engine, execution, ops, plugins, preview
+from . import engine, execution, ops, plugins, preview, sniff
+from . import model_manager as _mm
 from .jobs import JobManager
 from .model_manager import OFFLOAD_MODE, QUANTIZATION, ModelManager
 from .object_store import ObjectStore
@@ -478,6 +479,14 @@ def health():
 @app.get("/models", dependencies=[Depends(auth)])
 def list_models():
     return {"resident_models": models.resident()}
+
+
+@app.get("/models/files", dependencies=[Depends(auth)])
+def list_model_files_endpoint():
+    """磁盘模型文件清单（节点 widget 模型名下拉数据源）。
+    按 checkpoint/vae/controlnet/upscale/embedding/lora/motion 分类。"""
+    return {"files": sniff.list_model_files(_mm.MODELS_DIR,
+                                            _mm.LORAS_DIR)}
 
 
 @app.post("/images", dependencies=[Depends(auth)])

@@ -135,3 +135,85 @@ def sniff_component(path):
 
     raise ValueError(f"unsupported component file '{path}' "
                      f"(expect .safetensors / diffusers component directory)")
+
+
+# ---- 模型文件清单（GET /models/files，节点 widget 模型下拉数据源） ----
+
+# MODELS_DIR 下不参与清单的功能目录
+_LIST_SKIP_DIRS = {"preprocessors", "detectors", "plugins.d", "embeddings",
+                   "motion"}
+# 放大模型 .safetensors 的名字线索（sniff_component 不认得 spandrel 系权重布局，
+# 只能靠名字兜底；.pth 根文件直接判 upscale）
+_UPSCALE_NAME_HINTS = ("esrgan", "upscale", "ultrasharp", "swinir", "realsr",
+                       "hat", "ldsr")
+
+
+def _classify_entry(path, name):
+    """单个 MODELS_DIR 顶层条目分类：checkpoint/vae/controlnet/upscale/other。
+    能加载的优先按嗅探结果；嗅探不了的按名字线索/格式特征兜底。"""
+    if os.path.isdir(path):
+        if os.path.isfile(os.path.join(path, "model_index.json")):
+            return "checkpoint"
+        try:
+            kind, _ = sniff_component(path)
+            return kind
+        except ValueError:
+            return "other"
+    lower = name.lower()
+    stem, ext = os.path.splitext(lower)
+    if ext == ".pth":
+        return "upscale"
+    if ext not in (".safetensors", ".ckpt"):
+        return "other"
+    try:
+        kind, _ = sniff_component(path)
+        return kind
+    except ValueError as e:
+        if "完整 checkpoint" in str(e):
+            return "checkpoint"
+    # 未知布局：名字线索判放大模型，否则按 checkpoint 兜底
+    if any(hint in stem for hint in _UPSCALE_NAME_HINTS):
+        return "upscale"
+    return "checkpoint"
+
+
+def list_model_files(models_dir, loras_dir=None):
+    """列出可用模型文件清单（节点 widget 模型下拉数据源）。
+    返回 [{"name": <加载用名（去扩展名）>, "kind": ...}]，按 kind/name 排序。
+    kind ∈ checkpoint/vae/controlnet/upscale/embedding/lora/motion。"""
+    out = []
+    if os.path.isdir(models_dir):
+        for name in sorted(os.listdir(models_dir)):
+            if name.startswith("."):
+                continue
+            path = os.path.join(models_dir, name)
+            if os.path.isdir(path) and name in _LIST_SKIP_DIRS:
+                continue
+            kind = _classify_entry(path, name)
+            if kind == "other":
+                continue
+            # 目录名可能含点（sd3.5-medium）：只对文件去扩展名
+            ref_name = os.path.splitext(name)[0] if os.path.isfile(path) else name
+            out.append({"name": ref_name, "kind": kind})
+        # embeddings/ 子目录 → embedding
+        emb_dir = os.path.join(models_dir, "embeddings")
+        if os.path.isdir(emb_dir):
+            for name in sorted(os.listdir(emb_dir)):
+                stem, ext = os.path.splitext(name)
+                if ext.lower() in (".safetensors", ".pt", ".pth"):
+                    out.append({"name": stem, "kind": "embedding"})
+        # motion/ 子目录 → motion（MotionAdapter）
+        motion_dir = os.path.join(models_dir, "motion")
+        if os.path.isdir(motion_dir):
+            for name in sorted(os.listdir(motion_dir)):
+                if name.startswith("."):
+                    continue
+                out.append({"name": os.path.splitext(name)[0],
+                            "kind": "motion"})
+    if loras_dir and os.path.isdir(loras_dir):
+        for name in sorted(os.listdir(loras_dir)):
+            stem, ext = os.path.splitext(name)
+            if ext.lower() in (".safetensors", ".pt", ".bin"):
+                out.append({"name": stem, "kind": "lora"})
+    out.sort(key=lambda x: (x["kind"], x["name"]))
+    return out
