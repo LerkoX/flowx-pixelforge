@@ -38,6 +38,9 @@ numpy<2
 # 且容器无 libGL 导致 cv2 导入崩溃——Dockerfile 装完依赖后须 pip uninstall
 # opencv-python（headless 提供同一 cv2 API，ultralytics 运行时不受影响）。
 controlnet_aux==0.0.10
+# M6 UPSCALE_MODEL 链：像素放大模型加载（RealESRGAN/SwinIR 架构自动识别）。
+# 已真机试装验证：纯 python+torch 依赖，不拉动 numpy/torch 版本
+spandrel==0.4.2
 filelock>=3.13
 psutil
 py-cpuinfo

@@ -331,8 +331,10 @@ def _op_image_load(name):
 
 # ---------- 插件算子（启动扫描 + 运行时上传热加载） ----------
 
-# 启动扫描：plugins.d 下既有插件全量注册
-for _fn, _op_names in plugins.scan_plugins(PLUGINS_DIR, registry).items():
+# 启动扫描：plugins.d 下既有插件全量注册（reserved=核心算子名，防遮蔽只喊不拦）
+_core_ops = set(registry._ops)
+for _fn, _op_names in plugins.scan_plugins(PLUGINS_DIR, registry,
+                                           reserved=_core_ops).items():
     _p = os.path.join(PLUGINS_DIR, _fn)
     with open(_p, "rb") as _f:
         _h = plugins.sha256_of(_f.read())
@@ -344,12 +346,15 @@ class PluginUpload(BaseModel):
     filename: str
     content: str
     sha256: str
+    force: bool = False  # 显式接管跨文件重名算子（默认拒绝 409）
 
 
 @app.post("/admin/plugins", dependencies=[Depends(admin_auth)])
 def upload_plugin(p: PluginUpload):
     """上传插件（节点自注册通道）：hash 校验 → 语法检查 → 原子落盘 → 热加载。
-    加载失败回滚文件；覆盖已有插件时同名算子以新插件为准。"""
+    加载失败回滚文件；同文件重传为幂等更新；
+    跨文件重名/遮蔽核心算子默认 409（全量回滚），force=true 显式接管
+    （归属簿转移；旧文件仍在盘上，重启扫描顺序可能改变归属，建议尽快删除旧文件）。"""
     content = p.content.encode("utf-8")
     if plugins.sha256_of(content) != p.sha256:
         raise HTTPException(status_code=400, detail="sha256 mismatch")
@@ -366,10 +371,13 @@ def upload_plugin(p: PluginUpload):
     with open(tmp, "wb") as f:
         f.write(content)
     os.replace(tmp, path)
+    before = dict(registry._ops)  # 注册表快照（Op 对象不可变，浅拷贝足够）
     try:
-        new_ops = plugins.load_plugin(path, registry)
+        claimed = plugins.load_plugin(path, registry)
     except Exception as e:
-        # 回滚：恢复旧文件或删除；已注册的算子名一并摘除
+        # 回滚：恢复旧文件或删除；注册表全量恢复快照
+        registry._ops.clear()
+        registry._ops.update(before)
         if backup is not None:
             with open(path, "wb") as f:
                 f.write(backup)
@@ -377,11 +385,32 @@ def upload_plugin(p: PluginUpload):
             os.unlink(path)
         raise HTTPException(status_code=400,
                             detail=f"plugin load failed (rolled back): {e}")
+    conflicts = plugins.detect_conflicts(claimed, p.filename, plugin_ops, before)
+    if conflicts and not p.force:
+        # 冲突拒绝：注册表 + 文件全量回滚，409 报明归属
+        registry._ops.clear()
+        registry._ops.update(before)
+        if backup is not None:
+            with open(path, "wb") as f:
+                f.write(backup)
+        else:
+            os.unlink(path)
+        raise HTTPException(status_code=409, detail={
+            "error": "op conflicts (rolled back)",
+            "conflicts": conflicts,
+            "hint": "同文件重传为幂等更新；确需接管其他文件的算子请显式传 "
+                    "force=true（接管后建议删除旧文件，避免重启扫描顺序漂移）"})
     h = plugins.sha256_of(content)
-    for n in new_ops:
+    took_over = [c["op"] for c in conflicts]  # force 路径才有
+    if took_over:
+        print(f"[plugins] WARN: {p.filename} force 接管算子 {took_over}；"
+              f"旧文件仍在盘上，重启后归属按扫描顺序可能漂移，建议删除旧文件",
+              flush=True)
+    for n in claimed:
         plugin_ops[n] = {"file": p.filename, "sha256": h}
-    print(f"[plugins] uploaded {p.filename} -> {new_ops}", flush=True)
-    return {"plugin": p.filename, "ops": new_ops, "sha256": h}
+    print(f"[plugins] uploaded {p.filename} -> {claimed}", flush=True)
+    return {"plugin": p.filename, "ops": claimed, "sha256": h,
+            "took_over": took_over}
 
 
 @app.get("/admin/plugins", dependencies=[Depends(admin_auth)])
@@ -546,7 +575,7 @@ def run_op(req: OpReq):
     """单算子调用；对象端口用 {"$id": uuid} 引用，字面量直接传值。"""
     try:
         return engine.run_op(store, registry, req.name, req.inputs)
-    except (KeyError, TypeError, ValueError) as e:
+    except (KeyError, TypeError, ValueError, FileNotFoundError) as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
@@ -555,7 +584,7 @@ def run_graph(req: GraphReq):
     """整图执行：拓扑调度 + 跨调用缓存；对象端口用 ["node_id", "port"] 引用。"""
     try:
         return engine.run_graph(store, registry, {"nodes": req.nodes})
-    except (KeyError, TypeError, ValueError) as e:
+    except (KeyError, TypeError, ValueError, FileNotFoundError) as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
