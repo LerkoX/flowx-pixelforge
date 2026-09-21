@@ -1,16 +1,18 @@
 """算子注册表：声明式类型规范 + 输入解析/类型校验（对齐 ComfyUI 的 INPUT_TYPES/RETURN_TYPES）。
 
 对象类型：MODEL / CLIP / VAE / COND / LATENT / IMAGE / VIDEO / CONTROL_NET / CONTROL
-/ UPSCALE_MODEL ——
+/ UPSCALE_MODEL / CLIP_VISION / IPADAPTER ——
 以对象仓库 UUID 引用传递（VIDEO 落盘 mp4，仓库内为 {"path", "fps", "num_frames"} 元数据，
 见 app/video.py；CONTROL_NET = ControlNetModel，CONTROL = controlnet.apply 的捆绑产物，见 app/ops.py；
-UPSCALE_MODEL = spandrel 加载的像素放大模型句柄，见 plugins/upscale_ops.py）
+UPSCALE_MODEL = spandrel 加载的像素放大模型句柄，见 plugins/upscale_ops.py；
+CLIP_VISION = CLIP 图像编码器，IPADAPTER = 适配器权重 state dict，见 plugins/ipadapter_ops.py）
 字面量类型：INT / FLOAT / STRING / BOOL —— 直接传值
 """
 import json
 
 OBJ_TYPES = ("MODEL", "CLIP", "VAE", "COND", "LATENT", "IMAGE", "VIDEO",
-             "CONTROL_NET", "CONTROL", "UPSCALE_MODEL")
+             "CONTROL_NET", "CONTROL", "UPSCALE_MODEL", "CLIP_VISION",
+             "IPADAPTER")
 LIT_TYPES = ("INT", "FLOAT", "STRING", "BOOL")
 
 

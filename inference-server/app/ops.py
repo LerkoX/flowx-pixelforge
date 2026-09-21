@@ -240,6 +240,10 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
       与 control 互斥（每段都跑 controlnet 成本×N，明确报错）
     - noise_mask（LatentBundle，latent.set_noise_mask 产物）：每步后把 mask
       外区域混回原始 latent 的当步加噪版（局部重绘）
+    - ipa（IPABundle，ipadapter.apply 产物）：临时换装 IPAdapter 注意力
+      处理器，每步前向带 added_cond_kwargs 图像 embeds（CFG：负向为零向量/
+      零图编码），weight×步窗口经处理器 scale 逐步改写；采样后恢复原处理器。
+      与 control/area/noise_mask 正交可叠加
 
     preview_cb 可选：签名 preview_cb(latents, step_index, total)，在每一步
     去噪后回调（由调用方注入预览录制，如 app.preview.PreviewRecorder），
@@ -249,6 +253,7 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
     sampler_name, scheduler = resolve_sampler(sampler_name, scheduler)
 
     pipe, patches = resolve_pipe(model)
+    ipa = getattr(model, "ipa", None)  # ipadapter.apply 产物（IPABundle）
     if patches:
         print("[sample] lora patches: "
               + ", ".join(f"{n}@{w}" for n, w in patches), flush=True)
@@ -342,14 +347,55 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
             conditioning_scale=control.strength, return_dict=False)
         return down, mid
 
-    def unet_forward(inp, t, hidden, res):
-        """带可选残差注入的 unet 前向。"""
-        if res is None:
-            return pipe.unet(inp, t, encoder_hidden_states=hidden).sample
-        down, mid = res
-        return pipe.unet(inp, t, encoder_hidden_states=hidden,
-                         down_block_additional_residuals=down,
-                         mid_block_additional_residual=mid).sample
+    # IPAdapter 装配（ipadapter.apply 产物，plugins/ipadapter_ops.py）：
+    # 临时换装 IPAdapter 注意力处理器 + image 投影层，采样后 try/finally
+    # 恢复原样（常驻管道不被污染）。weight/步窗口经逐步改写处理器 scale
+    # 实现（0.35.2 的 IPAdapter 处理器读自身 scale 属性；窗口外置 0 →
+    # 处理器跳过 IP 注意力，零额外开销）。embeds 为原始 CLIP 输出
+    # （未过投影层），unet 的 encoder_hid_proj（ip_image_proj）负责投影。
+    ipa_procs = []
+    ipa_added_cat = ipa_added_pos = ipa_added_neg = None
+    ipa_lo = ipa_hi = 0
+    _ipa_old = None
+    if ipa is not None:
+        _ipa_old = (pipe.unet.attn_processors.copy(),
+                    pipe.unet.encoder_hid_proj,
+                    pipe.unet.config.get("encoder_hid_dim_type"))
+        pipe.load_ip_adapter(ipa["state_dict"], subfolder="", weight_name="",
+                             image_encoder_folder=None)
+        from diffusers.models.attention_processor import (
+            IPAdapterAttnProcessor, IPAdapterAttnProcessor2_0)
+        ipa_procs = [p for p in pipe.unet.attn_processors.values()
+                     if isinstance(p, (IPAdapterAttnProcessor,
+                                       IPAdapterAttnProcessor2_0))]
+        pos_ie = ipa["pos_embeds"].expand(b, *ipa["pos_embeds"].shape[1:])
+        neg_ie = ipa["neg_embeds"].expand(b, *ipa["neg_embeds"].shape[1:])
+        ipa_added_cat = {"image_embeds": [torch.cat([neg_ie, pos_ie])]}
+        ipa_added_pos = {"image_embeds": [pos_ie]}
+        ipa_added_neg = {"image_embeds": [neg_ie]}
+        ipa_lo = round(ipa["start_percent"] * len(ts))
+        ipa_hi = round(ipa["end_percent"] * len(ts))
+        print(f"[sample] ipadapter '{ipa.get('name', '?')}' "
+              f"weight={ipa['weight']} window=[{ipa_lo},{ipa_hi})/{len(ts)}",
+              flush=True)
+
+    def ipa_scale_for(i):
+        """按步窗口改写 IPAdapter 处理器强度（窗口外 0 → 处理器跳过）。"""
+        if not ipa_procs:
+            return
+        w = ipa["weight"] if ipa_lo <= i < ipa_hi else 0.0
+        for p in ipa_procs:
+            p.scale = [w] * len(p.scale)
+
+    def unet_forward(inp, t, hidden, res, added=None):
+        """带可选残差/IPAdapter 注入的 unet 前向。"""
+        kw = {}
+        if res is not None:
+            kw["down_block_additional_residuals"] = res[0]
+            kw["mid_block_additional_residual"] = res[1]
+        if added is not None:
+            kw["added_cond_kwargs"] = added
+        return pipe.unet(inp, t, encoder_hidden_states=hidden, **kw).sample
 
     # 前向路径分派：cat（既有拼批，逐字节不变）/ split（既有双前向）/ area（分段混合）
     hidden = None
@@ -390,13 +436,14 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
         print(f"[sample] cond 分段：pos={len(pos_segs)} 段 "
               f"neg={len(neg_segs)} 段，按区域 mask×strength 混合", flush=True)
 
-        def blend_side(segs, masks, inp, t):
+        def blend_side(segs, masks, inp, t, added=None):
             """逐段前向 + 区域加权混合（求和语义，不归一化——与 ComfyUI 一致，
             重叠区域影响叠加；无 area 的段视为整图）。"""
+            kw = {"added_cond_kwargs": added} if added is not None else {}
             out = None
             for (tensor, _area, s), m in zip(segs, masks):
                 e = tensor.expand(b, -1, -1)
-                o = pipe.unet(inp, t, encoder_hidden_states=e).sample
+                o = pipe.unet(inp, t, encoder_hidden_states=e, **kw).sample
                 if m is not None:
                     o = o * m
                 if s != 1.0:
@@ -410,21 +457,26 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
             for i, t in enumerate(ts):
                 if interrupt_check is not None:
                     interrupt_check()  # 取消检查点：抛异常即中断采样
+                ipa_scale_for(i)
                 if seg_mode == "cat":
                     inp = sched.scale_model_input(torch.cat([latents] * 2), t)
                     res = cn_residuals(i, inp, t, hidden)
-                    noise_pred = unet_forward(inp, t, hidden, res)
+                    noise_pred = unet_forward(inp, t, hidden, res, ipa_added_cat)
                     uncond, cond = noise_pred.chunk(2)
                 elif seg_mode == "split":
                     inp = sched.scale_model_input(latents, t)
                     uncond = unet_forward(
-                        inp, t, neg_e, cn_residuals(i, inp, t, neg_e))
+                        inp, t, neg_e, cn_residuals(i, inp, t, neg_e),
+                        ipa_added_neg)
                     cond = unet_forward(
-                        inp, t, pos_e, cn_residuals(i, inp, t, pos_e))
+                        inp, t, pos_e, cn_residuals(i, inp, t, pos_e),
+                        ipa_added_pos)
                 else:
                     inp = sched.scale_model_input(latents, t)
-                    uncond = blend_side(neg_segs, neg_masks, inp, t)
-                    cond = blend_side(pos_segs, pos_masks, inp, t)
+                    uncond = blend_side(neg_segs, neg_masks, inp, t,
+                                        ipa_added_neg)
+                    cond = blend_side(pos_segs, pos_masks, inp, t,
+                                      ipa_added_pos)
                 guided = uncond + cfg * (cond - uncond)
                 latents = sched.step(guided, t, latents).prev_sample
                 if noise_mask is not None:
@@ -440,6 +492,14 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
                         print(f"[sample] preview callback failed (ignored): {e}",
                               flush=True)
     finally:
+        if _ipa_old is not None:
+            try:
+                pipe.unet.set_attn_processor(_ipa_old[0])
+                pipe.unet.encoder_hid_proj = _ipa_old[1]
+                pipe.unet.config["encoder_hid_dim_type"] = _ipa_old[2]
+            except Exception as e:
+                print(f"[sample] ipadapter 处理器恢复失败（常驻管道可能被污染）: "
+                      f"{e}", flush=True)
         if patches:
             try:
                 pipe.disable_lora()

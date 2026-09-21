@@ -141,7 +141,7 @@ def sniff_component(path):
 
 # MODELS_DIR 下不参与清单的功能目录
 _LIST_SKIP_DIRS = {"preprocessors", "detectors", "plugins.d", "embeddings",
-                   "motion"}
+                   "motion", "clip_vision", "ipadapter"}
 # 放大模型 .safetensors 的名字线索（sniff_component 不认得 spandrel 系权重布局，
 # 只能靠名字兜底；.pth 根文件直接判 upscale）
 _UPSCALE_NAME_HINTS = ("esrgan", "upscale", "ultrasharp", "swinir", "realsr",
@@ -180,7 +180,8 @@ def _classify_entry(path, name):
 def list_model_files(models_dir, loras_dir=None):
     """列出可用模型文件清单（节点 widget 模型下拉数据源）。
     返回 [{"name": <加载用名（去扩展名）>, "kind": ...}]，按 kind/name 排序。
-    kind ∈ checkpoint/vae/controlnet/upscale/embedding/lora/motion。"""
+    kind ∈ checkpoint/vae/controlnet/upscale/embedding/lora/motion/
+    clip_vision/ipadapter。"""
     out = []
     if os.path.isdir(models_dir):
         for name in sorted(os.listdir(models_dir)):
@@ -210,6 +211,21 @@ def list_model_files(models_dir, loras_dir=None):
                     continue
                 out.append({"name": os.path.splitext(name)[0],
                             "kind": "motion"})
+        # clip_vision/ 子目录 → clip_vision（CLIP 图像编码器，diffusers 目录）
+        cv_dir = os.path.join(models_dir, "clip_vision")
+        if os.path.isdir(cv_dir):
+            for name in sorted(os.listdir(cv_dir)):
+                if name.startswith("."):
+                    continue
+                if os.path.isdir(os.path.join(cv_dir, name)):
+                    out.append({"name": name, "kind": "clip_vision"})
+        # ipadapter/ 子目录 → ipadapter（适配器权重文件）
+        ipa_dir = os.path.join(models_dir, "ipadapter")
+        if os.path.isdir(ipa_dir):
+            for name in sorted(os.listdir(ipa_dir)):
+                stem, ext = os.path.splitext(name)
+                if ext.lower() in (".safetensors", ".bin", ".pt", ".pth"):
+                    out.append({"name": stem, "kind": "ipadapter"})
     if loras_dir and os.path.isdir(loras_dir):
         for name in sorted(os.listdir(loras_dir)):
             stem, ext = os.path.splitext(name)
