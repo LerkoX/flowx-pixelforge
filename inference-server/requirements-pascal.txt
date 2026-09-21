@@ -28,7 +28,16 @@ peft==0.17.1
 #   pip install -i https://mirrors.aliyun.com/pypi/simple/ opencv-python-headless \
 #     --upgrade filelock psutil py-cpuinfo pandas scipy
 ultralytics>=8.3
-opencv-python-headless>=4.8
+# 固定 4.11：5.0 起依赖 numpy>=2，会顶掉 conda 基底的 1.26.4 并冲突破坏
+# accelerate(<2.0)；opencv 4.x 与 numpy 1.26 组合已真机验证
+opencv-python-headless==4.11.0.86
+# 防未来依赖链把 numpy 顶到 2.x（accelerate 0.33 硬约束 <2.0）
+numpy<2
+# ControlNet 预处理器算子（plugins/preprocess_ops.py）：openpose/depth 等检测器封装。
+# 注意：controlnet_aux 依赖 opencv-python（非 headless），同装会抢占 cv2 命名空间
+# 且容器无 libGL 导致 cv2 导入崩溃——Dockerfile 装完依赖后须 pip uninstall
+# opencv-python（headless 提供同一 cv2 API，ultralytics 运行时不受影响）。
+controlnet_aux==0.0.10
 filelock>=3.13
 psutil
 py-cpuinfo

@@ -18,6 +18,9 @@ WORKDIR /app
 
 COPY requirements-pascal.txt .
 RUN pip install --no-cache-dir -r requirements-pascal.txt
+# controlnet_aux 会拉入 opencv-python（非 headless），抢占 cv2 命名空间且容器无
+# libGL 导致 cv2 导入崩溃；卸载之，headless 提供同一 cv2 API（真机已验证）。
+RUN pip uninstall -y opencv-python || true
 
 COPY app/ ./app/
 
