@@ -197,6 +197,7 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/jso
 | `MAX_RESIDENT_MODELS=3` + 视频模型 + 图像模型同池 ⇒ `vram_free_mb: 0`，采样从 0.5s/步 退化到 17s/步 | 加载时就按预算淘汰（视频模型进池不会把图像模型挤到 host memory） |
 | `POST /gc` 清了缓存但模型照样占显存 | `/gc` 只管缓存；腾显存用 `/model/unload` |
 | 采样后 `mem_get_info` 报 free=0（PyTorch 缓存分配器留着复用）被误判成"没空间" | `/health` 的 `vram_free_mb` = 驱动余量 + **可回收缓存**（`reserved-allocated`）；另给 `vram_driver_free_mb` / `vram_reclaimable_mb` 供诊断 |
+| 两条 GPU 流水线**并发**跑同一张卡 | **不支持**：预算式淘汰会把对方正在用的模型顶掉（`on_evict` 会顺手断对象仓库视图），对方随后报 `object 'xxx' not found (expired or never created)`（实测）。服务端 `EXEC_LOCK` 只保证算子串行，不保证模型常驻。**一次只跑一条 GPU 流水线**；要多条并行请给服务配更大的卡或 `OFFLOAD_MODE=sequential` 后降低并发 |
 | 出现分钟级/步只能靠人看日志发现 | `/health` 给 `vram_low`（可用量 < reserve 即 `status: degraded`）+ `resident_weights_mb` + `degraded`（OOM 自愈计数）；流水线可用 `inference-ensure` 的 `min_vram_mb` 在首节点挡住 |
 
 ## 6. 验证部署
