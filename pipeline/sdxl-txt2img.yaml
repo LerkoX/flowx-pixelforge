@@ -40,6 +40,7 @@ Nodes:
       executor: docker
       params:
         service_url: "{{ Param.service_url_internal }}"
+        service_url_host: "{{ Param.service_url }}"
         service_token: "{{ Param.service_token }}"
         ckpt_name: "sd_xl_base_1.0"     # 换成 Pony/Illustrious 等社区模型名即可
         dtype: fp16
@@ -82,6 +83,7 @@ Nodes:
       nodeRef: ksampler@1.4.0
       params:
         service_url: "{{ Param.service_url_internal }}"
+        service_url_host: "{{ Param.service_url }}"
         service_token: "{{ Param.service_token }}"
         model_ref: "{{ LoadCkpt.model_ref }}"
         positive: "{{ EncPos.conditioning }}"
