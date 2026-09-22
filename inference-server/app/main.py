@@ -2,7 +2,7 @@
 
 接口：
 - 系统：/health、/images/{id}（PNG 下载 / thumb 缩略图）、/videos/{id}（mp4 下载）、
-  /gc（清对象仓库+缓存）
+  /gc（清对象仓库+缓存）、/model/unload（显式卸载常驻模型，等价 model.unload 算子）
 - 能力运行时（同步）：/ops（列出算子）、/op（单算子）、/graph（整图执行，带缓存）
 - 能力运行时（异步）：POST /jobs 提交 → GET /jobs/{id} 轮询状态/进度 →
   POST /interrupt 取消；视频等分钟级任务走此通道（同步 HTTP 会超时）
@@ -44,6 +44,8 @@ store = ObjectStore(ttl_seconds=int(os.environ.get("OBJECT_TTL_SECONDS", "3600")
 # 模型淘汰联动：LRU 顶掉的管道仍被对象仓库的 model/clip/vae 视图钉住，
 # 必须在 evict 时按对象身份断开引用（先断引用后 GC，见 ModelManager._evict_if_needed）
 models.on_evict = lambda pipe: store.discard_where(lambda d: d is pipe)
+# 显存护栏注入引擎：算子执行期间 pin 在用模型（淘汰跳过），OOM 时淘汰非在用条目后重试
+engine.set_vram_guard(_mm.VramGuard(models))
 registry = Registry()
 os.makedirs(VIDEO_DIR, exist_ok=True)
 
@@ -78,6 +80,18 @@ def admin_auth(authorization: str = Header(default="")):
                 "不同旋钮组合是独立常驻条目（同一 LRU 管理）")
 def _op_checkpoint_load(ckpt, dtype="auto", offload="auto", use_t5="auto"):
     return ops.checkpoint_load(models, ckpt, dtype, offload, use_t5)
+
+
+@registry.register(
+    "model.unload",
+    inputs={"target": "STRING"},
+    outputs={"unloaded": "STRING", "resident": "STRING"},
+    description="卸载常驻模型腾显存：target 空/all/*=全部，否则按名字或缓存键匹配"
+                "（可省略扩展名，支持 vae:/cn:/motion 组合管）。走与加载一致的淘汰路径"
+                "（断对象仓库视图 → gc → empty_cache）；输出 unloaded/resident 逗号分隔清单。"
+                "典型用法：视频/大模型段跑完先卸载，再跑图像采样")
+def _op_model_unload(target=""):
+    return ops.model_unload(models, target)
 
 
 @registry.register(
@@ -463,16 +477,44 @@ class InterruptReq(BaseModel):
 
 @app.get("/health")
 def health():
+    """健康检查 + 显存治理诊断（dev-plan §21.3 任务 1/3/4 的数据源）。
+
+    vram_free_mb / resident_models 供 inference-ensure 的显存闸门（min_vram_mb）判断；
+    resident_details 给每个常驻条目的体积估算与在用状态；degraded 记录 OOM 自愈史。
+    """
     info = {"status": "ok", "cuda_available": torch.cuda.is_available(),
             "resident_models": models.resident(),
-            "offload_mode": OFFLOAD_MODE, "quantization": QUANTIZATION}
+            "resident_details": models.details(),
+            "offload_mode": OFFLOAD_MODE, "quantization": QUANTIZATION,
+            "max_resident_models": _mm.MAX_RESIDENT,
+            "vram_budget_eviction": _mm.VRAM_BUDGET,
+            "vram_reserve_mb": _mm.VRAM_RESERVE_MB,
+            "degraded": engine.oom_state()}
     if torch.cuda.is_available():
         free, total = torch.cuda.mem_get_info()
+        reserved = allocated = 0
+        try:
+            reserved = torch.cuda.memory_reserved(0)
+            allocated = torch.cuda.memory_allocated(0)
+        except Exception:  # pragma: no cover - 老驱动/异常时忽略
+            pass
+        reclaimable = max(0, reserved - allocated)
         info.update({
             "gpu_name": torch.cuda.get_device_name(0),
-            "vram_free_mb": round(free / 1024**2),
+            # vram_free_mb = 驱动余量 + 本进程可回收缓存（"下一个模型能用多少"）。
+            # 采样后驱动余量常为 0（缓存分配器留着复用），只看它会把正常态误报成退化。
+            "vram_free_mb": round((free + reclaimable) / 1024**2),
             "vram_total_mb": round(total / 1024**2),
+            "vram_driver_free_mb": round(free / 1024**2),
+            "vram_reclaimable_mb": round(reclaimable / 1024**2),
+            "vram_process_reserved_mb": round(reserved / 1024**2),
+            "vram_process_allocated_mb": round(allocated / 1024**2),
+            "resident_weights_mb": round(models.resident_weights() / 1024**2),
         })
+        # 可用量低于 reserve 视为退化态（采样会走 host memory 兜底 → 分钟级/步）
+        info["vram_low"] = (free + reclaimable) < _mm.VRAM_RESERVE_MB * 1024**2
+        if info["vram_low"]:
+            info["status"] = "degraded"
     return info
 
 
@@ -555,8 +597,23 @@ def get_video(video_id: str):
                         filename=os.path.basename(path))
 
 
+class UnloadReq(BaseModel):
+    """target 空 = 全部（便于 curl -X POST .../model/unload -d '{}'）。"""
+    target: str = ""
+
+
+@app.post("/model/unload", dependencies=[Depends(auth)])
+def model_unload(req: UnloadReq | None = None):
+    """显式卸载常驻模型（等价 model.unload 算子；运维/自愈用）。
+    body {"target": "majicmixRealistic_v7"} 或 {}（全部）。"""
+    target = (req.target if req is not None else "") or ""
+    return ops.model_unload(models, target)
+
+
 @app.post("/gc", dependencies=[Depends(auth)])
 def gc():
+    # 注意：/gc 只清对象仓库与图缓存，**不卸常驻模型**（历史坑：清了缓存模型照样占显存）；
+    # 要腾显存用 /model/unload（或 model.unload 算子）。
     engine.clear_cache()
     n = store.clear()
     # 清了引用还不够：管道组件/offload 钩子互相引用形成循环，
@@ -584,7 +641,9 @@ def run_op(req: OpReq):
     """单算子调用；对象端口用 {"$id": uuid} 引用，字面量直接传值。"""
     try:
         return engine.run_op(store, registry, req.name, req.inputs)
-    except (KeyError, TypeError, ValueError, FileNotFoundError) as e:
+    except (KeyError, TypeError, ValueError, FileNotFoundError, RuntimeError) as e:
+        # RuntimeError 含显存自愈失败的可执行指引（dev-plan §21.3 任务 3）：
+        # 必须作为 detail 回到调用方节点，否则只剩一句 "HTTP 500"
         raise HTTPException(status_code=400, detail=str(e))
 
 
@@ -593,7 +652,7 @@ def run_graph(req: GraphReq):
     """整图执行：拓扑调度 + 跨调用缓存；对象端口用 ["node_id", "port"] 引用。"""
     try:
         return engine.run_graph(store, registry, {"nodes": req.nodes})
-    except (KeyError, TypeError, ValueError, FileNotFoundError) as e:
+    except (KeyError, TypeError, ValueError, FileNotFoundError, RuntimeError) as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 

@@ -166,12 +166,20 @@ SD1.5 的 fp16 VAE 解码会偶发纯黑图，社区标准修法是 VAE 单独 f
 | 现在 | `MAX_RESIDENT_MODELS` LRU 整模型淘汰 | pipe 级 |
 | 三件套起 | `OFFLOAD_MODE=model`（diffusers 按子模块搬移） | 子模块级 |
 | 视频大模型 | `OFFLOAD_MODE=sequential`（逐层搬移，吞吐最低） | 层级（diffusers 自带） |
-| **显存治理 2.0（规划，见 §4.1）** | 显存预算式淘汰 + `model.unload` 显式卸载 + OOM 自愈 + 流水线显存闸门 | 条目级 + 调用级 |
+| **显存治理 2.0（已交付，见 §4.1）** | 显存预算式淘汰 + `model.unload` 显式卸载 + OOM 自愈 + 流水线显存闸门 | 条目级 + 调用级 |
 | 远期（如有需要） | 参考 comfy/model_management 做张量级搬移 | 张量级 |
 
 原则：diffusers 自带的 offload 够用就不自研；整模型淘汰保留作为兜底。
 
-### 4.1 显存治理 2.0（2026-09-22 立项，待实施；详见 dev-plan 二十一）
+### 4.1 显存治理 2.0（2026-09-22 立项 → 当日交付；详见 dev-plan 二十一）
+
+> **交付状态（2026-09-22）**：四项任务全部落地并真机验证 —— 预算式淘汰
+> （`app/vram.py` + `ModelManager._evict_if_needed`）、显式卸载（`model.unload` 算子 +
+> `POST /model/unload` + `model-unload` 节点）、OOM 自愈（`engine` 捕获 OOM → 淘汰非在用
+> → 重试一次 → 失败给可执行指引）、流水线显存闸门（`inference-ensure` 的 `min_vram_mb`
+> + emit 显存字段）。验收：同一张 8GB 卡载入 SVD-XT 后再跑 wf58（19 节点图+精修）
+> **166.9s 成功**（旧行为同场景 exec 365 为 3939s）；服务端日志可见"SVD-XT 被预算淘汰"
+> 而非堆到 `vram_free_mb: 0`；跑完后 `/health` 不再误报退化（区分驱动余量与可回收缓存）。
 
 **起因（实测事故）**：容器 `MAX_RESIDENT_MODELS=3` + `OFFLOAD_MODE=none` + 8GB GTX 1080，
 池子里同时常驻 `majicmixRealistic_v7` + `stable-video-diffusion-img2vid-xt-1-1` +

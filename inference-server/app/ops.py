@@ -171,6 +171,20 @@ def checkpoint_load(models, ckpt, dtype="auto", offload="auto", use_t5="auto"):
     return {"model": pipe, "clip": pipe, "vae": pipe}
 
 
+def model_unload(models, target=""):
+    """显式卸载常驻模型（Unload Model，对标 ComfyUI 的 free/unload 操作）。
+
+    target：空 / all / * = 卸载全部；否则按名字或缓存键匹配（可省略扩展名，
+    支持 vae:/cn:/motion 组合键的前缀形式）。返回 unloaded/resident 两个逗号分隔
+    字符串（node 输出端口只能传字符串，便于在画布/日志里看结果）。
+    走与加载一致的淘汰路径：断对象仓库视图 → gc.collect → empty_cache。
+    """
+    done = models.unload(target)
+    resident = models.resident()
+    return {"unloaded": ",".join(done) if done else "(none)",
+            "resident": ",".join(resident) if resident else "(empty)"}
+
+
 def clip_encode(pipe, text):
     """CLIP Text Encode：文本 → conditioning 张量。"""
     tokens = pipe.tokenizer(
