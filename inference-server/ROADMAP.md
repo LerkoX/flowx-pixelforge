@@ -166,9 +166,38 @@ SD1.5 的 fp16 VAE 解码会偶发纯黑图，社区标准修法是 VAE 单独 f
 | 现在 | `MAX_RESIDENT_MODELS` LRU 整模型淘汰 | pipe 级 |
 | 三件套起 | `OFFLOAD_MODE=model`（diffusers 按子模块搬移） | 子模块级 |
 | 视频大模型 | `OFFLOAD_MODE=sequential`（逐层搬移，吞吐最低） | 层级（diffusers 自带） |
+| **显存治理 2.0（规划，见 §4.1）** | 显存预算式淘汰 + `model.unload` 显式卸载 + OOM 自愈 + 流水线显存闸门 | 条目级 + 调用级 |
 | 远期（如有需要） | 参考 comfy/model_management 做张量级搬移 | 张量级 |
 
 原则：diffusers 自带的 offload 够用就不自研；整模型淘汰保留作为兜底。
+
+### 4.1 显存治理 2.0（2026-09-22 立项，待实施；详见 dev-plan 二十一）
+
+**起因（实测事故）**：容器 `MAX_RESIDENT_MODELS=3` + `OFFLOAD_MODE=none` + 8GB GTX 1080，
+池子里同时常驻 `majicmixRealistic_v7` + `stable-video-diffusion-img2vid-xt-1-1` +
+`v1-5-pruned-emaonly-fp16` → `/health` 报 `vram_free_mb: 0` → CUDA 走 host memory 兜底，
+KSampler 从 0.4~0.6s/步 劣化到 17s/步、精修 1024 稳定 127s/步（exec 356/357/359 对比
+exec 361/362）。这与遗留清单 #6 的次生教训（decode OOM 后 22s/步 → 7min/步，重启容器恢复）
+是同一现象，当前处置仍靠人工重启容器。
+
+**根因**：淘汰只看**条目个数**（`while len(self._pipes) >= MAX_RESIDENT`），不看模型体积与
+实际余量；`MAX_RESIDENT_MODELS=3` 是为 ControlNet 三件套（checkpoint+cn+外挂 vae）设的，
+叠加 SVD-XT / AnimateDiff 组合管必然溢出；且 `POST /gc` 不卸常驻模型（只清对象仓库+图缓存
++`empty_cache`），没有任何显式卸载通道。
+
+**四项任务（本轮范围）**
+
+| # | 任务 | 位置 | 验收口径 |
+| --- | --- | --- | --- |
+| 1 | 显存**预算式淘汰**：加载前按 `mem_get_info()` 余量 + 待加载模型体积估算淘汰；`MAX_RESIDENT_MODELS` 降为兜底上限；执行中的条目 pin 后跳过 | `app/model_manager.py` `_evict_if_needed()` | 8GB 卡上顺序加载 majicmix → SVD-XT → v1-5 不再出现 `vram_free_mb: 0`；采样维持基线（512×30 步 ~15-20s） |
+| 2 | `checkpoint.unload` 算子（`models.unload(key)` / 全部）+ 瘦节点 `model-unload` | `app/model_manager.py` / `ops.py` / `main.py` + `nodes/model-unload/` | 跑完 SVD 段后 unload → resident 清空、余量回升 ~7GB；随后采样回到 exec 356 基线 |
+| 3 | OOM **自愈**：捕获 `torch.cuda.OutOfMemoryError` → 淘汰非在用 LRU → 重试一次；`/health` 加 `degraded` 标记 | `app/engine.py` / `jobs.py` / `main.py` | 人为超预算加载不崩、自愈后成功；连续失败给出明确指引（降档 offload / 重启容器） |
+| 4 | 流水线**显存闸门**：`inference-ensure` 增 `min_vram_mb` 参数，并 emit `vram_free_mb` / `resident_models` / `offload_mode`（现仅打日志） | `nodes/inference-ensure/` | 余量为 0 时 Ensure 直接失败并提示 unload/重启，不让流水线退化到 127s/步 |
+
+**边界（不在本轮）**：offload 三档与「env 默认 + 节点参数覆盖」两级旋钮结构不动；
+张量级搬移仍留远期；`QUANTIZATION=fp8` 未实现，不在本轮。
+
+**排期建议**：任务 1+2 先行（直接救图/视频混跑），4 成本低随手做，3 视需要。
 
 ## 5. 不做清单（明确排除，避免 scope 蔓延)
 
