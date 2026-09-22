@@ -8,9 +8,12 @@
 部署：本文件放 PLUGINS_DIR（默认 /models/plugins.d，bind-mount 持久化）重启自动
 扫描注册，或经 POST /admin/plugins 热上传。使用：经 inference-op 通用节点调用。
 
-COND 形态：SD1.x/SDXL 为张量 (b, seq, dim)，或 cond.set_area 产物的段列表
-[(tensor, area|None, strength), ...]（area 为 (ly,lx,lh,lw) latent 像素坐标）；
-SD3 为 dict（embeds+pooled，本期明确报错不支持，避免静默出废片）。
+COND 形态：
+- SD1.x：张量 (b, seq, dim)，或 cond.set_area 产物的段列表
+  [(tensor, area|None, strength), ...]（area 为 (ly,lx,lh,lw) latent 像素坐标）
+- SDXL（M5）：SDXLCond（embeds + pooled）/ SDXLSegments（段列表 + 每段 pooled）
+  ——本插件对这些算子做保 pooled 的组合（见各函数注释）
+- SD3：dict（embeds+pooled，由 sd3-* 插件算子/采样器自成体系，本文件明确报错）
 LATENT 为 4D 张量 (b, 4, h/8, w/8) 或 LatentBundle（samples+noise_mask）；
 像素坐标参数一律按图像像素计（内部 //8）。
 """
@@ -19,13 +22,30 @@ from PIL import Image
 
 from app import ops as _core_ops  # 插件可见性约定：可复用核心原语
 
+_SDXL_CONDS = (_core_ops.SDXLCond, _core_ops.SDXLSegments)
+
+
+def _is_sdxl(cond):
+    return isinstance(cond, _SDXL_CONDS)
+
+
+def _check_same_arch(a, b, op_name):
+    """SDXL cond 与 SD1.x cond 不能混用（pooled 缺失会让采样期报错，这里早失败）。"""
+    if _is_sdxl(a) != _is_sdxl(b):
+        raise ValueError(
+            f"{op_name}: 不能混用 SDXL cond 与 SD1.x cond"
+            f"（got {type(a).__name__} vs {type(b).__name__}）")
+
 
 def _as_tensor_cond(cond, op_name):
-    """COND 统一为张量；SD3 dict 形式与段列表明确拒绝。"""
+    """COND 统一为张量；SD3 dict 形式与段列表明确拒绝。
+    SDXLCond 返回其 embeds（调用方若需 pooled 请先用 _is_sdxl 分派）。"""
+    if isinstance(cond, _core_ops.SDXLCond):
+        return cond.embeds
     if isinstance(cond, dict):
         raise ValueError(
             f"{op_name} 暂不支持 SD3 dict 形式 COND（embeds+pooled），"
-            f"仅支持 SD1.x/SDXL 张量形式")
+            f"请使用 sd3-* 节点的配套算子")
     if isinstance(cond, list):
         raise ValueError(
             f"{op_name} 只接受整图 cond 张量，got cond.set_area 段列表")
@@ -34,12 +54,58 @@ def _as_tensor_cond(cond, op_name):
     return cond
 
 
+def _broadcast_batch(a, b, op_name):
+    """batch 维对齐（一方为 1 则 expand）；无法对齐报错。用于 embeds/pooled/段张量。"""
+    if a.shape[0] != b.shape[0]:
+        if a.shape[0] == 1:
+            a = a.expand(b.shape[0], *a.shape[1:])
+        elif b.shape[0] == 1:
+            b = b.expand(a.shape[0], *b.shape[1:])
+        else:
+            raise ValueError(
+                f"{op_name}: batch 不匹配 {tuple(a.shape)} vs {tuple(b.shape)}")
+    return a, b
+
+
+def _sdxl_size(a, b):
+    """合并两 SDXL cond 的原始尺寸：优先 a 的非 0 值，否则 b（0=auto）。"""
+    wa, ha = _core_ops.cond_size(a)
+    wb, hb = _core_ops.cond_size(b)
+    return (wa or wb, ha or hb)
+
+
 def cond_combine(cond_a, cond_b):
     """Conditioning Combine：沿序列维拼接两段 conditioning（对标 ComfyUI
     ConditioningCombine），语义 = 两段提示词同时生效（不受 77 token 截断限制）。
     batch 维不同时按广播对齐（一方为 1 则 expand）。
     任一侧为 cond.set_area 段列表时退化为段列表拼接（各自区域/strength 保留，
-    多区域构图 = 多个 set_area 产物经本算子串联）。"""
+    多区域构图 = 多个 set_area 产物经本算子串联）。
+    SDXL：embeds 序列拼接 + **pooled 取两者均值**（单张量 COND 只能承载一个
+    pooled；均值是不丢信息的“同时生效”近似，出图风格为两段折中；
+    ComfyUI 是每条 cond 各自前向，若实测发现均值导致风格漂移可改走段列表
+    逐段前向——与本文件 set_area 路径同一骨架，属 P1）。"""
+    if _is_sdxl(cond_a) or _is_sdxl(cond_b):
+        _check_same_arch(cond_a, cond_b, "cond.combine")
+        if isinstance(cond_a, _core_ops.SDXLSegments) \
+                or isinstance(cond_b, _core_ops.SDXLSegments):
+            # 段列表：逐段保留各自 pooled（与 ComfyUI 行为一致）
+            segs = _core_ops.as_cond_segments(cond_a, "cond.combine") \
+                + _core_ops.as_cond_segments(cond_b, "cond.combine")
+            pooleds = (_core_ops.cond_pooleds(cond_a) or [None] * len(
+                _core_ops.as_cond_segments(cond_a, "cond.combine"))) \
+                + (_core_ops.cond_pooleds(cond_b) or [None] * len(
+                    _core_ops.as_cond_segments(cond_b, "cond.combine")))
+            out = _core_ops.SDXLSegments(segs, pooleds, *_sdxl_size(cond_a, cond_b))
+            print(f"[cond.combine] SDXL 段列表拼接 -> {len(out)} 段", flush=True)
+            return {"cond": out}
+        a_emb, b_emb = _broadcast_batch(cond_a.embeds, cond_b.embeds, "cond.combine")
+        a_pool, b_pool = _broadcast_batch(cond_a.pooled, cond_b.pooled, "cond.combine")
+        out = _core_ops.SDXLCond(torch.cat([a_emb, b_emb], dim=1),
+                                 (a_pool + b_pool) / 2.0,
+                                 *_sdxl_size(cond_a, cond_b))
+        print(f"[cond.combine] SDXL {tuple(a_emb.shape)} + {tuple(b_emb.shape)} "
+              f"-> {tuple(out.embeds.shape)}（pooled 取均值）", flush=True)
+        return {"cond": out}
     if isinstance(cond_a, list) or isinstance(cond_b, list):
         segs = _core_ops.as_cond_segments(cond_a, "cond.combine") \
             + _core_ops.as_cond_segments(cond_b, "cond.combine")
@@ -47,27 +113,15 @@ def cond_combine(cond_a, cond_b):
         return {"cond": segs}
     a = _as_tensor_cond(cond_a, "cond.combine")
     b = _as_tensor_cond(cond_b, "cond.combine")
-    if a.shape[0] != b.shape[0]:
-        if a.shape[0] == 1:
-            a = a.expand(b.shape[0], -1, -1)
-        elif b.shape[0] == 1:
-            b = b.expand(a.shape[0], -1, -1)
-        else:
-            raise ValueError(
-                f"cond.combine: batch 不匹配 {tuple(a.shape)} vs {tuple(b.shape)}")
+    a, b = _broadcast_batch(a, b, "cond.combine")
     out = torch.cat([a, b], dim=1)
     print(f"[cond.combine] {tuple(a.shape)} + {tuple(b.shape)} -> {tuple(out.shape)}",
           flush=True)
     return {"cond": out}
 
 
-def cond_set_area(cond, x=0, y=0, width=512, height=512, strength=1.0):
-    """Conditioning Set Area：把整图 cond 标记为只在指定区域生效（对标 ComfyUI
-    ConditioningSetArea），输出段列表供 sample 分段前向按区域混合。
-    x/y/width/height 为图像像素（内部 //8）；strength 为该段权重（>0）。
-    多区域构图：每段 clip.encode 分别 set_area 后经 cond.combine 拼接；
-    混合为求和语义（不归一化，重叠区域影响叠加，与 ComfyUI 一致）。"""
-    t = _as_tensor_cond(cond, "cond.set_area")
+def _resolve_area(x, y, width, height, strength):
+    """set_area 参数校验 + 像素坐标→latent 坐标（//8），SD1.x/SDXL 共用。"""
     if width <= 0 or height <= 0:
         raise ValueError(f"cond.set_area: width/height 需 > 0，got ({width},{height})")
     if x < 0 or y < 0:
@@ -78,6 +132,26 @@ def cond_set_area(cond, x=0, y=0, width=512, height=512, strength=1.0):
     if area[2] <= 0 or area[3] <= 0:
         raise ValueError(
             f"cond.set_area: 区域小于 1 latent px（{width}x{height} 图像像素）")
+    return area
+
+
+def cond_set_area(cond, x=0, y=0, width=512, height=512, strength=1.0):
+    """Conditioning Set Area：把整图 cond 标记为只在指定区域生效（对标 ComfyUI
+    ConditioningSetArea），输出段列表供 sample 分段前向按区域混合。
+    x/y/width/height 为图像像素（内部 //8）；strength 为该段权重（>0）。
+    多区域构图：每段 clip.encode 分别 set_area 后经 cond.combine 拼接；
+    混合为求和语义（不归一化，重叠区域影响叠加，与 ComfyUI 一致）。
+    SDXL：输出 SDXLSegments（每段带自己的 pooled），采样循环逐段前向时
+    各自带 text_embeds（与 ComfyUI 每条 conditioning 带 pooled 同语义）。"""
+    if isinstance(cond, _core_ops.SDXLCond):
+        area = _resolve_area(x, y, width, height, strength)
+        out = _core_ops.SDXLSegments([(cond.embeds, area, float(strength))],
+                                     [cond.pooled], cond.width, cond.height)
+        print(f"[cond.set_area] SDXL area(latent px)={area} strength={strength} "
+              f"pooled={tuple(cond.pooled.shape)}", flush=True)
+        return {"cond": out}
+    t = _as_tensor_cond(cond, "cond.set_area")  # SDXLSegments/段列表在此拒绕
+    area = _resolve_area(x, y, width, height, strength)
     print(f"[cond.set_area] area(latent px)={area} strength={strength}", flush=True)
     return {"cond": [(t, area, float(strength))]}
 
@@ -85,19 +159,40 @@ def cond_set_area(cond, x=0, y=0, width=512, height=512, strength=1.0):
 def cond_average(cond_a, cond_b, weight=0.5):
     """Conditioning Average：两段 conditioning 按权重加权平均（对标 ComfyUI
     ConditioningAverage）：out = a*weight + b*(1-weight)。
-    序列长度不同时短者补零到长者（dim=1）。"""
-    a = _as_tensor_cond(cond_a, "cond.average")
-    b = _as_tensor_cond(cond_b, "cond.average")
+    序列长度不同时短者补零到长者（dim=1）。
+    SDXL：embeds 与 pooled 同时加权平均（pooled 为全局偏置，权重语义一致）。"""
     if not 0.0 <= weight <= 1.0:
         raise ValueError(f"cond.average: weight 需在 [0,1]，got {weight}")
-    if a.shape[0] != b.shape[0]:
-        if a.shape[0] == 1:
-            a = a.expand(b.shape[0], -1, -1)
-        elif b.shape[0] == 1:
-            b = b.expand(a.shape[0], -1, -1)
-        else:
+    if _is_sdxl(cond_a) or _is_sdxl(cond_b):
+        _check_same_arch(cond_a, cond_b, "cond.average")
+        if isinstance(cond_a, _core_ops.SDXLSegments) \
+                or isinstance(cond_b, _core_ops.SDXLSegments):
             raise ValueError(
-                f"cond.average: batch 不匹配 {tuple(a.shape)} vs {tuple(b.shape)}")
+                "cond.average: 暂不支持分段（set_area 产物）cond 的加权平均，"
+                "请先 combine 或用整图 cond")
+        a = cond_a.embeds
+        b = cond_b.embeds
+        pa, pb = _broadcast_batch(cond_a.pooled, cond_b.pooled, "cond.average")
+        a, b = _broadcast_batch(a, b, "cond.average")
+        a, b = _pad_seq(a, b)
+        out = _core_ops.SDXLCond(a * weight + b * (1.0 - weight),
+                                pa * weight + pb * (1.0 - weight),
+                                *_sdxl_size(cond_a, cond_b))
+        print(f"[cond.average] SDXL weight={weight} "
+              f"-> embeds{tuple(out.embeds.shape)} pooled{tuple(out.pooled.shape)}",
+              flush=True)
+        return {"cond": out}
+    a = _as_tensor_cond(cond_a, "cond.average")
+    b = _as_tensor_cond(cond_b, "cond.average")
+    a, b = _broadcast_batch(a, b, "cond.average")
+    a, b = _pad_seq(a, b)
+    out = a * weight + b * (1.0 - weight)
+    print(f"[cond.average] weight={weight} -> {tuple(out.shape)}", flush=True)
+    return {"cond": out}
+
+
+def _pad_seq(a, b):
+    """序列长度不同时短者补零到长者（dim=1）。"""
     n = max(a.shape[1], b.shape[1])
     if a.shape[1] < n:
         a = torch.cat([a, a.new_zeros(a.shape[0], n - a.shape[1], a.shape[2])],
@@ -105,9 +200,7 @@ def cond_average(cond_a, cond_b, weight=0.5):
     if b.shape[1] < n:
         b = torch.cat([b, b.new_zeros(b.shape[0], n - b.shape[1], b.shape[2])],
                       dim=1)
-    out = a * weight + b * (1.0 - weight)
-    print(f"[cond.average] weight={weight} -> {tuple(out.shape)}", flush=True)
-    return {"cond": out}
+    return a, b
 
 
 _INTERP = {"nearest": "nearest", "bilinear": "bilinear", "bicubic": "bicubic"}

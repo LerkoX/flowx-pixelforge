@@ -1,0 +1,116 @@
+Name: sdxl-txt2img
+Description: >-
+  SDXL 文生图（M5 验收基线）：健康检查 → Checkpoint 加载（offload=model，8GB 卡常驻
+  UNet 5.1G + 双 TE 1.9G 的默认档）→ CLIP 编码（正/反，size=1024 供 time_ids）→
+  空 Latent 1024 → KSampler（euler/normal，25 步，cfg 6.0）→ VAE 解码 → 保存图像。
+  加宽后 time_ids 的 orig/target 尺寸取 CLIP 节点的 width/height（0=auto 由 latent 推导）。
+Param:
+  service_url: "http://127.0.0.1:8100"      # 推理服务地址（local 节点用，公共参数）
+  service_url_internal: "http://172.17.0.1:8100"  # docker 节点用内网地址（隧道不回环自身宿主机）
+  service_token: ""                          # 服务端 INFERENCE_TOKEN（公共参数）
+Graph: |
+  stateDiagram-v2
+    [*] --> Ensure
+    Ensure --> LoadCkpt
+    Ensure --> EmptyLatent
+    LoadCkpt --> EncPos
+    LoadCkpt --> EncNeg
+    EncPos --> Sample
+    EncNeg --> Sample
+    EmptyLatent --> Sample
+    LoadCkpt --> Decode
+    Sample --> Decode
+    Decode --> Save
+    Save --> [*]
+Nodes:
+  Ensure:
+    name: 服务健康检查
+    config:
+      nodeRef: inference-ensure@1.1.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        wait_seconds: 60
+        min_vram_mb: 2500
+  LoadCkpt:
+    name: SDXL加载
+    config:
+      nodeRef: checkpoint-loader@1.2.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url_internal }}"
+        service_token: "{{ Param.service_token }}"
+        ckpt_name: "sd_xl_base_1.0"     # 换成 Pony/Illustrious 等社区模型名即可
+        dtype: fp16
+        offload: model
+  EncPos:
+    name: 正向提示词
+    config:
+      nodeRef: clip-text-encode@1.1.0
+      params:
+        service_url: "{{ Param.service_url_internal }}"
+        service_token: "{{ Param.service_token }}"
+        clip_ref: "{{ LoadCkpt.clip_ref }}"
+        text: "a cute cat sitting on a windowsill, soft sunset light, masterpiece, best quality"
+        width: 1024
+        height: 1024
+  EncNeg:
+    name: 反向提示词
+    config:
+      nodeRef: clip-text-encode@1.1.0
+      params:
+        service_url: "{{ Param.service_url_internal }}"
+        service_token: "{{ Param.service_token }}"
+        clip_ref: "{{ LoadCkpt.clip_ref }}"
+        text: "lowres, blurry, worst quality, watermark, text"
+        width: 1024
+        height: 1024
+  EmptyLatent:
+    name: 空Latent
+    config:
+      nodeRef: empty-latent@1.0.0
+      params:
+        service_url: "{{ Param.service_url_internal }}"
+        service_token: "{{ Param.service_token }}"
+        width: 1024
+        height: 1024
+        batch_size: 1
+  Sample:
+    name: KSampler
+    config:
+      nodeRef: ksampler@1.4.0
+      params:
+        service_url: "{{ Param.service_url_internal }}"
+        service_token: "{{ Param.service_token }}"
+        model_ref: "{{ LoadCkpt.model_ref }}"
+        positive: "{{ EncPos.conditioning }}"
+        negative: "{{ EncNeg.conditioning }}"
+        latent: "{{ EmptyLatent.latent }}"
+        seed: -1
+        steps: 25
+        cfg: 6.0
+        sampler_name: euler
+        scheduler: normal
+        denoise: 1.0
+        preview_every: 1
+  Decode:
+    name: VAE解码
+    config:
+      nodeRef: vae-decode@1.0.0
+      params:
+        service_url: "{{ Param.service_url_internal }}"
+        service_token: "{{ Param.service_token }}"
+        vae_ref: "{{ LoadCkpt.vae_ref }}"
+        latent: "{{ Sample.latent }}"
+  Save:
+    name: 保存图像
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Decode.image }}"
+        filename_prefix: "flowx_sdxl"
+        output_dir: "~/flowx-output"

@@ -5,6 +5,8 @@
 # 用法：./scripts/download-model.sh <preset|repo-id>
 #   svd        SVD-XT 1.1 图生视频（ModelScope 镜像，fp16 ~4.5GB）
 #   motion     AnimateDiff 运动模块 v1-5-2（hf-mirror，fp16 ~0.9GB，进 motion/ 子目录）
+#   sdxl       SDXL base 1.0（M5）：官方单文件 sd_xl_base_1.0.safetensors（6.9GB）
+#              + 纯配置骨架 _configs/sdxl-base/（json/txt，供 from_single_file 离线取 config）
 #   其他 repo  走 HF（hf-mirror）：./scripts/download-model.sh Org/some-model
 #
 # 目标位置用 TARGET 环境变量指定（docker -v 语法，默认 D:/flowx-data/models）：
@@ -40,6 +42,22 @@ case "$1" in
         --local-dir '/models/$DIR' &&
       HF_ENDPOINT=https://hf-mirror.com hf download '$REPO' --include '*.fp16.safetensors' \
         --local-dir '/models/$DIR'
+    "
+    ;;
+  sdxl)
+    # 官方 SDXL base 1.0：ModelScope 镜像同时含单文件权重与 diffusers 目录结构。
+    # 单文件落在 models/ 顶层（供 checkpoint.load + from_single_file，社区模型
+    # Pony/Illustrious 等同样是单文件，直接丢这里即可）；纯配置骨架落在
+    # models/_configs/sdxl-base/（不进模型清单，只作 from_single_file 的 config 源，
+    # 宿主机无外网时避免 diffusers 去 hub 拉配置）。
+    MS_REPO="AI-ModelScope/stable-diffusion-xl-base-1.0"
+    echo ">> [modelscope] $MS_REPO -> $TARGET/{sd_xl_base_1.0.safetensors,_configs/sdxl-base}"
+    docker run --rm -v "$TARGET":/models python:3.11-slim sh -c "
+      pip install -q modelscope &&
+      modelscope download --model '$MS_REPO' --include '*.json' '*.txt' \
+        --local_dir '/models/_configs/sdxl-base' &&
+      modelscope download --model '$MS_REPO' --include 'sd_xl_base_1.0.safetensors' \
+        --local_dir '/models'
     "
     ;;
   "")

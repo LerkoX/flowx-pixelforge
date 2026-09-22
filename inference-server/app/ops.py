@@ -64,6 +64,55 @@ def resolve_latent(latent):
     return latent, None
 
 
+class SDXLCond:
+    """SDXL COND（M5）：embeds (b,77,2048) + pooled (b,1280) + 可选原始尺寸。
+
+    SDXL 的 UNet 除了 encoder_hidden_states 还需要 added_cond_kwargs：
+    text_embeds（= CLIP-G 的 pooled 投影，全局语义偏置）与 time_ids
+    （尺寸/裁剪六元组）。SD1.x 无此概念，故只用本类承载，采样循环里按
+    存在与否分派——不改变 SD1.x 的既有前向路径。
+    width/height 为"原始尺寸"（0 = auto，由采样时 latent 尺寸推导）。"""
+
+    def __init__(self, embeds, pooled, width=0, height=0):
+        self.embeds = embeds
+        self.pooled = pooled
+        self.width = int(width or 0)
+        self.height = int(height or 0)
+
+
+class SDXLSegments(list):
+    """SDXL 分段 COND：list[(tensor, area|None, strength)] + 每段 pooled（并行列表）。
+
+    继承 list 以复用 as_cond_segments 的段校验路径（3 元组语义不变），
+    pooled 走旁路属性：区域条件下每段各自带自己的 text_embeds，
+    与 ComfyUI 每条 conditioning 带 pooled 的行为对齐。"""
+
+    def __init__(self, segs=(), pooleds=(), width=0, height=0):
+        super().__init__(segs)
+        self.pooleds = list(pooleds)
+        self.width = int(width or 0)
+        self.height = int(height or 0)
+
+
+def cond_pooleds(cond):
+    """SDXL COND 的每段 pooled；非 SDXL cond（SD1.x / SD3 dict）→ None。
+    返回列表与 as_cond_segments(cond) 的段一一对应。"""
+    if isinstance(cond, SDXLCond):
+        return [cond.pooled]
+    if isinstance(cond, SDXLSegments):
+        pooleds = list(cond.pooleds)
+        # 段数与 pooled 数不一致时视为无 pooled（调用方按缺失处理）
+        return pooleds if len(pooleds) == len(cond) else None
+    return None
+
+
+def cond_size(cond):
+    """SDXL COND 声明的原始尺寸 (width, height)；(0, 0) = auto（由 latent 推导）。"""
+    if isinstance(cond, (SDXLCond, SDXLSegments)):
+        return cond.width, cond.height
+    return (0, 0)
+
+
 class ControlBundle:
     """controlnet.apply 的产物（CONTROL 对象）：ControlNetModel + hint 图 +
     强度 + 步窗口（start/end_percent，按执行步数区间计）。
@@ -112,8 +161,11 @@ def controlnet_apply(control_net, image, strength=1.0,
 
 def as_cond_segments(cond, name="cond"):
     """COND 归一化为段列表 [(tensor, area|None, strength), ...]：
-    裸张量 → 单个整图段；cond.set_area 产物（段列表）原样校验通过；
+    裸张量 → 单个整图段；SDXLCond（M5）→ 单个整图段（pooled 走 cond_pooleds）；
+    cond.set_area 产物（段列表，含 SDXLSegments）原样校验通过；
     SD3 dict 形式明确拒绝。area = (ly, lx, lh, lw) latent 像素坐标。"""
+    if isinstance(cond, SDXLCond):
+        return [(cond.embeds, None, 1.0)]
     if isinstance(cond, dict):
         raise ValueError(
             f"{name}: 暂不支持 SD3 dict 形式 COND（embeds+pooled），"
@@ -135,6 +187,88 @@ def as_cond_segments(cond, name="cond"):
     if not torch.is_tensor(cond):
         raise ValueError(f"{name}: COND 需为张量，got {type(cond).__name__}")
     return [(cond, None, 1.0)]
+
+
+def _merge_added(base, extra):
+    """合并 added_cond_kwargs（None 安全）：extra 覆盖 base 的同名键。
+    用于 SDXL（text_embeds/time_ids）与 IPAdapter（image_embeds）叠加。"""
+    if extra is None:
+        return base
+    if base is None:
+        return extra
+    out = dict(base)
+    out.update(extra)
+    return out
+
+
+def sdxl_time_ids(width, height, dtype, device, crops=(0, 0)):
+    """SDXL time_ids：单行 6 元组 (orig_h, orig_w, crop_top, crop_left,
+    target_h, target_w)，与 diffusers `_get_add_time_ids` 同构；
+    批内复制由调用方按需 repeat。"""
+    ids = [int(height), int(width), int(crops[0]), int(crops[1]),
+           int(height), int(width)]
+    return torch.tensor([ids], dtype=dtype, device=device)
+
+
+def build_sdxl_added(seg_mode, batch, tids, pos_pooleds, neg_pooleds,
+                     n_pos_segs=1, n_neg_segs=1):
+    """构造 SDXL 的 added_cond_kwargs（纯函数，无 GPU 可单测）。
+
+    返回 (adds, side_extras)：
+    - seg_mode='cat'：adds = 单个 dict，text_embeds 按 CFG 惯序 [neg, pos] 拼批，
+      time_ids 复制 2b 行（与 hidden=cat([neg,pos]) 批序严格一致）
+    - seg_mode='split'：adds = (neg_dict, pos_dict)，各 b 行
+    - seg_mode='area'：side_extras = (neg 每段 dict, pos 每段 dict)，adds=None
+    每段自带 pooled（SDXLSegments）——与 ComfyUI 每条 conditioning 带 pooled 同语义。
+    pooled 缺失（混入 SD1.x 张量 cond）→ 报错而非静默零填充。"""
+    def pooled_at(pooleds, k, side):
+        p = pooleds[k] if pooleds and k < len(pooleds) else None
+        if p is None:
+            raise ValueError(
+                f"SDXL conditioning 第 {k} 段缺 pooled（{side} 侧）："
+                f"请勿把 SD1.x 张量 cond 与 SDXL cond 混用")
+        return p.expand(batch, -1)
+
+    tid_b = tids.repeat(batch, 1)
+
+    def seg_add(pooleds, k, side):
+        return {"text_embeds": pooled_at(pooleds, k, side), "time_ids": tid_b}
+
+    if seg_mode == "cat":
+        return {
+            "text_embeds": torch.cat([pooled_at(neg_pooleds, 0, "neg"),
+                                      pooled_at(pos_pooleds, 0, "pos")]),
+            "time_ids": tids.repeat(2 * batch, 1),
+        }, None
+    if seg_mode == "split":
+        return (seg_add(neg_pooleds, 0, "neg"),
+                seg_add(pos_pooleds, 0, "pos")), None
+    return None, (
+        [seg_add(neg_pooleds, k, "neg") for k in range(n_neg_segs)],
+        [seg_add(pos_pooleds, k, "pos") for k in range(n_pos_segs)],
+    )
+
+
+def check_sdxl_pooled_dim(pipe, pooled):
+    """校验 pooled（text_embeds）维度与 UNet added embedding 的期望一致：
+    expected = unet.add_embedding.linear_1.in_features - addition_time_embed_dim*6。
+    早失败 + 报错可读（否则要在 UNet 内部报 shape mismatch）。"""
+    unet = getattr(pipe, "unet", None)
+    cfg = getattr(unet, "config", None)
+    dim = getattr(cfg, "addition_time_embed_dim", None)
+    if dim is None or pooled is None:
+        return
+    try:
+        expected = int(unet.add_embedding.linear_1.in_features) - int(dim) * 6
+    except Exception:  # 结构不标准（子类/自定义 UNet）：放弃校验
+        return
+    got = int(pooled.shape[-1])
+    if got != expected:
+        raise ValueError(
+            f"SDXL pooled（text_embeds）维度 {got} 与 UNet 期望不符："
+            f"应为 {expected}（= add_embedding 输入 {expected + int(dim) * 6} "
+            f"- addition_time_embed_dim {dim} × 6）；"
+            f"请确认 checkpoint 与文本编码器同属一个 SDXL 模型")
 
 
 def exec_device_of(pipe):
@@ -185,8 +319,27 @@ def model_unload(models, target=""):
             "resident": ",".join(resident) if resident else "(empty)"}
 
 
-def clip_encode(pipe, text):
-    """CLIP Text Encode：文本 → conditioning 张量。"""
+def clip_encode(pipe, text, width=0, height=0, clip_skip=None):
+    """CLIP Text Encode：文本 → conditioning。
+
+    按架构分派（M5 架构适配点，不动采样循环骨架）：
+    - SD1.x：单 text_encoder，返回张量 COND（逐字节沿用历史行为）
+    - SDXL：双 text encoder（CLIP-L/G），返回 SDXLCond（embeds + pooled）；
+      直接调管道 encode_prompt，不手写编码数学（与 SD3 插件同法，
+      offload 钩子/投影层/lora scale 都由 diffusers 内部处理）
+    width/height 仅对 SDXL 有意义（原始尺寸 → time_ids，0=auto 由 latent 推导）；
+    clip_skip 为负值表示跳过末 n 层（SDXL 常用 -2），None/0 用默认输出。"""
+    if _is_sdxl(pipe):
+        device = exec_device_of(pipe)
+        with torch.no_grad():
+            out = pipe.encode_prompt(
+                prompt=text, prompt_2=None, device=device,
+                num_images_per_prompt=1, do_classifier_free_guidance=False,
+                clip_skip=_resolve_clip_skip(clip_skip))
+        embeds, pooled = _unpack_encode_prompt(out)
+        print(f"[clip.encode] sdxl embeds={tuple(embeds.shape)} "
+              f"pooled={tuple(pooled.shape)} size={width}x{height}", flush=True)
+        return {"cond": SDXLCond(embeds, pooled, width, height)}
     tokens = pipe.tokenizer(
         text, padding="max_length", max_length=pipe.tokenizer.model_max_length,
         truncation=True, return_tensors="pt",
@@ -194,6 +347,33 @@ def clip_encode(pipe, text):
     with torch.no_grad():
         cond = pipe.text_encoder(tokens.input_ids.to(exec_device_of(pipe)))[0]
     return {"cond": cond}
+
+
+def _is_sdxl(pipe):
+    """SDXL 判定：以管道类的 text_encoder_2 组件为准（sniff 也用它路由）。"""
+    return type(pipe).__name__ == "StableDiffusionXLPipeline" \
+        or getattr(pipe, "text_encoder_2", None) is not None
+
+
+def _resolve_clip_skip(clip_skip):
+    """clip_skip 归一化：None/0 → None（diffusers 默认，取 penultimate 层）；
+    负值 n → n（diffusers 语义：使用 hidden_states[n]）。"""
+    if clip_skip in (None, 0, "", "0"):
+        return None
+    return int(clip_skip)
+
+
+def _unpack_encode_prompt(out):
+    """encode_prompt 返回值解包：(embeds, pooled)。
+    diffusers ≥0.33 返回 4 元组 (embeds, neg_embeds, pooled, neg_pooled)，
+    更早版本返回 2 元组；两者都兼容。"""
+    if isinstance(out, (tuple, list)) and len(out) == 4:
+        return out[0], out[2]
+    if isinstance(out, (tuple, list)) and len(out) == 2:
+        return out[0], out[1]
+    raise ValueError(
+        f"encode_prompt 返回值形态未知（len={len(out) if isinstance(out, (tuple, list)) else type(out).__name__}），"
+        f"无法解析 prompt_embeds/pooled_embeds（diffusers 版本不兼容？）")
 
 
 def latent_empty(width=512, height=512, batch_size=1):
@@ -245,7 +425,7 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
       （ComfyUI disable noise 语义，使用者自负）
     - 默认值（0/0/True + denoise）下与历史行为逐字节一致
 
-    注入三类（M4 采样循环改造；均为可选，全缺省时走既有快速路径，逐字节不变）：
+    注入四类（M4/M5 采样循环改造；均为可选，全缺省时走既有快速路径，逐字节不变）：
     - control（CONTROL 对象，controlnet.apply 产物）：步窗口内逐步跑 ControlNet
       前向，残差×strength 注入 unet（down/mid_block_additional_residuals）；
       整图 cond 且正/负等长时按 diffusers CFG 惯例拼批（单次 cn+unet 前向）
@@ -258,6 +438,10 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
       处理器，每步前向带 added_cond_kwargs 图像 embeds（CFG：负向为零向量/
       零图编码），weight×步窗口经处理器 scale 逐步改写；采样后恢复原处理器。
       与 control/area/noise_mask 正交可叠加
+    - SDXL（M5，由 COND 自动携带）：pos/neg 为 SDXLCond（clip.encode 产物）
+      时构造 added_cond_kwargs = {text_embeds: pooled, time_ids: 尺寸六元组}
+      随每次 unet/controlnet 前向注入；区域条件下每段带自己的 pooled。
+      SD1.x 的 COND（张量）无 pooled ⇒ 本条不激活。
 
     preview_cb 可选：签名 preview_cb(latents, step_index, total)，在每一步
     去噪后回调（由调用方注入预览录制，如 app.preview.PreviewRecorder），
@@ -350,15 +534,17 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
         print(f"[sample] controlnet strength={control.strength} "
               f"window=[{win_lo},{win_hi}) of {len(ts)} steps", flush=True)
 
-    def cn_residuals(i, inp, t, hidden):
+    def cn_residuals(i, inp, t, hidden, added=None):
         """当前步的 controlnet 残差（窗口外/无 control 返回 None）。
-        inp/hidden 批数与 unet 输入一致（cat 拼批 2b 时 hint 复制两份）。"""
+        inp/hidden 批数与 unet 输入一致（cat 拼批 2b 时 hint 复制两份）。
+        added：SDXL ControlNet 必需（text_embeds/time_ids），SD1.x 传 None。"""
         if control is None or not (win_lo <= i < win_hi):
             return None
         h = hint if hidden.shape[0] == b else torch.cat([hint, hint])
+        kw = {"added_cond_kwargs": added} if added is not None else {}
         down, mid = control.controlnet(
             inp, t, encoder_hidden_states=hidden, controlnet_cond=h,
-            conditioning_scale=control.strength, return_dict=False)
+            conditioning_scale=control.strength, return_dict=False, **kw)
         return down, mid
 
     # IPAdapter 装配（ipadapter.apply 产物，plugins/ipadapter_ops.py）：
@@ -450,12 +636,14 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
         print(f"[sample] cond 分段：pos={len(pos_segs)} 段 "
               f"neg={len(neg_segs)} 段，按区域 mask×strength 混合", flush=True)
 
-        def blend_side(segs, masks, inp, t, added=None):
+        def blend_side(segs, masks, inp, t, added=None, extras=None):
             """逐段前向 + 区域加权混合（求和语义，不归一化——与 ComfyUI 一致，
-            重叠区域影响叠加；无 area 的段视为整图）。"""
-            kw = {"added_cond_kwargs": added} if added is not None else {}
+            重叠区域影响叠加；无 area 的段视为整图）。
+            extras：每段的额外 added_cond_kwargs（SDXL 每段自带 pooled）。"""
             out = None
-            for (tensor, _area, s), m in zip(segs, masks):
+            for k, ((tensor, _area, s), m) in enumerate(zip(segs, masks)):
+                a = _merge_added(added, extras[k] if extras else None)
+                kw = {"added_cond_kwargs": a} if a is not None else {}
                 e = tensor.expand(b, -1, -1)
                 o = pipe.unet(inp, t, encoder_hidden_states=e, **kw).sample
                 if m is not None:
@@ -464,6 +652,31 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
                     o = o * s
                 out = o if out is None else out + o
             return out
+
+    # ---- SDXL added_cond_kwargs（M5）：text_embeds + time_ids ----
+    # 仅在 COND 带 pooled（SDXLCond / SDXLSegments）时激活；SD1.x 的
+    # added 保持 None ⇒ 前向逐字节不变。
+    pos_pooleds = cond_pooleds(pos)
+    neg_pooleds = cond_pooleds(neg)
+    sdxl_adds = None         # cat：单 dict；split：(neg, pos)
+    sdxl_side_extras = None  # area：(neg 每段, pos 每段) 的 dict 列表
+    if pos_pooleds is not None or neg_pooleds is not None:
+        if pos_pooleds is None or neg_pooleds is None:
+            raise ValueError(
+                "SDXL conditioning 需正/负两侧都带 pooled（SDXLCond）：检测到"
+                "一侧是 SDXL cond、另一侧是 SD1.x 张量 cond，同一采样不能混用两种架构")
+        check_sdxl_pooled_dim(pipe, pos_pooleds[0])
+        w0, h0 = cond_size(pos)
+        if not (w0 and h0):
+            w0, h0 = cond_size(neg)
+        if not (w0 and h0):  # auto：由 latent 尺寸推导（txt2img/i2i 同尺寸语义）
+            w0, h0 = latents.shape[3] * 8, latents.shape[2] * 8
+        tids = sdxl_time_ids(w0, h0, latents.dtype, latents.device)
+        sdxl_adds, sdxl_side_extras = build_sdxl_added(
+            seg_mode, b, tids, pos_pooleds, neg_pooleds,
+            len(pos_segs), len(neg_segs))
+        print(f"[sample] sdxl added_cond: text_embeds={tuple(pos_pooleds[0].shape)} "
+              f"time_ids={tuple(tids.shape)} size={w0}x{h0}", flush=True)
 
     t0 = time.time()
     try:
@@ -474,23 +687,30 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
                 ipa_scale_for(i)
                 if seg_mode == "cat":
                     inp = sched.scale_model_input(torch.cat([latents] * 2), t)
-                    res = cn_residuals(i, inp, t, hidden)
-                    noise_pred = unet_forward(inp, t, hidden, res, ipa_added_cat)
+                    added = _merge_added(ipa_added_cat, sdxl_adds)
+                    res = cn_residuals(i, inp, t, hidden, added)
+                    noise_pred = unet_forward(inp, t, hidden, res, added)
                     uncond, cond = noise_pred.chunk(2)
                 elif seg_mode == "split":
                     inp = sched.scale_model_input(latents, t)
+                    neg_add = _merge_added(ipa_added_neg, sdxl_adds[0]) \
+                        if sdxl_adds else ipa_added_neg
+                    pos_add = _merge_added(ipa_added_pos, sdxl_adds[1]) \
+                        if sdxl_adds else ipa_added_pos
                     uncond = unet_forward(
-                        inp, t, neg_e, cn_residuals(i, inp, t, neg_e),
-                        ipa_added_neg)
+                        inp, t, neg_e, cn_residuals(i, inp, t, neg_e, neg_add),
+                        neg_add)
                     cond = unet_forward(
-                        inp, t, pos_e, cn_residuals(i, inp, t, pos_e),
-                        ipa_added_pos)
+                        inp, t, pos_e, cn_residuals(i, inp, t, pos_e, pos_add),
+                        pos_add)
                 else:
                     inp = sched.scale_model_input(latents, t)
+                    neg_adds = sdxl_side_extras[0] if sdxl_side_extras else None
+                    pos_adds = sdxl_side_extras[1] if sdxl_side_extras else None
                     uncond = blend_side(neg_segs, neg_masks, inp, t,
-                                        ipa_added_neg)
+                                        ipa_added_neg, neg_adds)
                     cond = blend_side(pos_segs, pos_masks, inp, t,
-                                      ipa_added_pos)
+                                      ipa_added_pos, pos_adds)
                 guided = uncond + cfg * (cond - uncond)
                 latents = sched.step(guided, t, latents).prev_sample
                 if noise_mask is not None:

@@ -1,0 +1,145 @@
+Name: sdxl-hires
+Description: >-
+  SDXL hires fix（M5）：768 出图（latent 路径）→ latent.upscale 1.5x → 低 denoise
+  (0.45) 二次采样 → VAE 解码 1152。CLIP 节点的 width/height 钉在 768（原始尺寸），
+  验证 time_ids 用"原始尺寸"而非当前 latent 尺寸（与 ComfyUI/diffusers 语义一致）。
+Param:
+  service_url: "http://127.0.0.1:8100"
+  service_url_internal: "http://172.17.0.1:8100"
+  service_token: ""
+Graph: |
+  stateDiagram-v2
+    [*] --> Ensure
+    Ensure --> LoadCkpt
+    Ensure --> EmptyLatent
+    LoadCkpt --> EncPos
+    LoadCkpt --> EncNeg
+    EncPos --> Sample1
+    EncNeg --> Sample1
+    EmptyLatent --> Sample1
+    Sample1 --> LatentUp
+    LatentUp --> Sample2
+    EncPos --> Sample2
+    EncNeg --> Sample2
+    Sample2 --> Decode
+    LoadCkpt --> Decode
+    Decode --> Save
+    Save --> [*]
+Nodes:
+  Ensure:
+    name: 服务健康检查
+    config:
+      nodeRef: inference-ensure@1.1.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        wait_seconds: 60
+        min_vram_mb: 2500
+  LoadCkpt:
+    name: SDXL加载
+    config:
+      nodeRef: checkpoint-loader@1.2.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url_internal }}"
+        service_token: "{{ Param.service_token }}"
+        ckpt_name: "sd_xl_base_1.0"
+        dtype: fp16
+        offload: model
+  EncPos:
+    name: 正向提示词
+    config:
+      nodeRef: clip-text-encode@1.1.0
+      params:
+        service_url: "{{ Param.service_url_internal }}"
+        service_token: "{{ Param.service_token }}"
+        clip_ref: "{{ LoadCkpt.clip_ref }}"
+        text: "a cute cat sitting on a windowsill, soft sunset light, masterpiece, best quality"
+        width: 768
+        height: 768
+  EncNeg:
+    name: 反向提示词
+    config:
+      nodeRef: clip-text-encode@1.1.0
+      params:
+        service_url: "{{ Param.service_url_internal }}"
+        service_token: "{{ Param.service_token }}"
+        clip_ref: "{{ LoadCkpt.clip_ref }}"
+        text: "lowres, blurry, worst quality, watermark, text"
+        width: 768
+        height: 768
+  EmptyLatent:
+    name: 空Latent
+    config:
+      nodeRef: empty-latent@1.0.0
+      params:
+        service_url: "{{ Param.service_url_internal }}"
+        service_token: "{{ Param.service_token }}"
+        width: 768
+        height: 768
+        batch_size: 1
+  Sample1:
+    name: 采样1(768)
+    config:
+      nodeRef: ksampler@1.4.0
+      params:
+        service_url: "{{ Param.service_url_internal }}"
+        service_token: "{{ Param.service_token }}"
+        model_ref: "{{ LoadCkpt.model_ref }}"
+        positive: "{{ EncPos.conditioning }}"
+        negative: "{{ EncNeg.conditioning }}"
+        latent: "{{ EmptyLatent.latent }}"
+        seed: -1
+        steps: 25
+        cfg: 6.0
+        sampler_name: euler
+        scheduler: normal
+        denoise: 1.0
+  LatentUp:
+    name: latent放大1.5x
+    config:
+      nodeRef: latent-upscale@1.0.0
+      params:
+        service_url: "{{ Param.service_url_internal }}"
+        service_token: "{{ Param.service_token }}"
+        latent: "{{ Sample1.latent }}"
+        scale: 1.5
+        method: bicubic
+  Sample2:
+    name: 采样2(hires)
+    config:
+      nodeRef: ksampler@1.4.0
+      params:
+        service_url: "{{ Param.service_url_internal }}"
+        service_token: "{{ Param.service_token }}"
+        model_ref: "{{ LoadCkpt.model_ref }}"
+        positive: "{{ EncPos.conditioning }}"
+        negative: "{{ EncNeg.conditioning }}"
+        latent: "{{ LatentUp.latent }}"
+        seed: -1
+        steps: 25
+        cfg: 6.0
+        sampler_name: euler
+        scheduler: normal
+        denoise: 0.45
+  Decode:
+    name: VAE解码
+    config:
+      nodeRef: vae-decode@1.0.0
+      params:
+        service_url: "{{ Param.service_url_internal }}"
+        service_token: "{{ Param.service_token }}"
+        vae_ref: "{{ LoadCkpt.vae_ref }}"
+        latent: "{{ Sample2.latent }}"
+  Save:
+    name: 保存图像
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Decode.image }}"
+        filename_prefix: "flowx_sdxl_hires"
+        output_dir: "~/flowx-output"

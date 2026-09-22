@@ -153,21 +153,37 @@ class ModelManager:
                                     safety_checker=None, **self._single_file_kwargs(cls_name))
 
     @staticmethod
-    def _single_file_kwargs(cls_name):
-        """from_single_file 的额外参数：传 config=本地 diffusers 目录可完全避开
-        hub 配置下载（宿主机 huggingface.co 不可达时的离线兜底——不传时 diffusers
-        会去 hub 拉 Lykon/dreamshaper-8 之类的默认配置，网络被断即 500）。
-        在 MODELS_DIR 下找 _class_name 匹配的 diffusers 目录（model_index.json）；
-        找不到则返回空 dict，保持原 hub 行为。"""
-        import json
+    def _config_candidates():
+        """from_single_file 的离线 config 候选目录：MODELS_DIR 顶层 与
+        MODELS_DIR/_configs/*（推荐位置：只放 model_index.json + 各组件
+        config/tokenizer 文件，不含权重，不进模型下拉清单）。"""
+        cands = []
         try:
             entries = sorted(os.listdir(MODELS_DIR))
         except OSError:
-            return {}
+            return cands
         for entry in entries:
-            d = os.path.join(MODELS_DIR, entry)
+            cands.append(os.path.join(MODELS_DIR, entry))
+        cfg_root = os.path.join(MODELS_DIR, "_configs")
+        try:
+            for entry in sorted(os.listdir(cfg_root)):
+                cands.append(os.path.join(cfg_root, entry))
+        except OSError:
+            pass
+        return cands
+
+    @classmethod
+    def _single_file_kwargs(cls, cls_name):
+        """from_single_file 的额外参数：传 config=本地 diffusers 目录可完全避开
+        hub 配置下载（宿主机 huggingface.co 不可达时的离线兜底——不传时 diffusers
+        会去 hub 拉 Lykon/dreamshaper-8 / stabilityai/stable-diffusion-xl-base-1.0
+        之类的默认配置，网络被断即 500）。
+        在 MODELS_DIR（含 _configs/）下找 _class_name 匹配的 diffusers 目录；
+        找不到则返回空 dict，保持原 hub 行为。"""
+        import json
+        for d in cls._config_candidates():
             idx = os.path.join(d, "model_index.json")
-            if not os.path.isdir(d) or not os.path.isfile(idx):
+            if not os.path.isfile(idx):
                 continue
             try:
                 with open(idx, encoding="utf-8") as f:

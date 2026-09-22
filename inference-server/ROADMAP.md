@@ -18,8 +18,8 @@
 | 采样器 euler/dpmpp/uni_pc 等 7 种 × sigma 排布 4 种自由组合 | `samplers.py`（M2 解耦：sampler_name × scheduler 双参数，旧一体名兼容） | ✅ 已解耦 |
 | 模型显存搬移 | `OFFLOAD_MODE=none/model/sequential`（旧 `ENABLE_CPU_OFFLOAD=1` 兼容映射 model） | ✅ 三档可用 |
 | dtype 探测/fallback | 硬编码 fp16 | ❌ 未做 |
-| SDXL/SD3/Flux 架构 | 仅 SD1.x 采样/编码路径；管道类已按内容嗅探分派（sniff.py） | ⚠️ 分派机制已备，架构适配未做 |
-| MASK/CONTROL_NET/UPSCALE_MODEL 等类型 | VIDEO 已加入（共 7 种对象类型） | ⚠️ 控制/放大类未做 |
+| SDXL/SD3/Flux 架构 | SD1.x/SDXL 采样/编码路径已通（M5，2026-09-22）；SD3.5 走独立插件链；FLUX 未做 | ⚠️ FLUX 未做（阶段 8） |
+| MASK/CONTROL_NET/UPSCALE_MODEL 等类型 | 已加入（共 11 种对象类型：含 CONTROL_NET/CONTROL/UPSCALE_MODEL/CLIP_VISION 等） | ✅ 已做（M4/M6/插件批次） |
 | 进度推送 / interrupt | 异步任务体系（/jobs 轮询进度 + /interrupt，协作式取消） | ⚠️ WS 推送未做 |
 
 ## 1. 扩展方法论（贯穿所有阶段）
@@ -90,14 +90,25 @@ SD1.5 的 fp16 VAE 解码会偶发纯黑图，社区标准修法是 VAE 单独 f
 - 显存：`ENABLE_CPU_OFFLOAD=1` 成为推荐配置（三件套同时在场 ~9GB）
 - 验收：线稿 → 同构图出图；强度 0.5/1.0 效果区分明显
 
-### 阶段 5：SDXL 支持（主流模型门槛）
+### 阶段 5：SDXL 支持（主流模型门槛）**✅ 已交付（2026-09-22，实现落地，待真机验收）**
 
 - 加载：✅ 分派机制已交付（sniff.py 按 safetensors 头部 key / model_index.json 嗅探，
   SDXL checkpoint 已路由到 StableDiffusionXLPipeline.from_single_file）
-- `clip.encode` 出 SDXL 变体：双 text encoder + pooled embedding（未做）
-- `sample` 补 `added_cond_kwargs`（time_ids/pooled）——**此时引入架构分派**，
-  用「采样循环骨架 + 每架构适配函数」而非 if-else 堆积（见 §3）
-- 验收：Pony/Illustrious 系社区模型出图正常
+- `clip.encode` 出 SDXL 变体：✅ 双 text encoder + pooled embedding —— 返回
+  `SDXLCond(embeds, pooled, size)`；不手写编码数学，直接调管道 `encode_prompt`
+  （与 sd3-clip-encode 同法），`clip_skip` 可透传
+- `sample` 补 `added_cond_kwargs`：✅ 采样循环内按 COND 是否带 pooled 分派
+  （text_embeds + time_ids，time_ids 由 CLIP 节点的 width/height 或 latent 推导；
+  区域条件下每段带自己的 pooled）；SDXL ControlNet 前向也收 added_cond_kwargs。
+  无 pooled 时路径与历史逐字节一致（SD1.x 不变性）
+- 离线 config：`MODELS_DIR/_configs/` 可放 diffusers 骨架（model_index.json + 组件
+  config/tokenizer）作为 `from_single_file` 的离线 config 源（免 hub，宿主机无外网）
+- 覆盖范围：txt2img / i2i（vae.encode + denoise）/ hires（latent.upscale + 低 denoise）/
+  ControlNet / LoRA（走既有 load_lora_weights）/ cond.set_area / combine / average
+- **本期不做**：SDXL refiner 双模型管线、aesthetic_score 参数、
+  SDXL-inpainting（9 通道 UNet 与现有 4 通道 latent 不兼容）
+- 交付与验收记录：dev-plan 二十五（验收口径：脚本 accept-m5.py + Studio 流水线
+  sdxl-txt2img / sdxl-hires，含与官方 diffusers 管道逐像素一致性可选步骤）
 
 ### 阶段 6：高清放大链
 
@@ -224,9 +235,9 @@ exec 361/362）。这与遗留清单 #6 的次生教训（decode OOM 后 22s/步
 | M1 图生图 | 1 ✅ | i2i / 变体生成 | 2 个算子（已交付） |
 | M2 采样器完整 | 2 ✅ | 全采样器×sigma 组合 | samplers.py 重构（已交付） |
 | M3 稳定 VAE | 3 ✅ | 无黑图 | model_manager 几行（已交付） |
-| M4 ControlNet | 4 | 构图控制 | 采样循环改造 |
-| M5 SDXL | 5 | 主流社区模型 | 架构分派落地 |
-| M6 高清链 | 6 | 2K/4K 出图 | 2~3 个算子 |
-| M7 体验 | 7 | 进度/取消/懒执行 | 引擎 + WS |
-| M8 Flux | 8 | 最新架构 | 独立采样路径 |
-| M9 视频 | 9 | i2v / 首尾帧插帧 | 异步任务 + 显存治理 |
+| M4 ControlNet | 4 | 构图控制 | 采样循环改造（✅ 已交付，见 dev-plan 十二） |
+| M5 SDXL | 5 | 主流社区模型 | 架构分派落地（✅ 实现已交付 2026-09-22，待真机验收） |
+| M6 高清链 | 6 | 2K/4K 出图 | 2~3 个算子（✅ 已交付，见 dev-plan 十四） |
+| M7 体验 | 7 | 进度/取消/懒执行 | 引擎 + WS（进度/取消 ✅；WS 推送与懒执行未做） |
+| M8 Flux | 8 | 最新架构 | 独立采样路径（SD3.5 ✅ 已点亮；FLUX 未做） |
+| M9 视频 | 9 | i2v / 首尾帧插帧 | 异步任务 + 显存治理（i2v ✅；FLF2V 搁置） |

@@ -139,9 +139,9 @@ def sniff_component(path):
 
 # ---- 模型文件清单（GET /models/files，节点 widget 模型下拉数据源） ----
 
-# MODELS_DIR 下不参与清单的功能目录
+# MODELS_DIR 下不参与清单的功能目录（_configs：from_single_file 的离线配置源）
 _LIST_SKIP_DIRS = {"preprocessors", "detectors", "plugins.d", "embeddings",
-                   "motion", "clip_vision", "ipadapter"}
+                   "motion", "clip_vision", "ipadapter", "_configs"}
 # 放大模型 .safetensors 的名字线索（sniff_component 不认得 spandrel 系权重布局，
 # 只能靠名字兜底；.pth 根文件直接判 upscale）
 _UPSCALE_NAME_HINTS = ("esrgan", "upscale", "ultrasharp", "swinir", "realsr",
