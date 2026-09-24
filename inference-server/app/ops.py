@@ -125,6 +125,12 @@ class ControlBundle:
         self.strength = strength
         self.start_percent = start_percent
         self.end_percent = end_percent
+        # InstantID（plugins/instantid_ops.py）：CN cross-attention 的
+        # encoder_hidden_states 覆写对（负向/正向各一份投影后人脸 token，
+        # [1, n_tokens, 2048]）；None = 常规 ControlNet（吃文本 hidden）。
+        # sample 预准备阶段搬到执行设备/精度。
+        self.hidden_neg = None
+        self.hidden_pos = None
 
 
 def controlnet_apply(control_net, image, strength=1.0,
@@ -533,14 +539,33 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
         win_hi = round(control.end_percent * len(ts))
         print(f"[sample] controlnet strength={control.strength} "
               f"window=[{win_lo},{win_hi}) of {len(ts)} steps", flush=True)
+    # InstantID 覆写对（hidden_neg/hidden_pos 非 None 时）：搬到执行设备
+    cn_neg_tok = cn_pos_tok = None
+    if control is not None and control.hidden_pos is not None:
+        cn_neg_tok = control.hidden_neg.to(device=device,
+                                           dtype=pipe.unet.dtype).expand(
+                                               b, -1, -1)
+        cn_pos_tok = control.hidden_pos.to(device=device,
+                                           dtype=pipe.unet.dtype).expand(
+                                               b, -1, -1)
+        print(f"[sample] controlnet hidden 覆写（InstantID）："
+              f"tokens={tuple(cn_pos_tok.shape)}", flush=True)
 
-    def cn_residuals(i, inp, t, hidden, added=None):
+    def cn_residuals(i, inp, t, hidden, added=None, side=None):
         """当前步的 controlnet 残差（窗口外/无 control 返回 None）。
         inp/hidden 批数与 unet 输入一致（cat 拼批 2b 时 hint 复制两份）。
+        side：split 模式下告知当前是 neg/pos 侧（InstantID 覆写对选边用，
+        cat 模式 None——按批数拼 [neg,pos]）。
         added：SDXL ControlNet 必需（text_embeds/time_ids），SD1.x 传 None。"""
         if control is None or not (win_lo <= i < win_hi):
             return None
-        h = hint if hidden.shape[0] == b else torch.cat([hint, hint])
+        h = hint if inp.shape[0] == b else torch.cat([hint, hint])
+        if cn_pos_tok is not None:
+            # InstantID：CN cross-attention 吃投影后的人脸 token（官方语义：
+            # 文本 hidden 整体被覆写，负向 = resampler(零特征)）
+            hidden = torch.cat([cn_neg_tok, cn_pos_tok]) \
+                if inp.shape[0] == 2 * b else \
+                (cn_neg_tok if side == "neg" else cn_pos_tok)
         kw = {"added_cond_kwargs": added} if added is not None else {}
         down, mid = control.controlnet(
             inp, t, encoder_hidden_states=hidden, controlnet_cond=h,
@@ -704,10 +729,12 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
                     pos_add = _merge_added(ipa_added_pos, sdxl_adds[1]) \
                         if sdxl_adds else ipa_added_pos
                     uncond = unet_forward(
-                        inp, t, neg_e, cn_residuals(i, inp, t, neg_e, neg_add),
+                        inp, t, neg_e,
+                        cn_residuals(i, inp, t, neg_e, neg_add, side="neg"),
                         neg_add)
                     cond = unet_forward(
-                        inp, t, pos_e, cn_residuals(i, inp, t, pos_e, pos_add),
+                        inp, t, pos_e,
+                        cn_residuals(i, inp, t, pos_e, pos_add, side="pos"),
                         pos_add)
                 else:
                     inp = sched.scale_model_input(latents, t)
@@ -734,9 +761,14 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
     finally:
         if _ipa_old is not None:
             try:
-                pipe.unet.set_attn_processor(_ipa_old[0])
+                # 先摘 encoder_hid_proj 再恢复处理器：Resampler 类投影
+                # （plus/InstantID）内部含 Attention 子模块，挂在 unet 树里
+                # 会被 set_attn_processor 的注意力层计数器计入（140 vs 144），
+                # 导致恢复失败常驻管道被污染（SD1.5 标准版投影是纯 Linear
+                # 无此问题，所以旧路径一直没暴露）
                 pipe.unet.encoder_hid_proj = _ipa_old[1]
                 pipe.unet.config["encoder_hid_dim_type"] = _ipa_old[2]
+                pipe.unet.set_attn_processor(_ipa_old[0])
             except Exception as e:
                 print(f"[sample] ipadapter 处理器恢复失败（常驻管道可能被污染）: "
                       f"{e}", flush=True)

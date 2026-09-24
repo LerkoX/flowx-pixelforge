@@ -17,7 +17,13 @@ FROM pytorch/pytorch:2.3.1-cuda12.1-cudnn8-runtime
 WORKDIR /app
 
 COPY requirements-pascal.txt .
-RUN pip install --no-cache-dir -r requirements-pascal.txt
+# insightface（InstantID face.analyze）无 manylinux 轮子，sdist 构建需编译
+# face3d 的 cython 扩展（mesh_core）——FaceAnalysis 不用它但 setup.py 无条件
+# 编译，故构建期临时装 g++，同一 RUN 内卸除（层内不留文件）。
+RUN apt-get update && apt-get install -y --no-install-recommends g++ \
+ && pip install --no-cache-dir -r requirements-pascal.txt \
+ && apt-get purge -y g++ && apt-get autoremove -y \
+ && rm -rf /var/lib/apt/lists/*
 # controlnet_aux 会拉入 opencv-python（非 headless），抢占 cv2 命名空间且容器无
 # libGL 导致 cv2 导入崩溃；卸载之，headless 提供同一 cv2 API（真机已验证）。
 # 注意 pip 不保证装包顺序：若 opencv-python 后装，其文件与 headless 同路径，
@@ -26,7 +32,7 @@ RUN pip install --no-cache-dir -r requirements-pascal.txt
 # 门禁——依赖破损在构建期炸，不再放进运行时。
 RUN pip uninstall -y opencv-python || true
 RUN pip install --no-cache-dir --force-reinstall --no-deps opencv-python-headless==4.11.0.86
-RUN python -c "import cv2, spandrel, controlnet_aux; print('deps smoke ok, cv2', cv2.__version__)"
+RUN python -c "import cv2, spandrel, controlnet_aux, insightface, onnxruntime; print('deps smoke ok, cv2', cv2.__version__, 'ort', onnxruntime.__version__)"
 
 COPY app/ ./app/
 

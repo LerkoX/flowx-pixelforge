@@ -41,6 +41,14 @@ controlnet_aux==0.0.10
 # M6 UPSCALE_MODEL 链：像素放大模型加载（RealESRGAN/SwinIR 架构自动识别）。
 # 已真机试装验证：纯 python+torch 依赖，不拉动 numpy/torch 版本
 spandrel==0.4.2
+# InstantID 人脸检测/识别（plugins/instantid_ops.py，face.analyze）：
+# insightface 本体纯 python（模型为 onnx，运行期走 onnxruntime CPU，不占显存）。
+# 注意：insightface 依赖 opencv-python（非 headless），同 controlnet_aux 的坑——
+# Dockerfile 装完依赖后统一 uninstall + force-reinstall headless（见上）。
+# onnxruntime 钉 1.19.2：1.20+ 开始要求 numpy>=1.26 但部分轮子拉 numpy2 风险，
+# 1.19.2 与 numpy 1.26 组合已验证；matplotlib/scikit-learn 随 insightface 依赖带入。
+insightface==0.7.3
+onnxruntime==1.19.2
 filelock>=3.13
 psutil
 py-cpuinfo
