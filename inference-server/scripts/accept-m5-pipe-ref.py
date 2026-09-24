@@ -55,11 +55,18 @@ def main():
     gen = torch.Generator(device=device).manual_seed(SEED)
     t0 = time.time()
     with torch.no_grad():
+        # output_type="latent"：VAE 在本仓被单独转 fp32（VAE_FP32=1 防黑图），
+        # 官方 pipe 内部 decode 不会把 fp16 latent 转成 vae.dtype 会直接崩；
+        # 改为取官方 loop 的 latent，再按 ops.vae_decode 相同方式解码比对。
         out = pipe(prompt=PROMPT, negative_prompt=NEG, width=SIZE, height=SIZE,
                    num_inference_steps=STEPS, guidance_scale=CFG,
-                   generator=gen, output_type="pil")
+                   generator=gen, output_type="latent")
+        lat = out.images
+        img = pipe.vae.decode(
+            lat.to(dtype=pipe.vae.dtype) / pipe.vae.config.scaling_factor,
+            return_dict=False)[0]
+        pil = pipe.image_processor.postprocess(img, output_type="pil")[0]
     dt = time.time() - t0
-    pil = out.images[0]
 
     os.makedirs(INPUT_DIR, exist_ok=True)
     path = os.path.join(INPUT_DIR, OUT_NAME)

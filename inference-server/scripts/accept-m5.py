@@ -64,7 +64,8 @@ SD15_PROMPT = "a cat sitting on a windowsill, warm sunset light, high quality"
 
 TIMEOUT = int(os.environ.get("JOB_TIMEOUT", "1800"))
 OBJ_PORTS = {"model", "clip", "vae", "pos", "neg", "latent", "image",
-             "control_net", "control", "control_net_ref"}
+             "control_net", "control", "control_net_ref",
+             "cond", "cond_a", "cond_b"}  # cond*：cond.set_area/combine/average 的对象入参
 
 failures = []
 skips = []
@@ -216,18 +217,31 @@ def main():
         print("[accept] 未指定 SDXL_CKPT：跳过 SDXL 用例（t1~t6/t8），"
               "仅跑 t7 回归等不依赖 SDXL 的用例", flush=True)
 
-    mcv = pos = neg = lat0 = None
+    mcv = pos = neg = lat0 = img1 = None
     if SDXL_CKPT:
         # SDXL 底模加载（offload=model：8GB 卡上 UNet 5.1G + 双 TE 1.9G 的默认选择）
         mcv = op("checkpoint.load", ckpt=SDXL_CKPT, offload="model")
         print(f"[accept] SDXL 加载完成 model={mcv['model']}", flush=True)
 
+    def mkconds():
+        """重建 pos/neg/lat0。对象仓库 TTL=3600s，长套件后段引用会过期，
+        故在每个用到它们的测试前刷新（编码很快，缓存命中秒回）。"""
+        nonlocal pos, neg, lat0
         pos = op("clip.encode", clip=mcv["clip"], text=PROMPT,
                  width=SDXL_SIZE, height=SDXL_SIZE)["cond"]
         neg = op("clip.encode", clip=mcv["clip"], text=NEG,
                  width=SDXL_SIZE, height=SDXL_SIZE)["cond"]
         lat0 = op("latent.empty", width=SDXL_SIZE, height=SDXL_SIZE,
                   batch_size=1)["latent"]
+
+    def fresh_sdxl():
+        """TTL 兑底：model/clip/vae 视图与条件一起重建（checkpoint.load 缓存命中）。"""
+        nonlocal mcv
+        mcv = op("checkpoint.load", ckpt=SDXL_CKPT, offload="model")
+        mkconds()
+
+    if SDXL_CKPT:
+        mkconds()
 
     # ---------------- t1 txt2img ----------------
     r1 = None
@@ -281,22 +295,36 @@ def main():
         if not SDXL_CN:
             skip("t4", "未指定 SDXL_CN（SDXL ControlNet 权重名）")
         else:
+            mkconds()  # t4 前刷新（t1~t3 已耗时 ~20 分钟）
             cn = op("controlnet.load", name=SDXL_CN)["control_net"]
-            # hint：用 SD1.x 图做提取即可（ControlNet hint 与底模架构无关）
-            hint = op("image.load", name=os.environ.get("HINT_IMG", ""))["image"] \
-                if os.environ.get("HINT_IMG") else img1
-            ctl = op("controlnet.apply", control_net=cn, image=hint,
-                     strength=0.8)["control"]
-            r4 = op("sample", model=mcv["model"], pos=pos, neg=neg,
-                    latent=lat0, seed=SDXL_SEED + 3, steps=SDXL_STEPS,
-                    cfg=SDXL_CFG, sampler_name="euler", scheduler="normal",
-                    denoise=1.0, control=ctl)
-            img4 = op("vae.decode", vae=mcv["vae"], latent=r4["latent"])["image"]
-            check_img("t4_sdxl_controlnet", fetch_image(img4),
-                      expect_size=(SDXL_SIZE, SDXL_SIZE))
+            # hint：从 img1（t2 产物）抽 Canny 线稿；或用 HINT_IMG 指定 INPUT_DIR 里的图
+            hint = None
+            if os.environ.get("HINT_IMG"):
+                hint = op("image.load", name=os.environ["HINT_IMG"])["image"]
+            elif img1 is not None:
+                hint = op("preprocess.canny", image=img1)["image"]
+            if hint is None:
+                skip("t4", "无 hint 图（需先跑 t1/t2 产出 img1，或指定 HINT_IMG）")
+            else:
+                ctl = op("controlnet.apply", control_net=cn, image=hint,
+                         strength=0.8)["control"]
+                # 8GB 卡上 SDXL+CN 峰值 ~8.2GB 会換页抖动（~90s/步），
+                # t4 验证链路机制即可，默认降到 10 步（SDXL_CN_STEPS 可调）
+                cn_steps = int(os.environ.get("SDXL_CN_STEPS", "10"))
+                r4 = op("sample", model=mcv["model"], pos=pos, neg=neg,
+                        latent=lat0, seed=SDXL_SEED + 3,
+                        steps=min(SDXL_STEPS, cn_steps),
+                        cfg=SDXL_CFG, sampler_name="euler", scheduler="normal",
+                        denoise=1.0, control=ctl)
+                img4 = op("vae.decode", vae=mcv["vae"], latent=r4["latent"])["image"]
+                check_img("t4_sdxl_controlnet", fetch_image(img4),
+                          expect_size=(SDXL_SIZE, SDXL_SIZE))
+                # 卸载 CN：避免其常驻 1.25GB 拖慢后续 t5~t8 采样（90s/步 抖动）
+                call("/model/unload", {"target": f"cn:{SDXL_CN}|dtype=fp16"})
 
     # ---------------- t5 offload 三档 ----------------
     if want("t5") and SDXL_CKPT:
+        mkconds()  # t5 三档重载耗时 ~25 分钟，pos/neg/lat0 先刷新
         for mode in ("none", "model", "sequential"):
             t0 = time.time()
             out, err = run("checkpoint.load", ckpt=SDXL_CKPT, offload=mode)
@@ -357,6 +385,7 @@ def main():
 
     # ---------------- t8 SDXL + 区域条件（SDXLSegments） ----------------
     if want("t8") and SDXL_CKPT:
+        fresh_sdxl()  # 走到这里通常已 >50 分钟：model 视图与条件全部重建
         pos_a = op("cond.set_area", cond=pos, x=0, y=0,
                    width=SDXL_SIZE, height=SDXL_SIZE // 2,
                    strength=1.0)["cond"]
