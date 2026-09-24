@@ -74,6 +74,23 @@ def _load_state_dict(path):
     return torch.load(path, map_location="cpu", weights_only=True)
 
 
+def _unflatten_ipadapter(sd):
+    """统一成嵌套结构 {image_proj: {...}, ip_adapter: {...}}。
+    safetensors 只能是扁平键（'image_proj.proj.weight'），原版 .bin 是嵌套
+    dict；diffusers load_ip_adapter 与 plus 判别都吃嵌套格式。"""
+    if "image_proj" in sd and isinstance(sd.get("image_proj"), dict):
+        return sd
+    out = {}
+    for k, v in sd.items():
+        top, sep, rest = k.partition(".")
+        if not sep:
+            raise ValueError(
+                f"IPAdapter 权重存在无法归类的顶层键 {k!r}（既非嵌套 dict "
+                f"也非 'image_proj./ip_adapter.' 前缀扁平键）")
+        out.setdefault(top, {})[rest] = v
+    return out
+
+
 def ipadapter_load(name):
     """IPAdapter Load：读适配器权重为 state dict（CPU，几十 MB 量级）。
     按 image_proj 是否含 latents 键判别 plus 版（apply 时决定编码路径）。"""
@@ -89,7 +106,7 @@ def ipadapter_load(name):
         raise FileNotFoundError(
             f"ipadapter '{name}' not found in {base}; "
             f"available: {available or '(empty)'}")
-    sd = _load_state_dict(path)
+    sd = _unflatten_ipadapter(_load_state_dict(path))
     if "image_proj" not in sd or "ip_adapter" not in sd:
         raise ValueError(
             f"{path} 不是 IPAdapter 权重（缺 image_proj/ip_adapter 顶层键）")

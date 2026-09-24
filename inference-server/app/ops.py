@@ -568,8 +568,14 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
         ipa_procs = [p for p in pipe.unet.attn_processors.values()
                      if isinstance(p, (IPAdapterAttnProcessor,
                                        IPAdapterAttnProcessor2_0))]
-        pos_ie = ipa["pos_embeds"].expand(b, *ipa["pos_embeds"].shape[1:])
-        neg_ie = ipa["neg_embeds"].expand(b, *ipa["neg_embeds"].shape[1:])
+        def _ipa_expand(e):
+            # diffusers MultiIPAdapterImageProjection 要求每项
+            # [batch, num_images, (seq,) embed_dim]——先补 num_images 维再扩
+            # batch（真机发现：缺这一维会被 reshape 成扁平向量，投影层
+            # 报 mat1/mat2 维度不匹配）
+            return e.unsqueeze(1).expand(b, 1, *e.shape[1:])
+        pos_ie = _ipa_expand(ipa["pos_embeds"])
+        neg_ie = _ipa_expand(ipa["neg_embeds"])
         ipa_added_cat = {"image_embeds": [torch.cat([neg_ie, pos_ie])]}
         ipa_added_pos = {"image_embeds": [pos_ie]}
         ipa_added_neg = {"image_embeds": [neg_ie]}

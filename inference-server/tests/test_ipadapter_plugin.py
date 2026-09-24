@@ -132,8 +132,25 @@ def main():
                                           "ip_adapter": {}}
         got = load_fn("bad")
         assert got["ipadapter"]["plus"] is False
+        # safetensors 扁平键 → 自动拼回嵌套 dict（真机发现：safetensors 无法
+        # 存嵌套结构，'image_proj.proj.weight' 需拼回 image_proj 子表）
+        mod._load_state_dict = lambda p: {
+            "image_proj.proj.weight": 1, "ip_adapter.1.to_k_ip.weight": 2}
+        got = load_fn("bad")
+        sd = got["ipadapter"]["state_dict"]
+        assert sd["image_proj"]["proj.weight"] == 1, sd
+        assert sd["ip_adapter"]["1.to_k_ip.weight"] == 2, sd
+        assert got["ipadapter"]["plus"] is False
+        # 无法归类的裸顶层键应被拒
+        mod._load_state_dict = lambda p: {"stray": 1}
+        try:
+            load_fn("bad")
+            raise SystemExit("FAIL: 裸顶层键应被拒")
+        except ValueError as e:
+            assert "stray" in str(e), e
+            print(f"ok: load 拒绝无法归类的顶层键: {str(e)[:40]}...")
         mod._load_state_dict = orig
-        print("ok: plus/standard 按 image_proj.latents 键判别")
+        print("ok: safetensors 扁平键拼回嵌套 + plus/standard 判别")
         del os.environ["IPADAPTER_DIR"]
 
     # clip_vision.load 校验路径

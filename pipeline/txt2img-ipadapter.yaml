@@ -1,0 +1,295 @@
+Name: txt2img-ipadapter
+Description: >-
+  IPAdapter 真机验收（A/B/C 三链同种子对比）：参考图 = 橘白卡通猫窗台图，
+  prompt = "a dog sitting in a garden, photograph"。
+  链 A weight=0（零污染对照，应与无 IPA 基线一致）；
+  链 B weight=0.8 全程注入（生效验证：出图应向参考图风格/构图漂移）；
+  链 C weight=0.8 只注入前 50% 步（步窗口验证：保构图自由度）。
+  验收口径：抽图看图 + 链 A 与事后无 IPA 基线逐字节一致（常驻管道零污染）。
+Param:
+  service_url: "http://5.tcp.cpolar.top:10190"      # Studio 宿主机/公网可达（local 节点 + 画布侧读取）
+  service_url_internal: "http://172.17.0.1:8100"     # docker 节点容器内网地址
+  service_token: "30e494999da13134808ee280aea6dffd"  # 服务端 INFERENCE_TOKEN（已启用鉴权）
+  ref_image: "~/flowx-output/flowx_txt2img_20260922_170318.png"  # 参考图（FlowX 本机路径）
+  seed: 42
+Graph: |
+  stateDiagram-v2
+    [*] --> Ensure
+    Ensure --> LoadCkpt
+    Ensure --> RefImage
+    Ensure --> LoadCV
+    Ensure --> LoadIPA
+    LoadCkpt --> EncPos
+    LoadCkpt --> EncNeg
+    Ensure --> EmptyLatent
+    LoadCkpt --> ApplyA
+    LoadIPA --> ApplyA
+    LoadCV --> ApplyA
+    RefImage --> ApplyA
+    LoadCkpt --> ApplyB
+    LoadIPA --> ApplyB
+    LoadCV --> ApplyB
+    RefImage --> ApplyB
+    LoadCkpt --> ApplyC
+    LoadIPA --> ApplyC
+    LoadCV --> ApplyC
+    RefImage --> ApplyC
+    ApplyA --> SampleA
+    ApplyB --> SampleB
+    ApplyC --> SampleC
+    EncPos --> SampleA
+    EncPos --> SampleB
+    EncPos --> SampleC
+    EncNeg --> SampleA
+    EncNeg --> SampleB
+    EncNeg --> SampleC
+    EmptyLatent --> SampleA
+    EmptyLatent --> SampleB
+    EmptyLatent --> SampleC
+    SampleA --> DecodeA
+    SampleB --> DecodeB
+    SampleC --> DecodeC
+    LoadCkpt --> DecodeA
+    LoadCkpt --> DecodeB
+    LoadCkpt --> DecodeC
+    DecodeA --> SaveA
+    DecodeB --> SaveB
+    DecodeC --> SaveC
+    SaveA --> [*]
+    SaveB --> [*]
+    SaveC --> [*]
+Nodes:
+  Ensure:
+    name: 服务健康检查
+    config:
+      nodeRef: inference-ensure@1.1.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        wait_seconds: 60
+  LoadCkpt:
+    name: Checkpoint加载
+    config:
+      nodeRef: checkpoint-loader@1.2.0
+      params:
+        service_url: "{{ Param.service_url_internal }}"
+        service_url_host: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        ckpt_name: "v1-5-pruned-emaonly-fp16"
+        dtype: fp16
+        offload: none
+  EncPos:
+    name: 正向提示词
+    config:
+      nodeRef: clip-text-encode@1.1.0
+      params:
+        service_url: "{{ Param.service_url_internal }}"
+        service_token: "{{ Param.service_token }}"
+        clip_ref: "{{ LoadCkpt.clip_ref }}"
+        text: "a dog sitting in a garden, photograph, high quality, sharp focus"
+  EncNeg:
+    name: 反向提示词
+    config:
+      nodeRef: clip-text-encode@1.1.0
+      params:
+        service_url: "{{ Param.service_url_internal }}"
+        service_token: "{{ Param.service_token }}"
+        clip_ref: "{{ LoadCkpt.clip_ref }}"
+        text: "lowres, blurry, worst quality, watermark, text"
+  EmptyLatent:
+    name: 空Latent
+    config:
+      nodeRef: empty-latent@1.0.0
+      params:
+        service_url: "{{ Param.service_url_internal }}"
+        service_token: "{{ Param.service_token }}"
+        width: 512
+        height: 512
+        batch_size: 1
+  RefImage:
+    name: 参考图
+    config:
+      nodeRef: load-image@1.1.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image_path: "{{ Param.ref_image }}"
+  LoadCV:
+    name: CLIP Vision加载
+    config:
+      nodeRef: clip-vision-load@1.0.0
+      params:
+        service_url: "{{ Param.service_url_internal }}"
+        service_url_host: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        name: "CLIP-ViT-H-14"
+  LoadIPA:
+    name: IPAdapter加载
+    config:
+      nodeRef: ipadapter-load@1.0.0
+      params:
+        service_url: "{{ Param.service_url_internal }}"
+        service_url_host: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        name: "ip-adapter_sd15"
+  ApplyA:
+    name: IPA应用 weight=0
+    config:
+      nodeRef: ipadapter-apply@1.0.0
+      params:
+        service_url: "{{ Param.service_url_internal }}"
+        service_url_host: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        model: "{{ LoadCkpt.model_ref }}"
+        ipadapter: "{{ LoadIPA.ipadapter }}"
+        clip_vision: "{{ LoadCV.clip_vision }}"
+        image: "{{ RefImage.image }}"
+        weight: 0.0
+        start_percent: 0.0
+        end_percent: 1.0
+  ApplyB:
+    name: IPA应用 weight=0.8
+    config:
+      nodeRef: ipadapter-apply@1.0.0
+      params:
+        service_url: "{{ Param.service_url_internal }}"
+        service_url_host: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        model: "{{ LoadCkpt.model_ref }}"
+        ipadapter: "{{ LoadIPA.ipadapter }}"
+        clip_vision: "{{ LoadCV.clip_vision }}"
+        image: "{{ RefImage.image }}"
+        weight: 0.8
+        start_percent: 0.0
+        end_percent: 1.0
+  ApplyC:
+    name: IPA应用 前半窗口
+    config:
+      nodeRef: ipadapter-apply@1.0.0
+      params:
+        service_url: "{{ Param.service_url_internal }}"
+        service_url_host: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        model: "{{ LoadCkpt.model_ref }}"
+        ipadapter: "{{ LoadIPA.ipadapter }}"
+        clip_vision: "{{ LoadCV.clip_vision }}"
+        image: "{{ RefImage.image }}"
+        weight: 0.8
+        start_percent: 0.0
+        end_percent: 0.5
+  SampleA:
+    name: 采样A w0
+    config:
+      nodeRef: ksampler@1.4.0
+      params:
+        service_url: "{{ Param.service_url_internal }}"
+        service_url_host: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        model_ref: "{{ ApplyA.model }}"
+        positive: "{{ EncPos.conditioning }}"
+        negative: "{{ EncNeg.conditioning }}"
+        latent: "{{ EmptyLatent.latent }}"
+        seed: "{{ Param.seed }}"
+        steps: 20
+        cfg: 7.0
+        sampler_name: euler
+        scheduler: normal
+        denoise: 1.0
+  SampleB:
+    name: 采样B w0.8
+    config:
+      nodeRef: ksampler@1.4.0
+      params:
+        service_url: "{{ Param.service_url_internal }}"
+        service_url_host: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        model_ref: "{{ ApplyB.model }}"
+        positive: "{{ EncPos.conditioning }}"
+        negative: "{{ EncNeg.conditioning }}"
+        latent: "{{ EmptyLatent.latent }}"
+        seed: "{{ Param.seed }}"
+        steps: 20
+        cfg: 7.0
+        sampler_name: euler
+        scheduler: normal
+        denoise: 1.0
+  SampleC:
+    name: 采样C 前半窗口
+    config:
+      nodeRef: ksampler@1.4.0
+      params:
+        service_url: "{{ Param.service_url_internal }}"
+        service_url_host: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        model_ref: "{{ ApplyC.model }}"
+        positive: "{{ EncPos.conditioning }}"
+        negative: "{{ EncNeg.conditioning }}"
+        latent: "{{ EmptyLatent.latent }}"
+        seed: "{{ Param.seed }}"
+        steps: 20
+        cfg: 7.0
+        sampler_name: euler
+        scheduler: normal
+        denoise: 1.0
+  DecodeA:
+    name: 解码A
+    config:
+      nodeRef: vae-decode@1.0.0
+      params:
+        service_url: "{{ Param.service_url_internal }}"
+        service_token: "{{ Param.service_token }}"
+        vae_ref: "{{ LoadCkpt.vae_ref }}"
+        latent: "{{ SampleA.latent }}"
+  DecodeB:
+    name: 解码B
+    config:
+      nodeRef: vae-decode@1.0.0
+      params:
+        service_url: "{{ Param.service_url_internal }}"
+        service_token: "{{ Param.service_token }}"
+        vae_ref: "{{ LoadCkpt.vae_ref }}"
+        latent: "{{ SampleB.latent }}"
+  DecodeC:
+    name: 解码C
+    config:
+      nodeRef: vae-decode@1.0.0
+      params:
+        service_url: "{{ Param.service_url_internal }}"
+        service_token: "{{ Param.service_token }}"
+        vae_ref: "{{ LoadCkpt.vae_ref }}"
+        latent: "{{ SampleC.latent }}"
+  SaveA:
+    name: 保存A
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ DecodeA.image }}"
+        filename_prefix: "flowx_ipa_w0"
+        output_dir: "~/flowx-output"
+  SaveB:
+    name: 保存B
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ DecodeB.image }}"
+        filename_prefix: "flowx_ipa_w08"
+        output_dir: "~/flowx-output"
+  SaveC:
+    name: 保存C
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ DecodeC.image }}"
+        filename_prefix: "flowx_ipa_w08h"
+        output_dir: "~/flowx-output"
