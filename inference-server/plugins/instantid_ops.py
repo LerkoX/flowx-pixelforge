@@ -195,9 +195,11 @@ def draw_kps(image, kps):
     return Image.fromarray(out)
 
 
-def face_analyze(image, face_index=-1):
+def face_analyze(image, face_index=-1, det_thresh=0.5):
     """Face Analyze：检测输入图人脸，输出 FACE 对象（512 维身份特征 +
     关键点图）。face_index：-1=最大脸（官方语义），0..N-1=按面积降序第 N 张。
+    det_thresh：检测置信度阈值（默认 0.5；AI 生成的人脸置信度常仅
+    0.35~0.45，回测出图时建议传 0.2）。
     人脸特征为 antelopev2 的原始 embedding（InstantID 训练尺度）；
     FACE 对象另存 normed_embedding 供余弦相似度回测（点积即余弦）。"""
     from PIL import Image
@@ -207,10 +209,16 @@ def face_analyze(image, face_index=-1):
     import cv2
     import numpy as np
     face_index = int(face_index)
+    app = _face_app()
+    dt = float(det_thresh)
+    if not 0.01 <= dt <= 1.0:
+        raise ValueError(f"face.analyze: det_thresh 需在 [0.01,1]，got {dt}")
+    app.det_model.det_thresh = dt
     arr = cv2.cvtColor(np.asarray(image.convert("RGB")), cv2.COLOR_RGB2BGR)
-    faces = _face_app().get(arr)
+    faces = app.get(arr)
     if not faces:
-        raise ValueError("face.analyze: 未检测到人脸（换张清晰正脸照试试）")
+        raise ValueError("face.analyze: 未检测到人脸（换张清晰正脸照，"
+                         "或对 AI 生成图调低 det_thresh 到 0.2）")
     faces = sorted(faces, key=lambda f: (f.bbox[2] - f.bbox[0])
                    * (f.bbox[3] - f.bbox[1]), reverse=True)
     idx = 0 if face_index < 0 else face_index
@@ -230,6 +238,42 @@ def face_analyze(image, face_index=-1):
     print(f"[face.analyze] faces={len(faces)} picked={idx} "
           f"bbox={[round(v) for v in face['bbox']]}", flush=True)
     return {"face": face, "kps": kps_img}
+
+
+def face_similarity(image_a, image_b, face_index_a=-1, face_index_b=-1,
+                    det_thresh=0.5):
+    """Face Similarity：两张图各自取目标人脸（默认最大脸），返回身份余弦
+    相似度（antelopev2 normed_embedding 点积）。验收/调试量化用：
+    同人典型 >=0.5，陌生人典型 <0.3。任一侧未检出人脸明确报错。"""
+    import cv2
+    import numpy as np
+    from PIL import Image
+    app = _face_app()
+    dt = float(det_thresh)
+    if not 0.01 <= dt <= 1.0:
+        raise ValueError(f"face.similarity: det_thresh 需在 [0.01,1]，got {dt}")
+    app.det_model.det_thresh = dt
+    embeds = []
+    for img, fidx, tag in ((image_a, face_index_a, "a"), (image_b, face_index_b, "b")):
+        if not isinstance(img, Image.Image):
+            raise ValueError(
+                f"face.similarity: image_{tag} 需为 PIL 图像，"
+                f"got {type(img).__name__}")
+        arr = cv2.cvtColor(np.asarray(img.convert("RGB")), cv2.COLOR_RGB2BGR)
+        faces = app.get(arr)
+        if not faces:
+            raise ValueError(f"face.similarity: image_{tag} 未检测到人脸")
+        faces = sorted(faces, key=lambda f: (f.bbox[2] - f.bbox[0])
+                       * (f.bbox[3] - f.bbox[1]), reverse=True)
+        idx = 0 if int(fidx) < 0 else int(fidx)
+        if idx >= len(faces):
+            raise ValueError(
+                f"face.similarity: image_{tag} face_index={fidx} 越界"
+                f"（共 {len(faces)} 张脸）")
+        embeds.append(faces[idx].normed_embedding)
+    sim = float(np.dot(embeds[0], embeds[1]))
+    print(f"[face.similarity] cos={sim:.4f}", flush=True)
+    return {"similarity": sim}
 
 
 # ---------------------------------------------------------------------------
@@ -327,12 +371,21 @@ def instantid_apply(model, ipadapter, controlnet, face, weight=0.8,
 def register(registry):
     registry.register(
         "face.analyze",
-        inputs={"image": "IMAGE", "face_index": "INT"},
+        inputs={"image": "IMAGE", "face_index": "INT", "det_thresh": "FLOAT"},
         outputs={"face": "FACE", "kps": "IMAGE"},
         description="Face Analyze（InstantID 配套）：insightface antelopev2 "
                     "检测+识别（onnxruntime CPU，不占显存），输出 512 维身份"
                     "特征 + 5 关键点控制图；face_index=-1 取最大脸，"
                     "0..N-1 按面积降序选脸")(face_analyze)
+    registry.register(
+        "face.similarity",
+        inputs={"image_a": "IMAGE", "image_b": "IMAGE",
+                "face_index_a": "INT", "face_index_b": "INT",
+                "det_thresh": "FLOAT"},
+        outputs={"similarity": "FLOAT"},
+        description="Face Similarity：两图目标人脸（默认各自最大脸）的身份余弦"
+                    "相似度（antelopev2 normed_embedding 点积）——InstantID 验收/"
+                    "调试量化：同人典型 >=0.5，陌生人典型 <0.3")(face_similarity)
     registry.register(
         "instantid.apply",
         inputs={"model": "MODEL", "ipadapter": "IPADAPTER",

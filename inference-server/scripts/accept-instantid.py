@@ -344,8 +344,7 @@ def main():
             pos = op("clip.encode", clip=m["clip"],
                      text="a cat sitting on a windowsill, warm sunset light, "
                           "high quality")
-            neg = op("clip.encode", clip=m["clip"],
-                     text="lowres, blurry, worst quality")
+            neg = op("clip.encode", clip=m["clip"], text="")  # M2 基线用空负向
             lat = op("latent.empty", width=512, height=512, batch_size=1)
             out = op("sample", model=m["model"], pos=pos["cond"],
                      neg=neg["cond"], latent=lat["latent"], seed=424242,

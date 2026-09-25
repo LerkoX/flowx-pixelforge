@@ -33,8 +33,13 @@ PLUGIN = os.path.join(os.path.dirname(__file__), "..", "plugins",
                       "instantid_ops.py")
 
 EXPECTED = {
-    "face.analyze": ({"image": "IMAGE", "face_index": "INT"},
+    "face.analyze": ({"image": "IMAGE", "face_index": "INT",
+                             "det_thresh": "FLOAT"},
                      {"face": "FACE", "kps": "IMAGE"}),
+    "face.similarity": ({"image_a": "IMAGE", "image_b": "IMAGE",
+                          "face_index_a": "INT", "face_index_b": "INT",
+                          "det_thresh": "FLOAT"},
+                         {"similarity": "FLOAT"}),
     "instantid.apply": ({"model": "MODEL", "ipadapter": "IPADAPTER",
                          "controlnet": "CONTROL_NET", "face": "FACE",
                          "weight": "FLOAT", "cn_strength": "FLOAT",
