@@ -54,3 +54,8 @@ psutil
 py-cpuinfo
 pandas
 scipy
+
+# FLUX GGUF 路线（flux_ops 插件）：gguf 纯 Python 解量化（GGUFReader/dequantize），
+# sentencepiece 供 T5 tokenizer_2（spiece.model）；0.17.1/0.2.0 组合实测通过
+gguf==0.17.1
+sentencepiece==0.2.0

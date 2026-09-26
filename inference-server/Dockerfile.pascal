@@ -32,7 +32,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends g++ \
 # 门禁——依赖破损在构建期炸，不再放进运行时。
 RUN pip uninstall -y opencv-python || true
 RUN pip install --no-cache-dir --force-reinstall --no-deps opencv-python-headless==4.11.0.86
-RUN python -c "import cv2, spandrel, controlnet_aux, insightface, onnxruntime; print('deps smoke ok, cv2', cv2.__version__, 'ort', onnxruntime.__version__)"
+RUN python -c "import importlib.metadata as im; import cv2, spandrel, controlnet_aux, insightface, onnxruntime, gguf, sentencepiece, huggingface_hub; print('deps smoke ok, cv2', cv2.__version__, 'ort', onnxruntime.__version__, 'gguf', im.version('gguf'), 'hf', huggingface_hub.__version__)"
 
 COPY app/ ./app/
 
