@@ -1,39 +1,38 @@
-Name: txt2img-depth
+Name: txt2img-ipadapter-sdxl
 Description: >-
-  第三档批次3 真机验收：MiDaS 深度图 + depth ControlNet 端到端。
-  参考图 = test_fullbody2.jpg（人物照片），preprocess-depth 提取深度图，
-  depth ControlNet 锁构图，prompt 换"雪中小屋"——构图/空间层次应跟随深度图。
-  验收口径：抽图人工核对（深度图近亮远暗、出图构图跟随）。
+  SDXL IPAdapter（vit-h 变体）Studio e2e 验收：参考图 = 橘白卡通猫窗台图，
+  prompt = "a dog sitting in a garden, photograph"。weight=0.8 全程注入，
+  出图应向参考图风格/构图漂移（橘白猫窗台插画风）。768x768 / 16 步 /
+  offload=model。
 Param:
   service_url: "http://5.tcp.cpolar.top:12876"      # Studio 宿主机/公网可达（local 节点 + 画布侧读取）
   service_url_internal: "http://172.17.0.1:8100"     # docker 节点容器内网地址
   service_token: "30e494999da13134808ee280aea6dffd"  # 服务端 INFERENCE_TOKEN（已启用鉴权）
-  ref_image: "~/flowx-output/test_fullbody2.jpg"     # 参考图（FlowX 本机路径）
-  seed: 777
+  ref_image: "~/flowx-output/flowx_txt2img_20260922_170318.png"  # 参考图（FlowX 本机路径）
+  seed: 42
 Graph: |
   stateDiagram-v2
     [*] --> Ensure
     Ensure --> LoadCkpt
     Ensure --> RefImage
-    Ensure --> LoadCN
+    Ensure --> LoadCV
+    Ensure --> LoadIPA
     LoadCkpt --> EncPos
     LoadCkpt --> EncNeg
-    RefImage --> Depth
-    LoadCkpt --> ApplyCN
-    LoadCN --> ApplyCN
-    Depth --> ApplyCN
     Ensure --> EmptyLatent
-    LoadCkpt --> Sample
-    ApplyCN --> Sample
+    LoadCkpt --> ApplyIPA
+    LoadIPA --> ApplyIPA
+    LoadCV --> ApplyIPA
+    RefImage --> ApplyIPA
+    ApplyIPA --> Sample
     EncPos --> Sample
     EncNeg --> Sample
     EmptyLatent --> Sample
     Sample --> Decode
     LoadCkpt --> Decode
     Decode --> Save
-    Sample --> UnloadCN
-    Save --> [*]
-    UnloadCN --> [*]
+    Save --> Unload
+    Unload --> [*]
 Nodes:
   Ensure:
     name: 服务健康检查
@@ -44,17 +43,18 @@ Nodes:
         service_url: "{{ Param.service_url }}"
         service_token: "{{ Param.service_token }}"
         wait_seconds: 60
+        min_vram_mb: 6000
   LoadCkpt:
-    name: Checkpoint加载
+    name: SDXL加载
     config:
       nodeRef: checkpoint-loader@1.2.0
       params:
         service_url: "{{ Param.service_url_internal }}"
         service_url_host: "{{ Param.service_url }}"
         service_token: "{{ Param.service_token }}"
-        ckpt_name: "v1-5-pruned-emaonly-fp16"
+        ckpt_name: "sd_xl_base_1.0"
         dtype: fp16
-        offload: none
+        offload: model
   EncPos:
     name: 正向提示词
     config:
@@ -63,7 +63,9 @@ Nodes:
         service_url: "{{ Param.service_url_internal }}"
         service_token: "{{ Param.service_token }}"
         clip_ref: "{{ LoadCkpt.clip_ref }}"
-        text: "a small wooden cabin in a snowy forest, night, warm light in the window, highly detailed"
+        text: "a dog sitting in a garden, photograph, high quality, sharp focus"
+        width: 768
+        height: 768
   EncNeg:
     name: 反向提示词
     config:
@@ -73,6 +75,8 @@ Nodes:
         service_token: "{{ Param.service_token }}"
         clip_ref: "{{ LoadCkpt.clip_ref }}"
         text: "lowres, blurry, worst quality, watermark, text"
+        width: 768
+        height: 768
   EmptyLatent:
     name: 空Latent
     config:
@@ -80,8 +84,8 @@ Nodes:
       params:
         service_url: "{{ Param.service_url_internal }}"
         service_token: "{{ Param.service_token }}"
-        width: 512
-        height: 512
+        width: 768
+        height: 768
         batch_size: 1
   RefImage:
     name: 参考图
@@ -92,55 +96,57 @@ Nodes:
         service_url: "{{ Param.service_url }}"
         service_token: "{{ Param.service_token }}"
         image_path: "{{ Param.ref_image }}"
-  Depth:
-    name: 深度提取
+  LoadCV:
+    name: CLIP Vision加载
     config:
-      nodeRef: preprocess-depth@1.0.0
+      nodeRef: clip-vision-load@1.0.0
       params:
         service_url: "{{ Param.service_url_internal }}"
         service_url_host: "{{ Param.service_url }}"
         service_token: "{{ Param.service_token }}"
+        name: "CLIP-ViT-H-14"
+  LoadIPA:
+    name: SDXL IPA加载
+    config:
+      nodeRef: ipadapter-load@1.0.0
+      params:
+        service_url: "{{ Param.service_url_internal }}"
+        service_url_host: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        name: "ip-adapter_sdxl_vit-h"
+  ApplyIPA:
+    name: IPA应用
+    config:
+      nodeRef: ipadapter-apply@1.0.0
+      params:
+        service_url: "{{ Param.service_url_internal }}"
+        service_url_host: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        model: "{{ LoadCkpt.model_ref }}"
+        ipadapter: "{{ LoadIPA.ipadapter }}"
+        clip_vision: "{{ LoadCV.clip_vision }}"
         image: "{{ RefImage.image }}"
-        detect_resolution: 512
-  LoadCN:
-    name: depth ControlNet
-    config:
-      nodeRef: controlnet-load@1.0.0
-      params:
-        service_url: "{{ Param.service_url_internal }}"
-        service_url_host: "{{ Param.service_url }}"
-        service_token: "{{ Param.service_token }}"
-        name: "control_v11f1p_sd15_depth_fp16"
-  ApplyCN:
-    name: CN应用
-    config:
-      nodeRef: controlnet-apply@1.0.0
-      params:
-        service_url: "{{ Param.service_url_internal }}"
-        service_url_host: "{{ Param.service_url }}"
-        service_token: "{{ Param.service_token }}"
-        control_net: "{{ LoadCN.control_net }}"
-        image: "{{ Depth.image }}"
-        strength: 1.0
+        weight: 0.8
+        start_percent: 0.0
+        end_percent: 1.0
   Sample:
     name: 采样
     config:
       nodeRef: ksampler@1.4.0
+      executor: local
       params:
-        service_url: "{{ Param.service_url_internal }}"
-        service_url_host: "{{ Param.service_url }}"
+        service_url: "{{ Param.service_url }}"
         service_token: "{{ Param.service_token }}"
-        model_ref: "{{ LoadCkpt.model_ref }}"
+        model_ref: "{{ ApplyIPA.model }}"
         positive: "{{ EncPos.conditioning }}"
         negative: "{{ EncNeg.conditioning }}"
         latent: "{{ EmptyLatent.latent }}"
         seed: "{{ Param.seed }}"
-        steps: 20
+        steps: 16
         cfg: 7.0
         sampler_name: euler
         scheduler: normal
         denoise: 1.0
-        control: "{{ ApplyCN.control }}"
   Decode:
     name: 解码
     config:
@@ -159,9 +165,9 @@ Nodes:
         service_url: "{{ Param.service_url }}"
         service_token: "{{ Param.service_token }}"
         image: "{{ Decode.image }}"
-        filename_prefix: "flowx_depth"
+        filename_prefix: "flowx_ipa_sdxl"
         output_dir: "~/flowx-output"
-  UnloadCN:
+  Unload:
     name: 卸载模型
     config:
       nodeRef: model-unload@1.0.0
