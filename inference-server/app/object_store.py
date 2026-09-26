@@ -49,6 +49,12 @@ class ObjectStore:
         with self._lock:
             return oid in self._items
 
+    def referenced_data(self) -> list:
+        """仓库内所有条目的 data 列表（供模型淘汰保护：被仓库引用的管道
+        本体视同 pin，见 ModelManager.extra_pinned / main.py 注入）。"""
+        with self._lock:
+            return [v.get("data") for v in self._items.values()]
+
     def clear(self) -> int:
         with self._lock:
             n = len(self._items)

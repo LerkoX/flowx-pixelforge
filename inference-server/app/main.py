@@ -44,6 +44,10 @@ store = ObjectStore(ttl_seconds=int(os.environ.get("OBJECT_TTL_SECONDS", "3600")
 # 模型淘汰联动：LRU 顶掉的管道仍被对象仓库的 model/clip/vae 视图钉住，
 # 必须在 evict 时按对象身份断开引用（先断引用后 GC，见 ModelManager._evict_if_needed）
 models.on_evict = lambda pipe: store.discard_where(lambda d: d is pipe)
+# 反向保护：对象仓库仍引用的常驻条目视同执行中 pin，淘汰计划跳过
+# （并发加载竞态：后完成的大模型入驻检查不得淘汰先完成、对象已被下游
+# 绑定待消费的模型——exec442 的 InstantID CN 误杀事故）
+models.extra_pinned = lambda: models.keys_of(store.referenced_data())
 # 显存护栏注入引擎：算子执行期间 pin 在用模型（淘汰跳过），OOM 时淘汰非在用条目后重试
 engine.set_vram_guard(_mm.VramGuard(models))
 registry = Registry()

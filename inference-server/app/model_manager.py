@@ -96,6 +96,30 @@ class ModelManager:
         # （如 ObjectStore 中 model/clip/vae 视图持有的管道本体）。
         # 顺序关键：必须先断外部引用，再 gc.collect 才能回收循环引用。
         self.on_evict = None
+        # 额外 pinned 集合回调 fn() -> set[key]：装配层注入，把"对象仓库
+        # 仍引用的常驻条目"视同执行中 pin——对象未消费就淘汰其管道＝把流水线
+        # 下一步要用的模型抽走（exec442：并发加载时 SDXL 入驻检查把先完成的
+        # InstantID CN 当 LRU 牺牲品，Apply 取用 control_net 对象报 not found）。
+        self.extra_pinned = None
+
+    def keys_of(self, objs) -> set:
+        """objs 里哪些是本管理器驻留条目的管道本体 → 返回其常驻 key。
+        供 extra_pinned 回调实现：对象仓库 model/clip/vae/control_net 视图的
+        data 与驻留管道是同一对象（discard_where 的镜像查询）。
+        ⚠️ 不加锁：调用链是 load_*（已持锁）→ _evict_if_needed → extra_pinned
+        → 本方法，threading.Lock 不可重入，再加锁即死锁（真机 LoadCN 卡死
+        事故）。无锁快照在并发写入时最坏丢一轮保护（降级为旧 LRU 语义），
+        不会读到脏引用（对象身份比较 is 总是安全）。"""
+        out = set()
+        try:
+            pipes = list(self._pipes.items())
+        except RuntimeError:  # 迭代期并发增删（理论窗口），降级不保护
+            return out
+        for d in objs:
+            for k, p in pipes:
+                if d is p:
+                    out.add(k)
+        return out
 
     def resolve(self, name: str):
         """按名称在 MODELS_DIR 中定位模型：diffusers 目录 或 safetensors/ckpt 文件
@@ -547,13 +571,19 @@ class ModelManager:
             return
         need = int(need_bytes * VRAM_LOAD_FACTOR) if need_bytes else 0
         free = self._free_bytes() if (VRAM_BUDGET and need) else None
+        pinned = set(self._pins)
+        if self.extra_pinned is not None:
+            try:
+                pinned |= set(self.extra_pinned() or ())
+            except Exception:
+                pass  # 回调故障不阻断加载（退回纯执行期 pin 语义）
         plan = vram.plan_eviction(
             [(k, self._sizes.get(k, 0), self._last_used.get(k, 0)) for k in self._pipes],
             free_bytes=free or 0,
             need_bytes=need if free is not None else 0,
             reserve_bytes=VRAM_RESERVE_MB * 1024**2 if free is not None else 0,
             max_resident=MAX_RESIDENT,
-            pinned=self._pins)
+            pinned=pinned)
         for victim in plan:
             self._do_evict(victim)
         if free is not None:
