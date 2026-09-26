@@ -368,6 +368,69 @@ def instantid_apply(model, ipadapter, controlnet, face, weight=0.8,
     return {"model": InstantIDModel(pipe, patches, ipa), "control": ctl}
 
 
+# ---------------------------------------------------------------------------
+# face.mask：人脸 bbox → feathered 矩形 mask + crop 框（FaceDetailer 编排）
+# ---------------------------------------------------------------------------
+
+
+def face_mask(image, face_index=-1, det_thresh=0.2, expand=0.6, feather=16.0):
+    """Face Mask：检测人脸 bbox，中心外扩 expand 比例（覆盖全脸+发际），
+    clamp 图内并 8 倍数对齐（crop 后直接喂 vae.encode），输出 feathered
+    矩形 mask + crop 框 x/y/width/height（供 image-crop 裁剪与
+    image-composite 贴回直接绑定）。
+    det_thresh 默认 0.2（FaceDetailer 的回测对象就是 AI 生成图，置信度常
+    0.35~0.45；与 face.analyze 的 0.5 默认值有意不同）。"""
+    from PIL import Image, ImageDraw, ImageFilter
+    if not isinstance(image, Image.Image):
+        raise ValueError(
+            f"face.mask: image 需为单张 PIL 图像，got {type(image).__name__}")
+    import cv2
+    import numpy as np
+    face_index = int(face_index)
+    app = _face_app()
+    dt = float(det_thresh)
+    if not 0.01 <= dt <= 1.0:
+        raise ValueError(f"face.mask: det_thresh 需在 [0.01,1]，got {dt}")
+    app.det_model.det_thresh = dt
+    arr = cv2.cvtColor(np.asarray(image.convert("RGB")), cv2.COLOR_RGB2BGR)
+    faces = app.get(arr)
+    if not faces:
+        raise ValueError("face.mask: 未检测到人脸（AI 生成图可再调低 "
+                         "det_thresh；非人像图本算子不适用）")
+    faces = sorted(faces, key=lambda f: (f.bbox[2] - f.bbox[0])
+                   * (f.bbox[3] - f.bbox[1]), reverse=True)
+    idx = 0 if face_index < 0 else face_index
+    if idx >= len(faces):
+        raise ValueError(
+            f"face.mask: face_index={face_index} 越界（共 {len(faces)} 张脸，"
+            f"按面积降序）")
+    x1, y1, x2, y2 = [float(v) for v in faces[idx].bbox]
+    W, H = image.size
+    # 中心外扩（各方向 +expand/2 × 边长），clamp 图内
+    ex = max(0.0, float(expand))
+    bw, bh = (x2 - x1) * (1 + ex), (y2 - y1) * (1 + ex)
+    cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+    nx1 = max(0.0, cx - bw / 2); ny1 = max(0.0, cy - bh / 2)
+    nx2 = min(float(W), cx + bw / 2); ny2 = min(float(H), cy + bh / 2)
+    # 8 倍数对齐（取整后重新 clamp）
+    fx = int(nx1) // 8 * 8
+    fy = int(ny1) // 8 * 8
+    fw = max(8, (int(nx2) - fx) // 8 * 8)
+    fh = max(8, (int(ny2) - fy) // 8 * 8)
+    fw = min(fw, (W - fx) // 8 * 8); fh = min(fh, (H - fy) // 8 * 8)
+    if fw < 8 or fh < 8:
+        raise ValueError(f"face.mask: 外扩框过小（{fw}x{fh}），无法 8 倍数对齐")
+    mask = Image.new("L", (W, H), 0)
+    ImageDraw.Draw(mask).rectangle([fx, fy, fx + fw - 1, fy + fh - 1], fill=255)
+    rad = float(feather)
+    if rad > 0:
+        mask = mask.filter(ImageFilter.GaussianBlur(rad))
+    print(f"[face.mask] faces={len(faces)} picked={idx} "
+          f"bbox={[round(v) for v in (x1,y1,x2,y2)]} -> "
+          f"crop=({fx},{fy},{fw}x{fh}) feather={rad}", flush=True)
+    return {"mask": mask, "x": fx, "y": fy, "width": fw, "height": fh}
+
+
 def register(registry):
     registry.register(
         "face.analyze",
@@ -400,3 +463,15 @@ def register(registry):
                     "instantid-ip-adapter.bin，controlnet 用 "
                     "instantid-controlnet；输出接 sample 的 model/control 端口"
                     )(instantid_apply)
+    registry.register(
+        "face.mask",
+        inputs={"image": "IMAGE", "face_index": "INT", "det_thresh": "FLOAT",
+                "expand": "FLOAT", "feather": "FLOAT"},
+        outputs={"mask": "IMAGE", "x": "INT", "y": "INT",
+                 "width": "INT", "height": "INT"},
+        description="Face Mask（FaceDetailer 配套）：insightface 检测人脸 bbox，"
+                    "中心外扩 expand（默认 0.6，覆盖全脸+发际）后 8 倍数对齐，"
+                    "输出 feathered 矩形 mask + crop 框 x/y/width/height；"
+                    "det_thresh 默认 0.2（AI 生成图人脸置信度低）；"
+                    "接 image-crop 裁剪 + image-composite 贴回做局部精修"
+                    )(face_mask)

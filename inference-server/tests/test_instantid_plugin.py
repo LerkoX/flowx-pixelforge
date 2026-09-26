@@ -47,6 +47,11 @@ EXPECTED = {
                          "cn_start_percent": "FLOAT",
                          "cn_end_percent": "FLOAT"},
                         {"model": "MODEL", "control": "CONTROL"}),
+    "face.mask": ({"image": "IMAGE", "face_index": "INT",
+                   "det_thresh": "FLOAT", "expand": "FLOAT",
+                   "feather": "FLOAT"},
+                  {"mask": "IMAGE", "x": "INT", "y": "INT",
+                   "width": "INT", "height": "INT"}),
 }
 
 
@@ -98,6 +103,11 @@ def main():
     _expect_err(lambda: mod.face_analyze("not-an-image"),
                 "需为单张 PIL 图像")
     print("ok: face_analyze 非 PIL 输入明确报错")
+
+    # face_mask：非 PIL 输入同理明确报错
+    _expect_err(lambda: mod.face_mask("not-an-image"),
+                "需为单张 PIL 图像")
+    print("ok: face_mask 非 PIL 输入明确报错")
 
     # instantid_apply 校验链（假管道，torch 桩——校验都在 torch 调用之前）
     _expect_err(lambda: mod.instantid_apply(object(), None, None, None),
