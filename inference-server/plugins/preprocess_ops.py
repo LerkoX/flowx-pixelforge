@@ -1,10 +1,13 @@
-"""ControlNet 预处理器算子（第三档批次 2，插件化交付）。
+"""ControlNet 预处理器算子（第三档批次 2/3，插件化交付）。
 
 - preprocess.canny：cv2.Canny 边缘线稿（黑底白线，ControlNet canny 出图惯例）
 - preprocess.openpose：OpenPose 骨架图（controlnet_aux，body 常驻，hand/face 可选）
+- preprocess.depth：MiDaS dpt_hybrid 深度图（批次 3；control_v11f1p_sd15_depth
+  训练时用的就是 MiDaS dpt_hybrid，预处理器与权重最对口）
 
 用途：闭环"人物替换保动作"——load-image(真人照片) → preprocess.openpose
 → controlnet.apply(openpose 权重) → sample(换服装/风格提示词)，姿势由骨架锁定。
+depth 则锁构图/空间层次（室内、产品、场景改造）。
 
 部署：本文件放 PLUGINS_DIR（默认 /models/plugins.d，bind-mount 持久化）重启自动
 扫描注册，或经 POST /admin/plugins 热上传。使用：经 inference-op 通用节点调用。
@@ -84,6 +87,48 @@ def preprocess_openpose(image, include_hand=False, include_face=False):
     return {"image": out.convert("RGB")}
 
 
+_midas_detector = None
+
+
+def _get_midas():
+    """MiDaS 检测器进程级单例（dpt_hybrid 权重 ~470MB，CPU 推理一张图几秒，
+    不值得为它占显存——8GB 卡上推理期显存要留给 UNet/VAE）。"""
+    global _midas_detector
+    if _midas_detector is None:
+        from controlnet_aux import MidasDetector  # 懒加载
+        path = os.path.join(PREPROC_DIR, "midas")
+        if not os.path.isdir(path):
+            raise FileNotFoundError(
+                f"preprocess.depth: 预处理器权重目录不存在：{path}"
+                f"（需 dpt_hybrid-midas-501f0c75.pt）")
+        # 目录路径模式：from_pretrained 直接 join(dir, 默认文件名)，零网络
+        _midas_detector = MidasDetector.from_pretrained(
+            path, local_files_only=True)
+        print(f"[preprocess.depth] 检测器已加载：{path}", flush=True)
+    return _midas_detector
+
+
+def preprocess_depth(image, detect_resolution=512):
+    """MiDaS 深度估计：IMAGE → 灰度深度图 IMAGE（近亮远暗，ControlNet depth
+    提示图惯例），输出尺寸恒等于输入尺寸。detect_resolution 为检测内部短边
+    分辨率（默认 512，细节不足可调高）——MiDaS 模型自身输入固定 384，
+    该参数只影响前端预缩放。"""
+    img = _as_image(image, "preprocess.depth")
+    det = _get_midas()
+    det_res = max(64, int(detect_resolution))
+    out = det(img.convert("RGB"), detect_resolution=det_res,
+              image_resolution=det_res)
+    if not isinstance(out, Image.Image):
+        import numpy as np
+        out = Image.fromarray(np.asarray(out))
+    # MidasDetector 输出尺寸由 image_resolution 决定（resize_image 语义），
+    # 统一回缩到输入尺寸，保证下游 controlnet.apply 的 hint 与出图尺寸对齐
+    if out.size != img.size:
+        out = out.resize(img.size, Image.BILINEAR)
+    print(f"[preprocess.depth] {img.size} detect_res={det_res}", flush=True)
+    return {"image": out.convert("RGB")}
+
+
 def register(registry):
     registry.register(
         "preprocess.canny",
@@ -101,3 +146,11 @@ def register(registry):
         description="OpenPose 骨架检测：真人照片 → 黑底彩色骨架图（ControlNet "
                     "openpose 提示图）；include_hand/include_face 可选精化，"
                     "权重从 /models/preprocessors/openpose 本地加载")(preprocess_openpose)
+    registry.register(
+        "preprocess.depth",
+        inputs={"image": "IMAGE", "detect_resolution": "INT"},
+        outputs={"image": "IMAGE"},
+        description="MiDaS dpt_hybrid 深度估计：IMAGE → 灰度深度图（近亮远暗，"
+                    "ControlNet depth 提示图），输出尺寸=输入尺寸；"
+                    "detect_resolution 默认 512，权重从 "
+                    "/models/preprocessors/midas 本地加载")(preprocess_depth)

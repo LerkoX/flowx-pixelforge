@@ -31,6 +31,8 @@ EXPECTED = {
                           "high_threshold": "INT"}, {"image": "IMAGE"}),
     "preprocess.openpose": ({"image": "IMAGE", "include_hand": "BOOL",
                              "include_face": "BOOL"}, {"image": "IMAGE"}),
+    "preprocess.depth": ({"image": "IMAGE", "detect_resolution": "INT"},
+                         {"image": "IMAGE"}),
 }
 
 
@@ -64,6 +66,11 @@ def main():
     try:
         po.preprocess_openpose(123)
         raise AssertionError("preprocess.openpose 应拒绝非 IMAGE")
+    except ValueError as e:
+        assert "IMAGE" in str(e)
+    try:
+        po.preprocess_depth("not-an-image")
+        raise AssertionError("preprocess.depth 应拒绝非 IMAGE")
     except ValueError as e:
         assert "IMAGE" in str(e)
     print("ok: 非 IMAGE 入参明确报错")
