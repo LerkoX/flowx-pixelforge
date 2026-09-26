@@ -1,0 +1,285 @@
+Name: facedetailer
+Description: >-
+  FaceDetailer 面部局部精修（批次2）：txt2img 人像（512 小图人脸必糊）→
+  face-mask 检测人脸出蒙版+crop 框 → 裁剪 → lanczos 放大 2x → 低 denoise
+  重采样（沿用原图 prompt 保风格）→ 缩回原尺寸 → 羽化蒙版贴回。
+  非面部区域逐像素不变。验收口径：原图 vs 精修图抽图对比（面部清晰度提升）。
+Param:
+  service_url: "http://5.tcp.cpolar.top:12876"      # Studio 宿主机/公网可达（local 节点 + 画布侧读取）
+  service_url_internal: "http://172.17.0.1:8100"     # docker 节点容器内网地址
+  service_token: "30e494999da13134808ee280aea6dffd"  # 服务端 INFERENCE_TOKEN（已启用鉴权）
+  seed: 1234
+Graph: |
+  stateDiagram-v2
+    [*] --> Ensure
+    Ensure --> LoadCkpt
+    LoadCkpt --> EncPos
+    LoadCkpt --> EncNeg
+    Ensure --> EmptyLatent
+    LoadCkpt --> Sample0
+    EncPos --> Sample0
+    EncNeg --> Sample0
+    EmptyLatent --> Sample0
+    Sample0 --> Decode0
+    LoadCkpt --> Decode0
+    Decode0 --> SaveOrig
+    Decode0 --> FaceMask
+    Decode0 --> Crop
+    FaceMask --> Crop
+    Crop --> Upscale
+    LoadCkpt --> VaeEncode
+    Upscale --> VaeEncode
+    LoadCkpt --> EncFix
+    VaeEncode --> SampleFix
+    EncFix --> SampleFix
+    EncNeg --> SampleFix
+    LoadCkpt --> SampleFix
+    SampleFix --> DecodeFix
+    LoadCkpt --> DecodeFix
+    DecodeFix --> Downscale
+    FaceMask --> Downscale
+    FaceMask --> MaskCrop
+    Decode0 --> Composite
+    Downscale --> Composite
+    MaskCrop --> Composite
+    Composite --> Save
+    Save --> Unload
+    SaveOrig --> [*]
+    Unload --> [*]
+Nodes:
+  Ensure:
+    name: 服务健康检查
+    config:
+      nodeRef: inference-ensure@1.1.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        wait_seconds: 60
+  LoadCkpt:
+    name: Checkpoint加载
+    config:
+      nodeRef: checkpoint-loader@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_url_host: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        ckpt_name: "v1-5-pruned-emaonly-fp16"
+        dtype: fp16
+        offload: none
+  EncPos:
+    name: 正向提示词
+    config:
+      nodeRef: clip-text-encode@1.1.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        clip_ref: "{{ LoadCkpt.clip_ref }}"
+        text: "portrait photo of a young woman, freckles, looking at camera, soft window light, highly detailed"
+  EncNeg:
+    name: 反向提示词
+    config:
+      nodeRef: clip-text-encode@1.1.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        clip_ref: "{{ LoadCkpt.clip_ref }}"
+        text: "lowres, blurry, worst quality, watermark, text, deformed"
+  EmptyLatent:
+    name: 空Latent
+    config:
+      nodeRef: empty-latent@1.0.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        width: 512
+        height: 512
+        batch_size: 1
+  Sample0:
+    name: 采样原图
+    config:
+      nodeRef: ksampler@1.4.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_url_host: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        model_ref: "{{ LoadCkpt.model_ref }}"
+        positive: "{{ EncPos.conditioning }}"
+        negative: "{{ EncNeg.conditioning }}"
+        latent: "{{ EmptyLatent.latent }}"
+        seed: "{{ Param.seed }}"
+        steps: 20
+        cfg: 7.0
+        sampler_name: euler
+        scheduler: normal
+        denoise: 1.0
+  Decode0:
+    name: 解码原图
+    config:
+      nodeRef: vae-decode@1.0.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        vae_ref: "{{ LoadCkpt.vae_ref }}"
+        latent: "{{ Sample0.latent }}"
+  SaveOrig:
+    name: 保存原图
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Decode0.image }}"
+        filename_prefix: "flowx_fd_orig"
+        output_dir: "~/flowx-output"
+  FaceMask:
+    name: 人脸蒙版
+    config:
+      nodeRef: face-mask@1.0.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Decode0.image }}"
+        face_index: -1
+        det_thresh: 0.2
+        expand: 0.6
+        feather: 16
+  Crop:
+    name: 裁剪脸部
+    config:
+      nodeRef: image-crop@1.0.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Decode0.image }}"
+        x: "{{ FaceMask.x }}"
+        y: "{{ FaceMask.y }}"
+        width: "{{ FaceMask.width }}"
+        height: "{{ FaceMask.height }}"
+  Upscale:
+    name: 放大crop
+    config:
+      nodeRef: image-upscale@1.0.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Crop.image }}"
+        scale: 2.0
+        method: lanczos
+  VaeEncode:
+    name: VAE编码
+    config:
+      nodeRef: vae-encode@1.0.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        vae_ref: "{{ LoadCkpt.vae_ref }}"
+        image: "{{ Upscale.image }}"
+  EncFix:
+    name: 精修提示词
+    config:
+      nodeRef: clip-text-encode@1.1.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        clip_ref: "{{ LoadCkpt.clip_ref }}"
+        text: "portrait photo of a young woman, freckles, looking at camera, soft window light, highly detailed, beautiful detailed face, sharp focus, detailed eyes, natural skin texture"
+  SampleFix:
+    name: 精修采样
+    config:
+      nodeRef: ksampler@1.4.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_url_host: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        model_ref: "{{ LoadCkpt.model_ref }}"
+        positive: "{{ EncFix.conditioning }}"
+        negative: "{{ EncNeg.conditioning }}"
+        latent: "{{ VaeEncode.latent }}"
+        seed: "{{ Param.seed }}"
+        steps: 20
+        cfg: 7.0
+        sampler_name: euler
+        scheduler: normal
+        denoise: 0.35
+  DecodeFix:
+    name: 解码精修
+    config:
+      nodeRef: vae-decode@1.0.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        vae_ref: "{{ LoadCkpt.vae_ref }}"
+        latent: "{{ SampleFix.latent }}"
+  Downscale:
+    name: 缩回原尺寸
+    config:
+      nodeRef: image-upscale@1.0.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ DecodeFix.image }}"
+        width: "{{ FaceMask.width }}"
+        height: "{{ FaceMask.height }}"
+        method: lanczos
+  MaskCrop:
+    name: 裁剪蒙版
+    config:
+      nodeRef: image-crop@1.0.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ FaceMask.mask }}"
+        x: "{{ FaceMask.x }}"
+        y: "{{ FaceMask.y }}"
+        width: "{{ FaceMask.width }}"
+        height: "{{ FaceMask.height }}"
+  Composite:
+    name: 贴回
+    config:
+      nodeRef: image-composite@1.0.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        background: "{{ Decode0.image }}"
+        foreground: "{{ Downscale.image }}"
+        mask: "{{ MaskCrop.image }}"
+        x: "{{ FaceMask.x }}"
+        y: "{{ FaceMask.y }}"
+  Save:
+    name: 保存精修
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Composite.image }}"
+        filename_prefix: "flowx_fd_fixed"
+        output_dir: "~/flowx-output"
+  Unload:
+    name: 卸载模型
+    config:
+      nodeRef: model-unload@1.0.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        target: "all"
