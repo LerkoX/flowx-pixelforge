@@ -5,7 +5,7 @@ Description: >-
   低 denoise 精修重采样(放大 1.25x,WSL 内存红线) → 羽化贴回。验收口径：身份相似度保持（脸还是参考脸）
   + 面部清晰度提升 + mask 外逐像素不变。
 Param:
-  service_url: "https://4d2f3b43.r5.cpolar.top"      # Studio 宿主机/公网可达（local 节点 + 画布侧读取）
+  service_url: "http://192.168.5.60:8100"      # Studio 宿主机/公网可达（local 节点 + 画布侧读取）
   service_url_internal: "http://172.17.0.1:8100"     # docker 节点容器内网地址
   service_token: "30e494999da13134808ee280aea6dffd"  # 服务端 INFERENCE_TOKEN（已启用鉴权）
   seed: 20260926

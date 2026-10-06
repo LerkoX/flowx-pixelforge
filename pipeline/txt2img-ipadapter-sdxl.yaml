@@ -5,7 +5,7 @@ Description: >-
   出图应向参考图风格/构图漂移（橘白猫窗台插画风）。768x768 / 16 步 /
   offload=model。
 Param:
-  service_url: "http://5.tcp.cpolar.top:12876"      # Studio 宿主机/公网可达（local 节点 + 画布侧读取）
+  service_url: "http://192.168.5.60:8100"      # Studio 宿主机/公网可达（local 节点 + 画布侧读取）
   service_url_internal: "http://172.17.0.1:8100"     # docker 节点容器内网地址
   service_token: "30e494999da13134808ee280aea6dffd"  # 服务端 INFERENCE_TOKEN（已启用鉴权）
   ref_image: "~/flowx-output/flowx_txt2img_20260922_170318.png"  # 参考图（FlowX 本机路径）

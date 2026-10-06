@@ -5,7 +5,7 @@ Description: >-
   重采样（沿用原图 prompt 保风格）→ 缩回原尺寸 → 羽化蒙版贴回。
   非面部区域逐像素不变。验收口径：原图 vs 精修图抽图对比（面部清晰度提升）。
 Param:
-  service_url: "http://5.tcp.cpolar.top:12876"      # Studio 宿主机/公网可达（local 节点 + 画布侧读取）
+  service_url: "http://192.168.5.60:8100"      # Studio 宿主机/公网可达（local 节点 + 画布侧读取）
   service_url_internal: "http://172.17.0.1:8100"     # docker 节点容器内网地址
   service_token: "30e494999da13134808ee280aea6dffd"  # 服务端 INFERENCE_TOKEN（已启用鉴权）
   seed: 1234

@@ -5,7 +5,7 @@ Description: >-
   depth ControlNet 锁构图，prompt 换"雪中小屋"——构图/空间层次应跟随深度图。
   验收口径：抽图人工核对（深度图近亮远暗、出图构图跟随）。
 Param:
-  service_url: "http://5.tcp.cpolar.top:12876"      # Studio 宿主机/公网可达（local 节点 + 画布侧读取）
+  service_url: "http://192.168.5.60:8100"      # Studio 宿主机/公网可达（local 节点 + 画布侧读取）
   service_url_internal: "http://172.17.0.1:8100"     # docker 节点容器内网地址
   service_token: "30e494999da13134808ee280aea6dffd"  # 服务端 INFERENCE_TOKEN（已启用鉴权）
   ref_image: "~/flowx-output/test_fullbody2.jpg"     # 参考图（FlowX 本机路径）
