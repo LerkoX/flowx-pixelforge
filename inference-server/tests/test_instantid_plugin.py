@@ -37,7 +37,8 @@ EXPECTED = {
     "face.analyze": ({"image": "IMAGE", "face_index": "INT",
                              "det_thresh": "FLOAT",
                              "canvas_width": "INT", "canvas_height": "INT",
-                             "canvas_mode": "STRING"},
+                             "canvas_mode": "STRING", "face_scale": "FLOAT",
+                             "face_x": "FLOAT", "face_y": "FLOAT"},
                      {"face": "FACE", "kps": "IMAGE"}),
     "face.similarity": ({"image_a": "IMAGE", "image_b": "IMAGE",
                           "face_index_a": "INT", "face_index_b": "INT",
@@ -132,6 +133,23 @@ def main():
                 "fit/cover")
     print(f"ok: fit_kps_to_canvas cover 模式（s={s2} oy={oy2:.0f}），"
           f"尺度保持 {w2:.0f}x{h2:.0f}，坏 mode 拒绝")
+
+    # _anchor_scale_kps：以包围盒中心为锚缩放 + 平移到画布归一化位置
+    # 全身构图场景：fit 结果上 face_scale=0.3、face_y=0.2（脸小且在上方）
+    scaled = mod._anchor_scale_kps(out, 0.3, 0.5, 0.2, 768, 768)
+    sw = scaled[1][0] - scaled[0][0]
+    sh = scaled[3][1] - scaled[0][1]
+    assert abs(sw - w1 * 0.3) < 1e-6 and abs(sh - h1 * 0.3) < 1e-6, "等比缩小"
+    cx = (min(p[0] for p in scaled) + max(p[0] for p in scaled)) / 2
+    cy = (min(p[1] for p in scaled) + max(p[1] for p in scaled)) / 2
+    assert abs(cx - 768 * 0.5) < 1e-6 and abs(cy - 768 * 0.2) < 1e-6, "锚点定位"
+    print(f"ok: _anchor_scale_kps 缩放×0.3 + 定位(0.5,0.2) 包围盒 "
+          f"{sw:.0f}x{sh:.0f} 中心=({cx:.0f},{cy:.0f})")
+    # face_scale 参数校验（无 canvas 拒绝 / 越界拒绝）
+    _expect_err(lambda: mod.face_analyze(Image.new("RGB", (64, 64)),
+                                         face_scale=0.3),
+                "需配合 canvas")
+    print("ok: face_scale 无 canvas 明确拒绝")
 
     # face_analyze canvas 参数校验：只给一个必须报错（在重依赖导入后？
     # 该校验在检测之后——用非 PIL 输入先行拦截，故此处直接调 helper 级
