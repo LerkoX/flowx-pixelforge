@@ -196,13 +196,20 @@ def draw_kps(image, kps, size=None):
     return Image.fromarray(out)
 
 
-def fit_kps_to_canvas(kps, width, height, canvas_width, canvas_height):
-    """关键点等比缩放 + 居中映射到目标画布（letterbox）：s=min(cw/w,ch/h)，
-    ox=(cw-w*s)/2，oy=(ch-h*s)/2。修复「参考图与生成画布比例不一致时，
-    kps 控制图被非均匀 resize 进生成分辨率导致人脸几何压扁/拉长」——
-    根因见 flowx-dev-plan §34/§35：768×1152 参考图直出 kps 喂 768×768
-    生成，y 向 ×0.667 压缩，生成脸宽高比 0.875→1.071。"""
-    s = min(canvas_width / width, canvas_height / height)
+def fit_kps_to_canvas(kps, width, height, canvas_width, canvas_height,
+                      mode="fit"):
+    """关键点等比变换 + 居中映射到目标画布：
+    mode="fit"（letterbox）：s=min(cw/w,ch/h)，全图内容完整可见，
+      人脸/画幅占比与参考图一致（脸可能偏小，身份细节像素少）；
+    mode="cover”（中心裁切）：s=max(cw/w,ch/h)，铺满画布裁溢出，
+      人脸尺寸保持参考图原尺度（身份生成优选，真机 sim 高出 ~0.08）；
+      参考图人脸贴近边缘时可能被裁掉一部分，编排侧需注意。
+    修复「参考图与生成画布比例不一致时，kps 控制图被非均匀 resize 进
+    生成分辨率导致人脸几何压扁/拉长」——根因见 flowx-dev-plan §35。"""
+    if mode not in ("fit", "cover"):
+        raise ValueError(f"canvas_mode 需为 fit/cover，got {mode!r}")
+    s = (min if mode == "fit" else max)(canvas_width / width,
+                                        canvas_height / height)
     ox = (canvas_width - width * s) / 2.0
     oy = (canvas_height - height * s) / 2.0
     out = [[float(x) * s + ox, float(y) * s + oy] for x, y in kps]
@@ -210,15 +217,17 @@ def fit_kps_to_canvas(kps, width, height, canvas_width, canvas_height):
 
 
 def face_analyze(image, face_index=-1, det_thresh=0.5,
-                 canvas_width=0, canvas_height=0):
+                 canvas_width=0, canvas_height=0, canvas_mode="fit"):
     """Face Analyze：检测输入图人脸，输出 FACE 对象（512 维身份特征 +
     关键点图）。face_index：-1=最大脸（官方语义），0..N-1=按面积降序第 N 张。
     det_thresh：检测置信度阈值（默认 0.5；AI 生成的人脸置信度常仅
     0.35~0.45，回测出图时建议传 0.2）。
     canvas_width/canvas_height（默认 0=不启用）：给出后 kps 关键点图直接
-    画在该尺寸画布上（等比缩放+居中，保人脸几何），应填生成画布尺寸——
+    画在该尺寸画布上（等比变换+居中，保人脸几何），应填生成画布尺寸——
     参考图比例与生成比例不一致时必须启用，否则 CN 条件图被非均匀压缩、
     生成人脸随参考图比例变扁/变长。
+    canvas_mode="fit"（默认，letterbox 完整保留参考构图）/ "cover"
+    （铺满裁溢出，人脸保持参考原尺度——身份保持生成优选，真机 sim 更高）。
     人脸特征为 antelopev2 的原始 embedding（InstantID 训练尺度）；
     FACE 对象另存 normed_embedding 供余弦相似度回测（点积即余弦）。"""
     from PIL import Image
@@ -242,6 +251,9 @@ def face_analyze(image, face_index=-1, det_thresh=0.5,
         raise ValueError(
             f"face.analyze: canvas 尺寸需为 8 的倍数（对齐生成 latent），"
             f"got {cw}x{ch}")
+    if str(canvas_mode) not in ("fit", "cover"):
+        raise ValueError(
+            f"face.analyze: canvas_mode 需为 fit/cover，got {canvas_mode!r}")
     arr = cv2.cvtColor(np.asarray(image.convert("RGB")), cv2.COLOR_RGB2BGR)
     faces = app.get(arr)
     if not faces:
@@ -261,10 +273,10 @@ def face_analyze(image, face_index=-1, det_thresh=0.5,
     emb = torch.from_numpy(f.embedding.copy()).float().unsqueeze(0)  # [1,512]
     if cw > 0:
         kps_t, s, ox, oy = fit_kps_to_canvas(f.kps, image.width, image.height,
-                                             cw, ch)
+                                             cw, ch, mode=str(canvas_mode))
         kps_img = draw_kps(None, kps_t, size=(cw, ch))
-        print(f"[face.analyze] canvas={cw}x{ch} fit: s={s:.4f} "
-              f"offset=({ox:.0f},{oy:.0f})（等比+居中，保人脸几何）", flush=True)
+        print(f"[face.analyze] canvas={cw}x{ch} mode={canvas_mode} "
+              f"fit: s={s:.4f} offset=({ox:.0f},{oy:.0f})", flush=True)
     else:
         kps_img = draw_kps(image, f.kps)
     face = {"embeds": emb, "kps_image": kps_img,
@@ -470,7 +482,8 @@ def register(registry):
     registry.register(
         "face.analyze",
         inputs={"image": "IMAGE", "face_index": "INT", "det_thresh": "FLOAT",
-                "canvas_width": "INT", "canvas_height": "INT"},
+                "canvas_width": "INT", "canvas_height": "INT",
+                "canvas_mode": "STRING"},
         outputs={"face": "FACE", "kps": "IMAGE"},
         description="Face Analyze（InstantID 配套）：insightface antelopev2 "
                     "检测+识别（onnxruntime CPU，不占显存），输出 512 维身份"
