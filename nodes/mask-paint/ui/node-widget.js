@@ -1238,18 +1238,15 @@ function createNodeWidget(spec) {
 
 // ---- 节点专属定义（widget-def.js，由 build-widget.py 拼接，请勿直接编辑本文件）----
 const WIDGET_SPEC = {
-  icon: '🔎',
-  title: '图像放大',
+  icon: '🖌',
+  title: '蒙版手绘',
   fields: [
-    { key: 'service_url', label: '推理服务 service_url', kind: 'text', mono: true , advanced: true},
-    { key: 'image', label: '待放大的图像对象 ID（image）', kind: 'text', mono: true },
-    { key: 'scale', label: '放大倍率（默认 2.0）（scale）', kind: 'slider', min: 1, max: 4, step: 0.5, default: 2.0 },
-    { key: 'width', label: '目标宽度（像素）（width）', kind: 'text', default: 0 },
-    { key: 'height', label: '目标高度（像素）（height）', kind: 'text', default: 0 },
-    { key: 'method', label: '重采样算法：lanczos（method）', kind: 'select', options: ['lanczos', 'bicubic', 'bilinear', 'nearest'], default: 'lanczos' },
-    { key: 'service_token', label: 'service_token（可空）', kind: 'text', mono: true , advanced: true},
+    { key: 'service_url', label: '推理服务 service_url', kind: 'text', mono: true, advanced: true },
+    { key: 'image', label: '原图对象 ID（image）', kind: 'text', mono: true },
+    { key: 'service_token', label: 'service_token（可空）', kind: 'text', mono: true, advanced: true },
   ],
-  note: '图像放大',
+  paint: { strokesKey: 'strokes_json', imageInput: 'image' },
+  note: '点缩略图或「✏️ 编辑蒙版」手绘重绘区域（白=重绘/黑=保留）；执行时按原图实际分辨率光栅化。底图取自上次执行的输入图',
 }
 
 export default createNodeWidget(WIDGET_SPEC)
