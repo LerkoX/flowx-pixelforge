@@ -172,12 +172,13 @@ _KPS_COLORS = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0),
 _KPS_LIMBS = [(0, 2), (1, 2), (3, 2), (4, 2)]  # 眼/耳→鼻连接（官方 draw_kps）
 
 
-def draw_kps(image, kps):
-    """官方 draw_kps 等价实现：黑底、同输入尺寸；4 条眼鼻连接短棒（×0.6 调暗）
-    + 5 个关键点圆（半径 10，五色）。kps: (5,2) 像素坐标。"""
+def draw_kps(image, kps, size=None):
+    """官方 draw_kps 等价实现：黑底、4 条眼鼻连接短棒（×0.6 调暗）
+    + 5 个关键点圆（半径 10，五色）。kps: (5,2) 像素坐标。
+    size=(w,h) 时画布取该尺寸（关键点需已变换到该坐标系），否则同输入尺寸。"""
     import cv2  # 懒加载
     import numpy as np
-    w, h = image.size
+    w, h = size if size else image.size
     out = np.zeros([h, w, 3])
     kps = np.asarray(kps, dtype=np.float64)
     for a, b_ in _KPS_LIMBS:
@@ -195,11 +196,29 @@ def draw_kps(image, kps):
     return Image.fromarray(out)
 
 
-def face_analyze(image, face_index=-1, det_thresh=0.5):
+def fit_kps_to_canvas(kps, width, height, canvas_width, canvas_height):
+    """关键点等比缩放 + 居中映射到目标画布（letterbox）：s=min(cw/w,ch/h)，
+    ox=(cw-w*s)/2，oy=(ch-h*s)/2。修复「参考图与生成画布比例不一致时，
+    kps 控制图被非均匀 resize 进生成分辨率导致人脸几何压扁/拉长」——
+    根因见 flowx-dev-plan §34/§35：768×1152 参考图直出 kps 喂 768×768
+    生成，y 向 ×0.667 压缩，生成脸宽高比 0.875→1.071。"""
+    s = min(canvas_width / width, canvas_height / height)
+    ox = (canvas_width - width * s) / 2.0
+    oy = (canvas_height - height * s) / 2.0
+    out = [[float(x) * s + ox, float(y) * s + oy] for x, y in kps]
+    return out, s, ox, oy
+
+
+def face_analyze(image, face_index=-1, det_thresh=0.5,
+                 canvas_width=0, canvas_height=0):
     """Face Analyze：检测输入图人脸，输出 FACE 对象（512 维身份特征 +
     关键点图）。face_index：-1=最大脸（官方语义），0..N-1=按面积降序第 N 张。
     det_thresh：检测置信度阈值（默认 0.5；AI 生成的人脸置信度常仅
     0.35~0.45，回测出图时建议传 0.2）。
+    canvas_width/canvas_height（默认 0=不启用）：给出后 kps 关键点图直接
+    画在该尺寸画布上（等比缩放+居中，保人脸几何），应填生成画布尺寸——
+    参考图比例与生成比例不一致时必须启用，否则 CN 条件图被非均匀压缩、
+    生成人脸随参考图比例变扁/变长。
     人脸特征为 antelopev2 的原始 embedding（InstantID 训练尺度）；
     FACE 对象另存 normed_embedding 供余弦相似度回测（点积即余弦）。"""
     from PIL import Image
@@ -214,6 +233,15 @@ def face_analyze(image, face_index=-1, det_thresh=0.5):
     if not 0.01 <= dt <= 1.0:
         raise ValueError(f"face.analyze: det_thresh 需在 [0.01,1]，got {dt}")
     app.det_model.det_thresh = dt
+    cw, ch = int(canvas_width), int(canvas_height)
+    if (cw > 0) != (ch > 0):
+        raise ValueError(
+            f"face.analyze: canvas_width/canvas_height 需同时给出或同时为 0，"
+            f"got {cw}x{ch}")
+    if cw > 0 and (cw % 8 or ch % 8):
+        raise ValueError(
+            f"face.analyze: canvas 尺寸需为 8 的倍数（对齐生成 latent），"
+            f"got {cw}x{ch}")
     arr = cv2.cvtColor(np.asarray(image.convert("RGB")), cv2.COLOR_RGB2BGR)
     faces = app.get(arr)
     if not faces:
@@ -231,7 +259,14 @@ def face_analyze(image, face_index=-1, det_thresh=0.5):
     # InstantID 训练时吃的就是这个尺度；喂归一化特征会让身份信号弱 ~20x，
     # 真机实测相似度甚至低于基线）
     emb = torch.from_numpy(f.embedding.copy()).float().unsqueeze(0)  # [1,512]
-    kps_img = draw_kps(image, f.kps)
+    if cw > 0:
+        kps_t, s, ox, oy = fit_kps_to_canvas(f.kps, image.width, image.height,
+                                             cw, ch)
+        kps_img = draw_kps(None, kps_t, size=(cw, ch))
+        print(f"[face.analyze] canvas={cw}x{ch} fit: s={s:.4f} "
+              f"offset=({ox:.0f},{oy:.0f})（等比+居中，保人脸几何）", flush=True)
+    else:
+        kps_img = draw_kps(image, f.kps)
     face = {"embeds": emb, "kps_image": kps_img,
             "count": len(faces), "bbox": [float(v) for v in f.bbox],
             "normed": torch.from_numpy(f.normed_embedding.copy()).float()}
@@ -434,7 +469,8 @@ def face_mask(image, face_index=-1, det_thresh=0.2, expand=0.6, feather=16.0):
 def register(registry):
     registry.register(
         "face.analyze",
-        inputs={"image": "IMAGE", "face_index": "INT", "det_thresh": "FLOAT"},
+        inputs={"image": "IMAGE", "face_index": "INT", "det_thresh": "FLOAT",
+                "canvas_width": "INT", "canvas_height": "INT"},
         outputs={"face": "FACE", "kps": "IMAGE"},
         description="Face Analyze（InstantID 配套）：insightface antelopev2 "
                     "检测+识别（onnxruntime CPU，不占显存），输出 512 维身份"

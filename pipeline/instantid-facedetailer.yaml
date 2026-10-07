@@ -121,6 +121,8 @@ Nodes:
         service_token: "{{ Param.service_token }}"
         image: "{{ LoadRef.image }}"
         face_index: -1
+        canvas_width: 768   # kps 画在生成画布上（等比+居中），修人脸几何压扁
+        canvas_height: 768  # 参考图 768×1152 与生成 768×768 比例不一致时必须启用
   SaveKps:
     name: 保存kps预览
     config:

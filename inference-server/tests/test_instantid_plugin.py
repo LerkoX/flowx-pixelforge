@@ -34,7 +34,8 @@ PLUGIN = os.path.join(os.path.dirname(__file__), "..", "plugins",
 
 EXPECTED = {
     "face.analyze": ({"image": "IMAGE", "face_index": "INT",
-                             "det_thresh": "FLOAT"},
+                             "det_thresh": "FLOAT",
+                             "canvas_width": "INT", "canvas_height": "INT"},
                      {"face": "FACE", "kps": "IMAGE"}),
     "face.similarity": ({"image_a": "IMAGE", "image_b": "IMAGE",
                           "face_index_a": "INT", "face_index_b": "INT",
@@ -103,6 +104,25 @@ def main():
     _expect_err(lambda: mod.face_analyze("not-an-image"),
                 "需为单张 PIL 图像")
     print("ok: face_analyze 非 PIL 输入明确报错")
+
+    # fit_kps_to_canvas：等比缩放+居中变换（纯 python，无重依赖）
+    kps = [[342, 564], [496, 564], [419, 650], [370, 740], [468, 740]]
+    out, s, ox, oy = mod.fit_kps_to_canvas(kps, 768, 1152, 768, 768)
+    assert abs(s - 768/1152) < 1e-9 and abs(ox - 128.0) < 1e-9 and oy == 0.0
+    w0 = kps[1][0] - kps[0][0]; h0 = kps[3][1] - kps[0][1]
+    w1 = out[1][0] - out[0][0]; h1 = out[3][1] - out[0][1]
+    assert abs(w1/h1 - w0/h0) < 1e-9, "变换必须保宽高比"
+    assert abs((out[2][0]) - (419*s + 128)) < 1e-9
+    # 参考脸几何用例：1152 竖图进 768 方画布，比例 0.875 保持不变
+    assert abs(w1/h1 - 154/176) < 0.01, f"{w1/h1}"
+    print(f"ok: fit_kps_to_canvas 等比+居中（s={s:.3f} ox={ox:.0f}），"
+          f"宽高比守恒 {w0/h0:.3f}→{w1/h1:.3f}")
+
+    # face_analyze canvas 参数校验：只给一个必须报错（在重依赖导入后？
+    # 该校验在检测之后——用非 PIL 输入先行拦截，故此处直接调 helper 级
+    # 校验路径：PIL 图 + 坏 canvas 会在 app.get 前触发吗？不会——校验在
+    # 检测后。本机无 onnxruntime，只覆盖契约层；真机验收覆盖运行路径）
+    print("ok: canvas 运行路径留真机验收（本机无 onnxruntime）")
 
     # face_mask：非 PIL 输入同理明确报错
     _expect_err(lambda: mod.face_mask("not-an-image"),
