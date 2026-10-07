@@ -119,13 +119,13 @@ def main():
     t0 = time.time()
 
     # ---------- t1 SD1.5 回归：与 M2 基线逐字节一致 ----------
-    mcv = op("checkpoint.load", ckpt=SD15)
-    pos = op("clip.encode", clip=mcv["clip"], text=T1_PROMPT)["cond"]
-    neg = op("clip.encode", clip=mcv["clip"], text="")["cond"]
-    lat = op("latent.empty", width=512, height=512, batch_size=1)["latent"]
-    r = op("sample", model=mcv["model"], pos=pos, neg=neg, latent=lat,
+    mcv = op("sd.checkpoint.load", ckpt=SD15)
+    pos = op("sd.clip.encode", clip=mcv["clip"], text=T1_PROMPT)["cond"]
+    neg = op("sd.clip.encode", clip=mcv["clip"], text="")["cond"]
+    lat = op("sd.latent.empty", width=512, height=512, batch_size=1)["latent"]
+    r = op("sd.sample", model=mcv["model"], pos=pos, neg=neg, latent=lat,
            seed=424242, steps=20, cfg=7.0, sampler_name="euler")
-    png = fetch_image(op("vae.decode", vae=mcv["vae"],
+    png = fetch_image(op("sd.vae.decode", vae=mcv["vae"],
                          latent=r["latent"])["image"])
     save("t1_regression", png)
     sha = hashlib.sha1(png).hexdigest()
@@ -139,21 +139,21 @@ def main():
     # ---------- t2 SDXL + ip-adapter_sdxl_vit-h ----------
     # TTL 兑底：条件/latent/模型视图在每链采样前重建（缓存命中秒回）
     def fresh_sdxl():
-        m = op("checkpoint.load", ckpt=SDXL, offload="model")
-        p = op("clip.encode", clip=m["clip"], text=PROMPT,
+        m = op("sd.checkpoint.load", ckpt=SDXL, offload="model")
+        p = op("sd.clip.encode", clip=m["clip"], text=PROMPT,
                width=SDXL_SIZE, height=SDXL_SIZE)["cond"]
-        n = op("clip.encode", clip=m["clip"], text=NEG,
+        n = op("sd.clip.encode", clip=m["clip"], text=NEG,
                width=SDXL_SIZE, height=SDXL_SIZE)["cond"]
-        l = op("latent.empty", width=SDXL_SIZE, height=SDXL_SIZE,
+        l = op("sd.latent.empty", width=SDXL_SIZE, height=SDXL_SIZE,
                batch_size=1)["latent"]
         return m, p, n, l
 
     def sdxl_sample(tag, model_view, extra_prefix=""):
         m, p, n, l = fresh_sdxl()
-        r = op("sample", model=model_view, pos=p, neg=n, latent=l,
+        r = op("sd.sample", model=model_view, pos=p, neg=n, latent=l,
                seed=SEED, steps=SDXL_STEPS, cfg=7.0,
                sampler_name="euler", scheduler="normal", denoise=1.0)
-        img = op("vae.decode", vae=m["vae"], latent=r["latent"])["image"]
+        img = op("sd.vae.decode", vae=m["vae"], latent=r["latent"])["image"]
         return check_img(f"{extra_prefix}{tag}", fetch_image(img))
 
     cv = op("clip_vision.load", name=CLIP_VISION)["clip_vision"]
@@ -161,11 +161,11 @@ def main():
     ref = op("image.load", name=REF)["image"]
 
     m, p, n, l = fresh_sdxl()
-    r = op("sample", model=m["model"], pos=p, neg=n, latent=l,
+    r = op("sd.sample", model=m["model"], pos=p, neg=n, latent=l,
            seed=SEED, steps=SDXL_STEPS, cfg=7.0,
            sampler_name="euler", scheduler="normal", denoise=1.0)
     sha_d = check_img("t2D_sdxl_baseline",
-                      fetch_image(op("vae.decode", vae=m["vae"],
+                      fetch_image(op("sd.vae.decode", vae=m["vae"],
                                      latent=r["latent"])["image"]))
 
     def apply_sdxl(weight, lo, hi):
@@ -193,17 +193,17 @@ def main():
 
     # ---------- t3 SD1.5 + ip-adapter-plus_sd15（Resampler 路径） ----------
     def fresh_sd15():
-        m = op("checkpoint.load", ckpt=SD15)
-        p = op("clip.encode", clip=m["clip"], text=PROMPT)["cond"]
-        n = op("clip.encode", clip=m["clip"], text=NEG)["cond"]
-        l = op("latent.empty", width=512, height=512, batch_size=1)["latent"]
+        m = op("sd.checkpoint.load", ckpt=SD15)
+        p = op("sd.clip.encode", clip=m["clip"], text=PROMPT)["cond"]
+        n = op("sd.clip.encode", clip=m["clip"], text=NEG)["cond"]
+        l = op("sd.latent.empty", width=512, height=512, batch_size=1)["latent"]
         return m, p, n, l
 
     def sd15_sample(model_view):
         m, p, n, l = fresh_sd15()
-        r = op("sample", model=model_view, pos=p, neg=n, latent=l,
+        r = op("sd.sample", model=model_view, pos=p, neg=n, latent=l,
                seed=SEED, steps=20, cfg=7.0, sampler_name="euler")
-        return m, fetch_image(op("vae.decode", vae=m["vae"],
+        return m, fetch_image(op("sd.vae.decode", vae=m["vae"],
                                  latent=r["latent"])["image"])
 
     def apply_sd15(weight):
@@ -216,10 +216,10 @@ def main():
                   start_percent=0.0, end_percent=1.0)["model"]
 
     m, p, n, l = fresh_sd15()
-    r = op("sample", model=m["model"], pos=p, neg=n, latent=l,
+    r = op("sd.sample", model=m["model"], pos=p, neg=n, latent=l,
            seed=SEED, steps=20, cfg=7.0, sampler_name="euler")
     sha_p0b = check_img("t3P0b_sd15_baseline",
-                        fetch_image(op("vae.decode", vae=m["vae"],
+                        fetch_image(op("sd.vae.decode", vae=m["vae"],
                                        latent=r["latent"])["image"]))
 
     m_, png = sd15_sample(apply_sd15(0.0))

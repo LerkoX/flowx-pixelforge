@@ -112,8 +112,8 @@ from app.ops import (SDXLCond, SDXLSegments, _merge_added, as_cond_segments,
 from app.plugins import load_plugin
 from app.registry import Registry
 
-PLUGIN = os.path.join(os.path.dirname(__file__), "..", "plugins",
-                      "cond_latent_ops.py")
+PLUGIN = os.path.join(os.path.dirname(__file__), "..", "..", "nodes",
+                      "_common", "server_ops", "cond_latent.py")
 
 
 def check(name, cond):

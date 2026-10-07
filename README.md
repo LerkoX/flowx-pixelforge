@@ -88,10 +88,19 @@ FlowX 侧用通用节点 `inference-op` 即可立即使用，无需新增节点�
 对象类型系统（对齐 ComfyUI）：`MODEL` / `CLIP` / `VAE` / `COND` / `LATENT` / `IMAGE` / `VIDEO`（落盘 mp4），
 字面量类型：`INT` / `FLOAT` / `STRING` / `BOOL`。
 
-已注册算子：`checkpoint.load` / `lora.apply`（ModelRef 补丁视图，可串联叠加）/
-`clip.encode` / `latent.empty` / `image.load`（INPUT_DIR 服务端本地图）/ `vae.encode`（图生图入口）/
-`sample`（自动识别裸 pipe 或带补丁的 ModelRef，denoise<1 即图生图）/ `vae.decode` /
-`video.sample`（Wan TI2V 系文/图生视频，分钟级，经异步 job 执行）
+算子全面插件化（v1.7.0 起）：服务端核心不内置任何算子，全部由节点包携带
+`server_op.py` 经 `POST /admin/plugins` 自注册（hash 幂等，PLUGINS_DIR 持久化）。
+族文件单一事实源在 `nodes/_common/server_ops/`（cond_latent / preprocess /
+ipadapter / instantid / upscale / video_sample 六族），由 `nodes/_tools/sync-common.py`
+分发为成员节点的 `server_op.py`。直接调 `/op` 的验收脚本需先
+`python3 inference-server/scripts/push_plugins.py --base ... --token ...` 预热。
+
+主要算子族：`sd.*`（SD1.x/SDXL：checkpoint.load/clip.encode/latent.empty/sample/
+vae.*/lora.apply/controlnet.*/embedding.load/motion.load）、`sd3.*`、`flux.*`、
+`cond.*`/`latent.*`、`preprocess.*`、`ipadapter.*`/`clip_vision.load`、
+`instantid.*`/`face.*`、`upscale_model.*`/`image.upscale_with_model`、
+`video.sample`/`video.sample_latent`/`video.vae.decode`、`image.load`/`image.upscale`、
+`model.unload`、`detail.refine`。
 
 引擎测试（无 GPU 可跑）：`cd inference-server && python3 tests/test_engine.py`
 
@@ -103,6 +112,6 @@ FlowX 侧用通用节点 `inference-op` 即可立即使用，无需新增节点�
 
 完整演进计划见 [inference-server/ROADMAP.md](inference-server/ROADMAP.md)（对标 ComfyUI 的 8 阶段路线）。
 
-- 多模型：服务端已内置 LRU 常驻缓存，checkpoint.load 换 ckpt 名即可
+- 多模型：服务端已内置 LRU 常驻缓存，sd.checkpoint.load 换 ckpt 名即可
 - 多机器：在节点前加一层按 model 名路由的反向代理，节点零改动
-- 图生图 / ControlNet：`app/ops.py` 加函数 + `main.py` 注册一行，FlowX 侧用 `inference-op` 节点立即可用
+- 新增能力：节点包加 `server_op.py` 自注册（参考 `nodes/detail-refine/`），不动服务端

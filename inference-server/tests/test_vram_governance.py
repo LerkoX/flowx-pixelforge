@@ -287,10 +287,10 @@ def test_engine_oom_without_evictable_raises_helpful_error():
     engine.set_vram_guard(guard)
     before = engine.oom_state()["failed"]
     try:
-        engine._run_op(FakeOp(fn, "sample"), {"model": FakePipe("m1")})
+        engine._run_op(FakeOp(fn, "sd.sample"), {"model": FakePipe("m1")})
         raise AssertionError("应当抛出可读错误")
     except RuntimeError as e:
-        assert "sample" in str(e)
+        assert "sd.sample" in str(e)
         assert "offload=model|sequential" in str(e)   # 带自救指引
         assert "model-unload" in str(e) or "/model/unload" in str(e)
     finally:
@@ -338,7 +338,7 @@ def test_model_unload_op_returns_strings():
 
 
 def test_oom_help_mentions_actions():
-    text = oom_help("sample")
+    text = oom_help("sd.sample")
     for kw in ("offload=model", "VRAM_RESERVE_MB", "model-unload", "VRAM_BUDGET"):
         assert kw in text
 

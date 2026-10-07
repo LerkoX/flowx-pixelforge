@@ -5,9 +5,9 @@
 - ipadapter.load：IPAdapter 权重（IPADAPTER_DIR，默认 /models/ipadapter/<文件>，
   safetensors/bin，顶层键 image_proj + ip_adapter）
 - ipadapter.apply：参考图编码成正/负两份 CLIP embeds，与权重/步窗口捆绑成
-  IPABundle（MODEL 视图，可继续串 LoRA），喂 sample 的 model 端口
+  IPABundle（MODEL 视图，可继续串 LoRA），喂 sd.sample 的 model 端口
 
-注入机制由 app/ops.py sample() 消费 bundle 实现：
+注入机制由 app/ops.py sd.sample() 消费 bundle 实现：
 - pipe.load_ip_adapter(state_dict) 装配 IPAdapterAttnProcessor2_0 +
   MultiIPAdapterImageProjection（encoder_hid_dim_type=ip_image_proj）
 - 每步 unet 前向带 added_cond_kwargs={"image_embeds": [原始 CLIP embeds]}
@@ -21,6 +21,10 @@
 标准版与 plus 版按权重 image_proj 是否含 latents 键自动判别：
 - 标准版：image_embeds（pooled），负向 = zeros_like（diffusers encode_image 语义）
 - plus 版：hidden_states[-2]，负向 = 零图编码（非 zeros_like！同 diffusers）
+
+分发：本文件是节点共享算子族（单一事实源），由 nodes/_tools/sync-common.py
+分发为各成员节点的 server_op.py，节点运行时经 ensure_plugin 自注册到推理服务
+（POST /admin/plugins，hash 幂等）。
 """
 import os
 

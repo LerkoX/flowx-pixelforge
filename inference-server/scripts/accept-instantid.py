@@ -3,7 +3,7 @@
 
 前置：Phase 0 权重已就位（/models/ipadapter/instantid-ip-adapter.bin、
 /models/instantid-controlnet/、/models/insightface/models/antelopev2/），
-镜像含 insightface/onnxruntime，插件 instantid_ops.py 已热加载。
+镜像含 insightface/onnxruntime，instantid 家族算子由节点 server_op.py 自注册（push_plugins.py 预热）。
 
 - t0 预检：/health、/ops 有 face.analyze/instantid.apply、权重文件就位
 - t1 face.analyze：/input/test_person.jpg → 检出人脸、kps 图非黑有彩点
@@ -183,7 +183,7 @@ def main():
         _, ops = call("/ops")
         names = {o["name"] for o in ops.get("ops", [])}
         for need in ("face.analyze", "instantid.apply", "ipadapter.load",
-                     "controlnet.load", "checkpoint.load", "sample"):
+                     "sd.controlnet.load", "sd.checkpoint.load", "sd.sample"):
             if need not in names:
                 failures.append(f"t0: 算子缺失 {need}")
         _, files = call("/models/files")
@@ -238,20 +238,20 @@ def main():
         if face_id is None:
             skip("t2", "t1 未产出 face 对象")
         else:
-            m = op("checkpoint.load", ckpt=SDXL_CKPT, dtype="fp16",
+            m = op("sd.checkpoint.load", ckpt=SDXL_CKPT, dtype="fp16",
                    offload="model")
-            pos = op("clip.encode", clip=m["clip"], text=PROMPT,
+            pos = op("sd.clip.encode", clip=m["clip"], text=PROMPT,
                      width=SIZE, height=SIZE)
-            neg = op("clip.encode", clip=m["clip"], text=NEG,
+            neg = op("sd.clip.encode", clip=m["clip"], text=NEG,
                      width=SIZE, height=SIZE)
-            lat = op("latent.empty", width=SIZE, height=SIZE, batch_size=1)
+            lat = op("sd.latent.empty", width=SIZE, height=SIZE, batch_size=1)
             ipa = op("ipadapter.load", name=IPA_NAME)
-            cn = op("controlnet.load", name=CN_NAME)
+            cn = op("sd.controlnet.load", name=CN_NAME)
             ap = op("instantid.apply", model=m["model"],
                     ipadapter=ipa["ipadapter"], controlnet=cn["control_net"],
                     face=face_id, weight=0.8, cn_strength=0.8)
             t0 = time.time()
-            out, err = run("sample", model=ap["model"], pos=pos["cond"],
+            out, err = run("sd.sample", model=ap["model"], pos=pos["cond"],
                            neg=neg["cond"], latent=lat["latent"], seed=SEED,
                            steps=STEPS, cfg=CFG, control=ap["control"])
             dt = time.time() - t0
@@ -260,7 +260,7 @@ def main():
             else:
                 print(f"[accept] t2 sample {dt:.0f}s（{STEPS} 步 + CN）",
                       flush=True)
-                png = fetch_image(op("vae.decode", vae=m["vae"],
+                png = fetch_image(op("sd.vae.decode", vae=m["vae"],
                                      latent=out["latent"])["image"])
                 check_img("t2_instantid", png, expect_size=(SIZE, SIZE))
             # t2b：出图里应能检出人脸（身份相似度容器内回测，见 sim 脚本）
@@ -286,31 +286,31 @@ def main():
         if face_id is None:
             skip("t3", "t1 未产出 face 对象")
         else:
-            m = op("checkpoint.load", ckpt=SDXL_CKPT, dtype="fp16",
+            m = op("sd.checkpoint.load", ckpt=SDXL_CKPT, dtype="fp16",
                    offload="model")
-            pos = op("clip.encode", clip=m["clip"], text=PROMPT,
+            pos = op("sd.clip.encode", clip=m["clip"], text=PROMPT,
                      width=T3_SIZE, height=T3_SIZE)
-            neg = op("clip.encode", clip=m["clip"], text=NEG,
+            neg = op("sd.clip.encode", clip=m["clip"], text=NEG,
                      width=T3_SIZE, height=T3_SIZE)
-            lat = op("latent.empty", width=T3_SIZE, height=T3_SIZE, batch_size=1)
+            lat = op("sd.latent.empty", width=T3_SIZE, height=T3_SIZE, batch_size=1)
             # 基线：无 InstantID
-            base_out = op("sample", model=m["model"], pos=pos["cond"],
+            base_out = op("sd.sample", model=m["model"], pos=pos["cond"],
                           neg=neg["cond"], latent=lat["latent"], seed=SEED,
                           steps=T3_STEPS, cfg=CFG)
-            png_base = fetch_image(op("vae.decode", vae=m["vae"],
+            png_base = fetch_image(op("sd.vae.decode", vae=m["vae"],
                                       latent=base_out["latent"])["image"])
             sha_base = check_img("t3_baseline", png_base,
                                  expect_size=(T3_SIZE, T3_SIZE))
             # 消融：InstantID 全挂但强度全 0
             ipa = op("ipadapter.load", name=IPA_NAME)
-            cn = op("controlnet.load", name=CN_NAME)
+            cn = op("sd.controlnet.load", name=CN_NAME)
             ap = op("instantid.apply", model=m["model"],
                     ipadapter=ipa["ipadapter"], controlnet=cn["control_net"],
                     face=face_id, weight=0.0, cn_strength=0.0)
-            abl_out = op("sample", model=ap["model"], pos=pos["cond"],
+            abl_out = op("sd.sample", model=ap["model"], pos=pos["cond"],
                          neg=neg["cond"], latent=lat["latent"], seed=SEED,
                          steps=T3_STEPS, cfg=CFG, control=ap["control"])
-            png_abl = fetch_image(op("vae.decode", vae=m["vae"],
+            png_abl = fetch_image(op("sd.vae.decode", vae=m["vae"],
                                      latent=abl_out["latent"])["image"])
             sha_abl = check_img("t3_ablation_zero", png_abl,
                                 expect_size=(T3_SIZE, T3_SIZE))
@@ -321,10 +321,10 @@ def main():
                 print("[accept] t3 零强度 ≡ 基线 逐字节一致", flush=True)
             # 消融后再跑一次裸基线：验证 IPA 处理器/投影层恢复无残留污染
             # （140 vs 144 恢复失败事故就是靠这类复跑抓的）
-            re_out = op("sample", model=m["model"], pos=pos["cond"],
+            re_out = op("sd.sample", model=m["model"], pos=pos["cond"],
                         neg=neg["cond"], latent=lat["latent"], seed=SEED,
                         steps=T3_STEPS, cfg=CFG)
-            png_re = fetch_image(op("vae.decode", vae=m["vae"],
+            png_re = fetch_image(op("sd.vae.decode", vae=m["vae"],
                                     latent=re_out["latent"])["image"])
             sha_re = check_img("t3_baseline_rerun", png_re,
                                expect_size=(T3_SIZE, T3_SIZE))
@@ -340,16 +340,16 @@ def main():
         if not os.path.exists(BASELINE_M2):
             skip("t4", f"基线文件缺失 {BASELINE_M2}")
         else:
-            m = op("checkpoint.load", ckpt=SD15_CKPT)
-            pos = op("clip.encode", clip=m["clip"],
+            m = op("sd.checkpoint.load", ckpt=SD15_CKPT)
+            pos = op("sd.clip.encode", clip=m["clip"],
                      text="a cat sitting on a windowsill, warm sunset light, "
                           "high quality")
-            neg = op("clip.encode", clip=m["clip"], text="")  # M2 基线用空负向
-            lat = op("latent.empty", width=512, height=512, batch_size=1)
-            out = op("sample", model=m["model"], pos=pos["cond"],
+            neg = op("sd.clip.encode", clip=m["clip"], text="")  # M2 基线用空负向
+            lat = op("sd.latent.empty", width=512, height=512, batch_size=1)
+            out = op("sd.sample", model=m["model"], pos=pos["cond"],
                      neg=neg["cond"], latent=lat["latent"], seed=424242,
                      steps=20, cfg=7.0)
-            png = fetch_image(op("vae.decode", vae=m["vae"],
+            png = fetch_image(op("sd.vae.decode", vae=m["vae"],
                                  latent=out["latent"])["image"])
             sha = check_img("t4_sd15_regression", png,
                             expect_size=(512, 512))
@@ -362,9 +362,9 @@ def main():
 
     # ---------------- t5 负面用例 ----------------
     if want("t5"):
-        m15 = op("checkpoint.load", ckpt=SD15_CKPT)
+        m15 = op("sd.checkpoint.load", ckpt=SD15_CKPT)
         ipa = op("ipadapter.load", name=IPA_NAME)
-        cn = op("controlnet.load", name=CN_NAME)
+        cn = op("sd.controlnet.load", name=CN_NAME)
         img = op("image.load", name=FACE_REF)
         fa = op("face.analyze", image=img["image"], face_index=-1)
         _, err = run("instantid.apply", model=m15["model"],
@@ -375,7 +375,7 @@ def main():
         else:
             print(f"[accept] t5a SD1.5 明确拒绝：{err[:80]}", flush=True)
         ipa15 = op("ipadapter.load", name="ip-adapter_sd15")
-        mxl = op("checkpoint.load", ckpt=SDXL_CKPT, dtype="fp16",
+        mxl = op("sd.checkpoint.load", ckpt=SDXL_CKPT, dtype="fp16",
                  offload="model")
         _, err = run("instantid.apply", model=mxl["model"],
                      ipadapter=ipa15["ipadapter"],

@@ -23,8 +23,9 @@ sys.modules.setdefault("diffusers", _fake_diffusers)
 from app.plugins import check_plugin_source, load_plugin
 from app.registry import Registry
 
-PLUGIN = os.path.join(os.path.dirname(__file__), "..", "plugins",
-                      "upscale_ops.py")
+PLUGIN = os.path.join(os.path.dirname(__file__), "..", "..", "nodes",
+                     "_common", "server_ops",
+                      "upscale.py")
 
 EXPECTED = {
     "upscale_model.load": ({"name": "STRING"}, {"upscale_model": "UPSCALE_MODEL"}),
@@ -37,7 +38,7 @@ EXPECTED = {
 def main():
     with open(PLUGIN, "rb") as f:
         content = f.read()
-    err = check_plugin_source("upscale_ops.py", content)
+    err = check_plugin_source("upscale.py", content)
     assert err is None, err
 
     reg = Registry()

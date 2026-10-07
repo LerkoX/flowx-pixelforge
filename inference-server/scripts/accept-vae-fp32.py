@@ -59,23 +59,23 @@ def main():
     ckpt = os.environ.get("CKPT", "v1-5-pruned-emaonly")
     print(f"[accept] base={BASE} ckpt={ckpt} rounds={N}", flush=True)
 
-    out = op("checkpoint.load", ckpt=ckpt)
+    out = op("sd.checkpoint.load", ckpt=ckpt)
     vae, model, clip = out["vae"], out["model"], out["clip"]
     print(f"[accept] checkpoint loaded: vae={vae}", flush=True)
 
-    pos = op("clip.encode", clip=clip,
+    pos = op("sd.clip.encode", clip=clip,
              text="a colorful landscape photo, vibrant, high quality")["cond"]
-    neg = op("clip.encode", clip=clip, text="")["cond"]
+    neg = op("sd.clip.encode", clip=clip, text="")["cond"]
 
-    latent0 = op("latent.empty", width=512, height=512, batch_size=1)["latent"]
+    latent0 = op("sd.latent.empty", width=512, height=512, batch_size=1)["latent"]
 
     worst = (1e9, None)
     black = 0
     for i in range(N):
-        lat = op("sample", model=model, pos=pos, neg=neg, latent=latent0,
+        lat = op("sd.sample", model=model, pos=pos, neg=neg, latent=latent0,
                  seed=1000 + i, steps=2, cfg=7.0,
                  sampler_name="euler", denoise=1.0)["latent"]
-        img = op("vae.decode", vae=vae, latent=lat)["image"]
+        img = op("sd.vae.decode", vae=vae, latent=lat)["image"]
         mean, std = image_stats(img)
         if mean < worst[0]:
             worst = (mean, i)

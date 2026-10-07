@@ -16,11 +16,15 @@
 权重（复用既有加载算子，零新加载代码）：
 - ipadapter.load：IPADAPTER_DIR/instantid-ip-adapter.bin
   （嵌套 {image_proj, ip_adapter}，InstantX/InstantID 官方权重）
-- controlnet.load：MODELS_DIR/instantid-controlnet/（diffusers 组件目录）
+- sd.controlnet.load：MODELS_DIR/instantid-controlnet/（diffusers 组件目录）
 - insightface 模型包：INSIGHTFACE_HOME（默认 /models/insightface）下的
   models/antelopev2/（antelopev2.zip 官方包解出；运行期零网络）
 
 License 注意：InstantID 权重官方声明仅限研究/非商用（代码 Apache-2.0）。
+
+分发：本文件是节点共享算子族（单一事实源），由 nodes/_tools/sync-common.py
+分发为各成员节点的 server_op.py，节点运行时经 ensure_plugin 自注册到推理服务
+（POST /admin/plugins，hash 幂等）。
 """
 import math
 import os
@@ -422,7 +426,7 @@ def instantid_apply(model, ipadapter, controlnet, face, weight=0.8,
 
 def face_mask(image, face_index=-1, det_thresh=0.2, expand=0.6, feather=16.0):
     """Face Mask：检测人脸 bbox，中心外扩 expand 比例（覆盖全脸+发际），
-    clamp 图内并 8 倍数对齐（crop 后直接喂 vae.encode），输出 feathered
+    clamp 图内并 8 倍数对齐（crop 后直接喂 sd.vae.encode），输出 feathered
     矩形 mask + crop 框 x/y/width/height（供 image-crop 裁剪与
     image-composite 贴回直接绑定）。
     det_thresh 默认 0.2（FaceDetailer 的回测对象就是 AI 生成图，置信度常

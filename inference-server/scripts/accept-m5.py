@@ -185,11 +185,11 @@ def main():
               f"resident={h.get('resident_models')}", flush=True)
         _, ops = call("/ops")
         names = {o["name"] for o in ops.get("ops", [])}
-        for need in ("clip.encode", "sample", "checkpoint.load", "vae.decode",
+        for need in ("sd.clip.encode", "sd.sample", "sd.checkpoint.load", "sd.vae.decode",
                      "latent.upscale", "cond.set_area", "cond.combine"):
             if need not in names:
                 failures.append(f"t0: 算子缺失 {need}")
-        spec = next((o for o in ops["ops"] if o["name"] == "clip.encode"), {})
+        spec = next((o for o in ops["ops"] if o["name"] == "sd.clip.encode"), {})
         for need in ("width", "height", "clip_skip"):
             if need not in (spec.get("inputs") or {}):
                 failures.append(f"t0: clip.encode 缺入参 {need}"
@@ -220,24 +220,24 @@ def main():
     mcv = pos = neg = lat0 = img1 = None
     if SDXL_CKPT:
         # SDXL 底模加载（offload=model：8GB 卡上 UNet 5.1G + 双 TE 1.9G 的默认选择）
-        mcv = op("checkpoint.load", ckpt=SDXL_CKPT, offload="model")
+        mcv = op("sd.checkpoint.load", ckpt=SDXL_CKPT, offload="model")
         print(f"[accept] SDXL 加载完成 model={mcv['model']}", flush=True)
 
     def mkconds():
         """重建 pos/neg/lat0。对象仓库 TTL=3600s，长套件后段引用会过期，
         故在每个用到它们的测试前刷新（编码很快，缓存命中秒回）。"""
         nonlocal pos, neg, lat0
-        pos = op("clip.encode", clip=mcv["clip"], text=PROMPT,
+        pos = op("sd.clip.encode", clip=mcv["clip"], text=PROMPT,
                  width=SDXL_SIZE, height=SDXL_SIZE)["cond"]
-        neg = op("clip.encode", clip=mcv["clip"], text=NEG,
+        neg = op("sd.clip.encode", clip=mcv["clip"], text=NEG,
                  width=SDXL_SIZE, height=SDXL_SIZE)["cond"]
-        lat0 = op("latent.empty", width=SDXL_SIZE, height=SDXL_SIZE,
+        lat0 = op("sd.latent.empty", width=SDXL_SIZE, height=SDXL_SIZE,
                   batch_size=1)["latent"]
 
     def fresh_sdxl():
         """TTL 兑底：model/clip/vae 视图与条件一起重建（checkpoint.load 缓存命中）。"""
         nonlocal mcv
-        mcv = op("checkpoint.load", ckpt=SDXL_CKPT, offload="model")
+        mcv = op("sd.checkpoint.load", ckpt=SDXL_CKPT, offload="model")
         mkconds()
 
     if SDXL_CKPT:
@@ -247,10 +247,10 @@ def main():
     r1 = None
     if want("t1") and SDXL_CKPT:
         t0 = time.time()
-        r1 = op("sample", model=mcv["model"], pos=pos, neg=neg, latent=lat0,
+        r1 = op("sd.sample", model=mcv["model"], pos=pos, neg=neg, latent=lat0,
                 seed=SDXL_SEED, steps=SDXL_STEPS, cfg=SDXL_CFG,
                 sampler_name="euler", scheduler="normal", denoise=1.0)
-        img = op("vae.decode", vae=mcv["vae"], latent=r1["latent"])["image"]
+        img = op("sd.vae.decode", vae=mcv["vae"], latent=r1["latent"])["image"]
         check_img("t1_sdxl_txt2img",
                   fetch_image(img), expect_size=(SDXL_SIZE, SDXL_SIZE))
         print(f"[accept] t1 采样+解码 {time.time() - t0:.0f}s "
@@ -260,33 +260,33 @@ def main():
     # ---------------- t2 i2i ----------------
     if want("t2") and SDXL_CKPT:
         if r1 is None:
-            r1 = op("sample", model=mcv["model"], pos=pos, neg=neg, latent=lat0,
+            r1 = op("sd.sample", model=mcv["model"], pos=pos, neg=neg, latent=lat0,
                     seed=SDXL_SEED, steps=SDXL_STEPS, cfg=SDXL_CFG,
                     sampler_name="euler", scheduler="normal", denoise=1.0)
-            img = op("vae.decode", vae=mcv["vae"], latent=r1["latent"])["image"]
+            img = op("sd.vae.decode", vae=mcv["vae"], latent=r1["latent"])["image"]
             check_img("t1_sdxl_txt2img", fetch_image(img),
                       expect_size=(SDXL_SIZE, SDXL_SIZE))
-        img1 = op("vae.decode", vae=mcv["vae"], latent=r1["latent"])["image"]
-        lat_i2i = op("vae.encode", vae=mcv["vae"],
+        img1 = op("sd.vae.decode", vae=mcv["vae"], latent=r1["latent"])["image"]
+        lat_i2i = op("sd.vae.encode", vae=mcv["vae"],
                      image=img1)["latent"]
-        r2 = op("sample", model=mcv["model"], pos=pos, neg=neg, latent=lat_i2i,
+        r2 = op("sd.sample", model=mcv["model"], pos=pos, neg=neg, latent=lat_i2i,
                 seed=SDXL_SEED + 1, steps=SDXL_STEPS, cfg=SDXL_CFG,
                 sampler_name="euler", scheduler="normal", denoise=0.6)
-        img2 = op("vae.decode", vae=mcv["vae"], latent=r2["latent"])["image"]
+        img2 = op("sd.vae.decode", vae=mcv["vae"], latent=r2["latent"])["image"]
         check_img("t2_sdxl_i2i", fetch_image(img2),
                   expect_size=(SDXL_SIZE, SDXL_SIZE))
 
     # ---------------- t3 hires ----------------
     if want("t3") and SDXL_CKPT:
         if r1 is None:
-            r1 = op("sample", model=mcv["model"], pos=pos, neg=neg, latent=lat0,
+            r1 = op("sd.sample", model=mcv["model"], pos=pos, neg=neg, latent=lat0,
                     seed=SDXL_SEED, steps=SDXL_STEPS, cfg=SDXL_CFG,
                     sampler_name="euler", scheduler="normal", denoise=1.0)
         up = op("latent.upscale", latent=r1["latent"], scale=1.5)["latent"]
-        r3 = op("sample", model=mcv["model"], pos=pos, neg=neg, latent=up,
+        r3 = op("sd.sample", model=mcv["model"], pos=pos, neg=neg, latent=up,
                 seed=SDXL_SEED + 2, steps=SDXL_STEPS, cfg=SDXL_CFG,
                 sampler_name="euler", scheduler="normal", denoise=0.45)
-        img3 = op("vae.decode", vae=mcv["vae"], latent=r3["latent"])["image"]
+        img3 = op("sd.vae.decode", vae=mcv["vae"], latent=r3["latent"])["image"]
         check_img("t3_sdxl_hires_1536", fetch_image(img3),
                   expect_size=(int(SDXL_SIZE * 1.5), int(SDXL_SIZE * 1.5)))
 
@@ -296,7 +296,7 @@ def main():
             skip("t4", "未指定 SDXL_CN（SDXL ControlNet 权重名）")
         else:
             mkconds()  # t4 前刷新（t1~t3 已耗时 ~20 分钟）
-            cn = op("controlnet.load", name=SDXL_CN)["control_net"]
+            cn = op("sd.controlnet.load", name=SDXL_CN)["control_net"]
             # hint：从 img1（t2 产物）抽 Canny 线稿；或用 HINT_IMG 指定 INPUT_DIR 里的图
             hint = None
             if os.environ.get("HINT_IMG"):
@@ -306,17 +306,17 @@ def main():
             if hint is None:
                 skip("t4", "无 hint 图（需先跑 t1/t2 产出 img1，或指定 HINT_IMG）")
             else:
-                ctl = op("controlnet.apply", control_net=cn, image=hint,
+                ctl = op("sd.controlnet.apply", control_net=cn, image=hint,
                          strength=0.8)["control"]
                 # 8GB 卡上 SDXL+CN 峰值 ~8.2GB 会換页抖动（~90s/步），
                 # t4 验证链路机制即可，默认降到 10 步（SDXL_CN_STEPS 可调）
                 cn_steps = int(os.environ.get("SDXL_CN_STEPS", "10"))
-                r4 = op("sample", model=mcv["model"], pos=pos, neg=neg,
+                r4 = op("sd.sample", model=mcv["model"], pos=pos, neg=neg,
                         latent=lat0, seed=SDXL_SEED + 3,
                         steps=min(SDXL_STEPS, cn_steps),
                         cfg=SDXL_CFG, sampler_name="euler", scheduler="normal",
                         denoise=1.0, control=ctl)
-                img4 = op("vae.decode", vae=mcv["vae"], latent=r4["latent"])["image"]
+                img4 = op("sd.vae.decode", vae=mcv["vae"], latent=r4["latent"])["image"]
                 check_img("t4_sdxl_controlnet", fetch_image(img4),
                           expect_size=(SDXL_SIZE, SDXL_SIZE))
                 # 卸载 CN：避免其常驻 1.25GB 拖慢后续 t5~t8 采样（90s/步 抖动）
@@ -327,13 +327,13 @@ def main():
         mkconds()  # t5 三档重载耗时 ~25 分钟，pos/neg/lat0 先刷新
         for mode in ("none", "model", "sequential"):
             t0 = time.time()
-            out, err = run("checkpoint.load", ckpt=SDXL_CKPT, offload=mode)
+            out, err = run("sd.checkpoint.load", ckpt=SDXL_CKPT, offload=mode)
             if err:
                 print(f"[accept] t5 offload={mode}: 加载/常驻失败 -> "
                       f"{str(err)[:160]}", flush=True)
                 continue
             key = out["model"]
-            out2, err2 = run("sample", model=key, pos=pos, neg=neg,
+            out2, err2 = run("sd.sample", model=key, pos=pos, neg=neg,
                              latent=lat0, seed=SDXL_SEED, steps=3, cfg=SDXL_CFG,
                              sampler_name="euler", scheduler="normal")
             dt = time.time() - t0
@@ -360,14 +360,14 @@ def main():
 
     # ---------------- t7 SD1.5 回归（逐字节） ----------------
     if want("t7"):
-        m15 = op("checkpoint.load", ckpt=SD15_CKPT, offload="none")
-        p15 = op("clip.encode", clip=m15["clip"], text=SD15_PROMPT)["cond"]
-        n15 = op("clip.encode", clip=m15["clip"], text="")["cond"]
-        l15 = op("latent.empty", width=512, height=512, batch_size=1)["latent"]
-        r15 = op("sample", model=m15["model"], pos=p15, neg=n15, latent=l15,
+        m15 = op("sd.checkpoint.load", ckpt=SD15_CKPT, offload="none")
+        p15 = op("sd.clip.encode", clip=m15["clip"], text=SD15_PROMPT)["cond"]
+        n15 = op("sd.clip.encode", clip=m15["clip"], text="")["cond"]
+        l15 = op("sd.latent.empty", width=512, height=512, batch_size=1)["latent"]
+        r15 = op("sd.sample", model=m15["model"], pos=p15, neg=n15, latent=l15,
                  seed=SD15_SEED, steps=SD15_STEPS, cfg=SD15_CFG,
                  sampler_name="euler", scheduler="normal", denoise=1.0)
-        img15 = op("vae.decode", vae=m15["vae"], latent=r15["latent"])["image"]
+        img15 = op("sd.vae.decode", vae=m15["vae"], latent=r15["latent"])["image"]
         png15 = fetch_image(img15)
         sha15 = hashlib.sha1(png15).hexdigest()
         save("t7_sd15_regression", png15)
@@ -390,17 +390,17 @@ def main():
                    width=SDXL_SIZE, height=SDXL_SIZE // 2,
                    strength=1.0)["cond"]
         pos_b = op("cond.set_area", cond=op(
-            "clip.encode", clip=mcv["clip"],
+            "sd.clip.encode", clip=mcv["clip"],
             text="a mountain landscape, snow peak",
             width=SDXL_SIZE, height=SDXL_SIZE)["cond"],
             x=0, y=SDXL_SIZE // 2, width=SDXL_SIZE, height=SDXL_SIZE // 2,
             strength=1.0)["cond"]
         pos_c = op("cond.combine", cond_a=pos_a, cond_b=pos_b)["cond"]
         neg_c = op("cond.combine", cond_a=neg, cond_b=neg)["cond"]
-        r8 = op("sample", model=mcv["model"], pos=pos_c, neg=neg_c,
+        r8 = op("sd.sample", model=mcv["model"], pos=pos_c, neg=neg_c,
                 latent=lat0, seed=SDXL_SEED + 4, steps=SDXL_STEPS,
                 cfg=SDXL_CFG, sampler_name="euler", scheduler="normal")
-        img8 = op("vae.decode", vae=mcv["vae"], latent=r8["latent"])["image"]
+        img8 = op("sd.vae.decode", vae=mcv["vae"], latent=r8["latent"])["image"]
         check_img("t8_sdxl_area_combine", fetch_image(img8),
                   expect_size=(SDXL_SIZE, SDXL_SIZE))
 

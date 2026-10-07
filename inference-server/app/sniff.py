@@ -90,7 +90,7 @@ def sniff_component(path):
         if os.path.isfile(os.path.join(path, "model_index.json")):
             raise ValueError(
                 f"'{path}' 是整管 diffusers 目录（含 model_index.json），"
-                f"请用 checkpoint.load；组件加载只接受独立组件目录")
+                f"请用 sd.checkpoint.load；组件加载只接受独立组件目录")
         cfg = os.path.join(path, "config.json")
         if not os.path.isfile(cfg):
             raise ValueError(
@@ -117,7 +117,7 @@ def sniff_component(path):
                "text_encoder.", "conditioner.embedders."):
             raise ValueError(
                 f"'{path}' 是完整 checkpoint（含 unet/text_encoder key），"
-                f"不是独立组件；请用 checkpoint.load")
+                f"不是独立组件；请用 sd.checkpoint.load")
         # ControlNet 单文件：diffusers 格式（controlnet_down_blocks.*）、
         # lllyasviel 原版（input_hint_block.*）或 ComfyUI 重打包格式
         # （control_model.* 统一前缀，from_single_file 均可自动转换）

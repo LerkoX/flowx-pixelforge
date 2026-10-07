@@ -5,8 +5,9 @@
 - latent.upscale / latent.composite：latent 空间插值放大/贴入拼接
 - latent.set_noise_mask：latent 包裹 noise_mask（局部重绘核心，采样循环消费）
 
-部署：本文件放 PLUGINS_DIR（默认 /models/plugins.d，bind-mount 持久化）重启自动
-扫描注册，或经 POST /admin/plugins 热上传。使用：经 inference-op 通用节点调用。
+分发：本文件是节点共享算子族（单一事实源），由 nodes/_tools/sync-common.py
+分发为各成员节点的 server_op.py，节点运行时经 ensure_plugin 自注册到推理服务
+（POST /admin/plugins，hash 幂等）。使用：对应专属节点或 inference-op 通用节点。
 
 COND 形态：
 - SD1.x：张量 (b, seq, dim)，或 cond.set_area 产物的段列表
@@ -139,7 +140,7 @@ def cond_set_area(cond, x=0, y=0, width=512, height=512, strength=1.0):
     """Conditioning Set Area：把整图 cond 标记为只在指定区域生效（对标 ComfyUI
     ConditioningSetArea），输出段列表供 sample 分段前向按区域混合。
     x/y/width/height 为图像像素（内部 //8）；strength 为该段权重（>0）。
-    多区域构图：每段 clip.encode 分别 set_area 后经 cond.combine 拼接；
+    多区域构图：每段 sd.clip.encode 分别 set_area 后经 cond.combine 拼接；
     混合为求和语义（不归一化，重叠区域影响叠加，与 ComfyUI 一致）。
     SDXL：输出 SDXLSegments（每段带自己的 pooled），采样循环逐段前向时
     各自带 text_embeds（与 ComfyUI 每条 conditioning 带 pooled 同语义）。"""
@@ -363,4 +364,4 @@ def register(registry):
         outputs={"latent": "LATENT"},
         description="Set Latent Noise Mask：latent 包裹 noise_mask（局部重绘核心）；"
                     "mask 为灰度 IMAGE（白=重绘区域），内部 resize 到 latent 尺寸；"
-                    "配 vae.encode + sample(denoise<1) 做 inpaint")(latent_set_noise_mask)
+                    "配 sd.vae.encode + sd.sample(denoise<1) 做 inpaint")(latent_set_noise_mask)

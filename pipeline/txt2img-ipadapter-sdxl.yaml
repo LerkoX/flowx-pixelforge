@@ -47,7 +47,7 @@ Nodes:
   LoadCkpt:
     name: SDXL加载
     config:
-      nodeRef: checkpoint-loader@1.2.0
+      nodeRef: checkpoint-loader@1.3.0
       params:
         service_url: "{{ Param.service_url_internal }}"
         service_url_host: "{{ Param.service_url }}"
@@ -58,7 +58,7 @@ Nodes:
   EncPos:
     name: 正向提示词
     config:
-      nodeRef: clip-text-encode@1.1.0
+      nodeRef: clip-text-encode@1.2.0
       params:
         service_url: "{{ Param.service_url_internal }}"
         service_token: "{{ Param.service_token }}"
@@ -69,7 +69,7 @@ Nodes:
   EncNeg:
     name: 反向提示词
     config:
-      nodeRef: clip-text-encode@1.1.0
+      nodeRef: clip-text-encode@1.2.0
       params:
         service_url: "{{ Param.service_url_internal }}"
         service_token: "{{ Param.service_token }}"
@@ -80,7 +80,7 @@ Nodes:
   EmptyLatent:
     name: 空Latent
     config:
-      nodeRef: empty-latent@1.0.0
+      nodeRef: empty-latent@1.1.0
       params:
         service_url: "{{ Param.service_url_internal }}"
         service_token: "{{ Param.service_token }}"
@@ -90,7 +90,7 @@ Nodes:
   RefImage:
     name: 参考图
     config:
-      nodeRef: load-image@1.1.0
+      nodeRef: load-image@1.2.0
       executor: local
       params:
         service_url: "{{ Param.service_url }}"
@@ -132,7 +132,7 @@ Nodes:
   Sample:
     name: 采样
     config:
-      nodeRef: ksampler@1.4.0
+      nodeRef: ksampler@1.5.0
       executor: local
       params:
         service_url: "{{ Param.service_url }}"
@@ -150,7 +150,7 @@ Nodes:
   Decode:
     name: 解码
     config:
-      nodeRef: vae-decode@1.0.0
+      nodeRef: vae-decode@1.1.0
       params:
         service_url: "{{ Param.service_url_internal }}"
         service_token: "{{ Param.service_token }}"
@@ -170,7 +170,7 @@ Nodes:
   Unload:
     name: 卸载模型
     config:
-      nodeRef: model-unload@1.0.0
+      nodeRef: model-unload@1.1.0
       params:
         service_url: "{{ Param.service_url_internal }}"
         service_token: "{{ Param.service_token }}"

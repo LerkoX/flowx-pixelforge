@@ -162,7 +162,7 @@ def main_component():
         os.makedirs(pdir)
         with open(os.path.join(pdir, "model_index.json"), "w") as f:
             json.dump({"_class_name": "StableDiffusionPipeline"}, f)
-        expect_comp_error(pdir, "checkpoint.load")
+        expect_comp_error(pdir, "sd.checkpoint.load")
 
         # --- 两无目录 ---
         edir = os.path.join(d, "empty-dir")

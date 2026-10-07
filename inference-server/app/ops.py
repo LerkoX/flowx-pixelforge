@@ -125,7 +125,7 @@ class ControlBundle:
         self.strength = strength
         self.start_percent = start_percent
         self.end_percent = end_percent
-        # InstantID（plugins/instantid_ops.py）：CN cross-attention 的
+        # InstantID（nodes/_common/server_ops/instantid.py）：CN cross-attention 的
         # encoder_hidden_states 覆写对（负向/正向各一份投影后人脸 token，
         # [1, n_tokens, 2048]）；None = 常规 ControlNet（吃文本 hidden）。
         # sample 预准备阶段搬到执行设备/精度。
@@ -572,7 +572,7 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
             conditioning_scale=control.strength, return_dict=False, **kw)
         return down, mid
 
-    # IPAdapter 装配（ipadapter.apply 产物，plugins/ipadapter_ops.py）：
+    # IPAdapter 装配（ipadapter.apply 产物，nodes/_common/server_ops/ipadapter.py）：
     # 临时换装 IPAdapter 注意力处理器 + image 投影层，采样后 try/finally
     # 恢复原样（常驻管道不被污染）。weight/步窗口经逐步改写处理器 scale
     # 实现（0.35.2 的 IPAdapter 处理器读自身 scale 属性；窗口外置 0 →

@@ -3,7 +3,7 @@
 
 前置：Phase 0 权重就位（/models/flux/flux1-schnell-Q4_K_S.gguf、
 t5xxl-Q4_K_S.gguf、ae.safetensors、clip_l、tokenizer*、t5 config/tokenizer、
-scheduler/），镜像含 gguf/sentencepiece，插件 flux_ops.py 已热加载。
+scheduler/），镜像含 gguf/sentencepiece，flux 家族算子由节点 server_op.py 自注册（push_plugins.py 预热）。
 首次运行 T5 会建 npy 分片缓存（~6min，只一次）。
 
 - t0 预检：/health、/ops 有 flux.load/flux.encode/flux.sample
@@ -191,16 +191,16 @@ def t2():
     print(f"  vram free {free0} -> {free1} MB, resident={resident1}",
           flush=True)
     # 编排前提验证：flux 卸载后 SDXL 可正常加载采样（错峰共存验收）
-    mm = op("checkpoint.load", ckpt=SDXL_CKPT, offload="model",
+    mm = op("sd.checkpoint.load", ckpt=SDXL_CKPT, offload="model",
             dtype="fp16")
-    lat = op("latent.empty", width=512, height=512, batch_size=1)
-    pos = op("clip.encode", clip=mm["clip"], text="a red apple",
+    lat = op("sd.latent.empty", width=512, height=512, batch_size=1)
+    pos = op("sd.clip.encode", clip=mm["clip"], text="a red apple",
              width=512, height=512)
-    neg = op("clip.encode", clip=mm["clip"], text="",
+    neg = op("sd.clip.encode", clip=mm["clip"], text="",
              width=512, height=512)
-    lat2 = op("sample", model=mm["model"], pos=pos["cond"], neg=neg["cond"],
+    lat2 = op("sd.sample", model=mm["model"], pos=pos["cond"], neg=neg["cond"],
               latent=lat["latent"], seed=1, steps=4, cfg=5.0)
-    img = op("vae.decode", vae=mm["vae"], latent=lat2["latent"])
+    img = op("sd.vae.decode", vae=mm["vae"], latent=lat2["latent"])
     png = fetch_image(img["image"])
     assert len(png) > 30000, "SDXL 切换后出图异常"
     op("model.unload", model=mm["model"])
@@ -212,15 +212,15 @@ def t3():
     """SD1.5 回归：sha1 必须等于 M2 基线 48e3225e8b38（验证全局
     RMSNorm/SDPA shim 补丁零影响——shim 只剥离 enable_gqa=False，
     SD1.5/SDXL 注意力路径不传该参数，此处实证）。"""
-    mm = op("checkpoint.load", ckpt=SD15_CKPT)
-    lat = op("latent.empty", width=512, height=512, batch_size=1)
-    pos = op("clip.encode", clip=mm["clip"],
+    mm = op("sd.checkpoint.load", ckpt=SD15_CKPT)
+    lat = op("sd.latent.empty", width=512, height=512, batch_size=1)
+    pos = op("sd.clip.encode", clip=mm["clip"],
              text="a cat sitting on a windowsill, warm sunset light, "
                   "high quality")
-    neg = op("clip.encode", clip=mm["clip"], text="")  # M2 基线用空负向
-    lat2 = op("sample", model=mm["model"], pos=pos["cond"], neg=neg["cond"],
+    neg = op("sd.clip.encode", clip=mm["clip"], text="")  # M2 基线用空负向
+    lat2 = op("sd.sample", model=mm["model"], pos=pos["cond"], neg=neg["cond"],
               latent=lat["latent"], seed=424242, steps=20, cfg=7.0)
-    img = op("vae.decode", vae=mm["vae"], latent=lat2["latent"])
+    img = op("sd.vae.decode", vae=mm["vae"], latent=lat2["latent"])
     png = fetch_image(img["image"])
     op("model.unload", model=mm["model"])
     sha = hashlib.sha1(png).hexdigest()[:12]
@@ -231,7 +231,7 @@ def t3():
 
 
 def t4():
-    mm = op("checkpoint.load", ckpt=SD15_CKPT, dtype="fp16")
+    mm = op("sd.checkpoint.load", ckpt=SD15_CKPT, dtype="fp16")
     try:
         _, err = run_job("flux.encode", model=mm["model"], text="hi")
         assert err, "SD1.5 管道走 flux.encode 居然成功？"

@@ -7,7 +7,9 @@
 - 能力运行时（异步）：POST /jobs 提交 → GET /jobs/{id} 轮询状态/进度 →
   POST /interrupt 取消；视频等分钟级任务走此通道（同步 HTTP 会超时）
 
-新增能力只需在下方注册一个算子函数，无需新增端点。
+新增能力不再动本文件：算子全部由节点包携带 server_op.py 经 POST /admin/plugins
+自注册（见 nodes/*/server_op.py）；本服务只保留引擎/对象仓库/任务体系/模型管理
+与插件机制本身。
 """
 import gc as _gc  # 别名：与下方 /gc 端点函数名冲突
 import io
@@ -19,7 +21,7 @@ from fastapi.responses import FileResponse, Response
 from PIL import Image
 from pydantic import BaseModel, Field
 
-from . import engine, execution, ops, plugins, preview, sniff
+from . import engine, ops, plugins, preview, sniff
 from . import model_manager as _mm
 from .jobs import JobManager
 from .model_manager import OFFLOAD_MODE, QUANTIZATION, ModelManager
@@ -27,10 +29,16 @@ from .object_store import ObjectStore
 from .registry import Registry
 
 TOKEN = os.environ.get("INFERENCE_TOKEN", "")
-INPUT_DIR = os.environ.get("INPUT_DIR", "/input")
+if not TOKEN:
+    # 硬依赖（算子全面插件化起）：核心不再内置任何算子，全部经节点包
+    # server_op.py → POST /admin/plugins 自注册；无 token 时 /admin/* 关闭，
+    # 服务启动后注册表为空、任何节点都跑不动，等价不可用——宁可启动即失败。
+    raise RuntimeError(
+        "INFERENCE_TOKEN 未配置：算子已全面插件化（节点包 server_op.py 经 "
+        "/admin/plugins 自注册），无 token 时 /admin/* 关闭、服务无任何算子可用。"
+        "请设置 INFERENCE_TOKEN 环境变量后重启，并在流水线节点的 service_token "
+        "参数填入同一值。")
 VIDEO_DIR = os.environ.get("VIDEO_DIR", "/videos")
-EMBEDDINGS_DIR = os.environ.get("EMBEDDINGS_DIR", "/models/embeddings")
-DETECTOR_DIR = os.environ.get("DETECTOR_DIR", "/models/detectors")
 # 插件算子目录：默认放 MODELS_DIR 下（bind-mount 持久化，重建容器不丢）
 PLUGINS_DIR = os.environ.get("PLUGINS_DIR", "/models/plugins.d")
 # 插件算子名 -> {"file": 文件名, "sha256": 内容哈希}；/ops 透出供客户端版本比对
@@ -70,293 +78,10 @@ def admin_auth(authorization: str = Header(default="")):
         raise HTTPException(status_code=401, detail="invalid token")
 
 
-# ---------- 算子注册（新能力在这里加一行） ----------
-
-@registry.register(
-    "checkpoint.load",
-    inputs={"ckpt": "STRING", "dtype": "STRING", "offload": "STRING",
-            "use_t5": "STRING"},
-    outputs={"model": "MODEL", "clip": "CLIP", "vae": "VAE"},
-    description="加载 checkpoint 到显存（幂等），输出 model/clip/vae 三个对象。"
-                "性能旋钮（dev-plan 9.6 纪律 #3）：dtype=auto/fp16/bf16/fp32、"
-                "offload=auto/none/model/sequential、use_t5=auto/on/off（仅 SD3 生效，"
-                "auto 继承 SD3_USE_T5 环境变量，默认弃用 T5-XXL）；auto 继承服务端环境变量，"
-                "不同旋钮组合是独立常驻条目（同一 LRU 管理）")
-def _op_checkpoint_load(ckpt, dtype="auto", offload="auto", use_t5="auto"):
-    return ops.checkpoint_load(models, ckpt, dtype, offload, use_t5)
-
-
-@registry.register(
-    "model.unload",
-    inputs={"target": "STRING"},
-    outputs={"unloaded": "STRING", "resident": "STRING"},
-    description="卸载常驻模型腾显存：target 空/all/*=全部，否则按名字或缓存键匹配"
-                "（可省略扩展名，支持 vae:/cn:/motion 组合管）。走与加载一致的淘汰路径"
-                "（断对象仓库视图 → gc → empty_cache）；输出 unloaded/resident 逗号分隔清单。"
-                "典型用法：视频/大模型段跑完先卸载，再跑图像采样")
-def _op_model_unload(target=""):
-    return ops.model_unload(models, target)
-
-
-@registry.register(
-    "clip.encode",
-    inputs={"clip": "CLIP", "text": "STRING", "width": "INT",
-            "height": "INT", "clip_skip": "INT"},
-    outputs={"cond": "COND"},
-    description="CLIP Text Encode：文本 → conditioning。按底模架构分派（M5）："
-                "SD1.x 单 text_encoder → 张量 COND；SDXL 双 text encoder → "
-                "SDXLCond（embeds + pooled），采样时自动注入 added_cond_kwargs"
-                "（text_embeds/time_ids）。width/height 仅 SDXL 有意义："
-                "原始尺寸（0=auto，由采样 latent 推导，影响 time_ids）；"
-                "clip_skip 负值跳过末 n 层（SDXL 常用 -2），0=默认")
-def _op_clip_encode(clip, text, width=0, height=0, clip_skip=0):
-    return ops.clip_encode(clip, text, width, height, clip_skip)
-
-
-@registry.register(
-    "latent.empty",
-    inputs={"width": "INT", "height": "INT", "batch_size": "INT"},
-    outputs={"latent": "LATENT"},
-    description="Empty Latent Image：按宽高/batch 创建零 latent（均可省略，默认 512x512x1）")
-def _op_latent_empty(width=512, height=512, batch_size=1):
-    return ops.latent_empty(width, height, batch_size)
-
-
-@registry.register(
-    "sample",
-    inputs={"model": "MODEL", "pos": "COND", "neg": "COND", "latent": "LATENT",
-            "seed": "INT", "steps": "INT", "cfg": "FLOAT",
-            "sampler_name": "STRING", "scheduler": "STRING", "denoise": "FLOAT",
-            "start_at_step": "INT", "end_at_step": "INT", "add_noise": "BOOL",
-            "control": "CONTROL", "preview_every": "INT"},
-    outputs={"latent": "LATENT", "seed": "INT"},
-    description="KSampler：sampler_name（更新公式：euler/euler_a/ddim/lms/dpmpp_2m/"
-                "dpmpp_2m_sde/uni_pc）× scheduler（sigma 曲线：normal/karras/"
-                "exponential/beta）自由组合，组合支持性按 sampler 类能力校验；"
-                "seed/steps/cfg/sampler_name/scheduler/denoise 均有默认值；"
-                "兼容旧一体名 dpmpp_2m_karras；"
-                "分段采样（KSampler Advanced）：start_at_step>0 从该步开始（优先于 "
-                "denoise），end_at_step>0 提前停（latent 带残余噪声可接力），"
-                "add_noise=false 不加噪直接接力上一段输出；"
-                "control 可选（controlnet.apply 产物）：ControlNet 残差注入，"
-                "正/负等长时按 CFG 拼批单次前向；"
-                "COND 支持 cond.set_area 分段（区域条件混合）；"
-                "latent 支持 latent.set_noise_mask 包裹（局部重绘，mask 外混回原图）；"
-                "异步 job 执行且 preview_every>0 时，逐步把 latent 预览帧（JPEG）"
-                "留在 GET /preview/{job_id}（只留最新一帧），供 Studio 中转拉取")
-def _op_sample(model, pos, neg, latent, seed=-1, steps=20, cfg=7.0,
-               sampler_name="euler", scheduler="normal", denoise=1.0,
-               start_at_step=0, end_at_step=0, add_noise=True,
-               control=None, preview_every=1):
-    hint = "sd15"
-    if preview_every > 0:
-        pipe, _ = ops.resolve_pipe(model)
-        hint = preview.model_hint_of(pipe)
-
-    def on_step(latents, i, total):
-        job = execution.current()
-        if job is None:
-            return  # 同步 /op 调用无 job 上下文：不录预览（预览走异步 job 通道）
-        job.set_progress(i + 1, total)  # 异步 job 进度（无需预览也上报）
-        if preview_every > 0:
-            rec = preview.recorder_for(job.id, preview_every, hint)
-            if rec.want(i, total):
-                rec.push(latents, (i + 1) / total)
-
-    return ops.sample(model, pos, neg, latent, seed, steps, cfg,
-                      sampler_name, scheduler, denoise, start_at_step,
-                      end_at_step, add_noise, control=control,
-                      preview_cb=on_step,
-                      interrupt_check=execution.check_cancelled)
-
-
-@registry.register(
-    "vae.load",
-    inputs={"name": "STRING", "dtype": "STRING"},
-    outputs={"vae": "VAE"},
-    description="Load VAE：单独加载 VAE 组件（MODELS_DIR 下 safetensors 单文件或 "
-                "diffusers 组件目录），输出可直接喂 vae.decode/vae.encode 替代管道内置 "
-                "VAE（外挂 vae-ft-mse 等提升解码质量）。dtype=auto/fp16/fp32，auto "
-                "默认 fp32（外挂 VAE 的意义即解码质量）；进同一 LRU 常驻管理")
-def _op_vae_load(name, dtype="auto"):
-    key, _newly = models.load_vae(name, dtype)
-    return {"vae": models.get(key)}
-
-
-@registry.register(
-    "controlnet.load",
-    inputs={"name": "STRING", "dtype": "STRING"},
-    outputs={"control_net": "CONTROL_NET"},
-    description="ControlNet Loader：单独加载 ControlNet 组件（MODELS_DIR 下 "
-                "control_v11* 等 safetensors 单文件或 diffusers 组件目录），"
-                "dtype=auto/fp16/bf16/fp32，auto 默认 fp16；进同一 LRU 常驻管理。"
-                "输出经 controlnet.apply 捆绑 hint 图后喂 sample 的 control 端口")
-def _op_controlnet_load(name, dtype="auto"):
-    key, _newly = models.load_controlnet(name, dtype)
-    return {"control_net": models.get(key)}
-
-
-@registry.register(
-    "controlnet.apply",
-    inputs={"control_net": "CONTROL_NET", "image": "IMAGE",
-            "strength": "FLOAT", "start_percent": "FLOAT",
-            "end_percent": "FLOAT"},
-    outputs={"control": "CONTROL"},
-    description="ControlNet Apply：ControlNetModel + hint 图（边缘/姿态等线稿，"
-                "预处理器产出）捆绑为 CONTROL；strength=残差强度（默认 1.0，"
-                "0 ≡ 关闭）；start/end_percent 为生效步窗口（默认全程）。"
-                "暂不与 cond.set_area 组合")
-def _op_controlnet_apply(control_net, image, strength=1.0,
-                         start_percent=0.0, end_percent=1.0):
-    return ops.controlnet_apply(control_net, image, strength,
-                                start_percent, end_percent)
-
-
-@registry.register(
-    "motion.load",
-    inputs={"ckpt": "STRING", "motion": "STRING"},
-    outputs={"model": "MODEL", "clip": "CLIP", "vae": "VAE"},
-    description="Motion 加载：SD1.x checkpoint + MotionAdapter → AnimateDiffPipeline（文生视频）。"
-                "ckpt 为 MODELS_DIR 下底模名（同 checkpoint.load）；motion 为 MODELS_DIR/motion/ 下的"
-                " diffusers 目录名或 safetensors 文件名（可省略扩展名）。直接收底模名而非 MODEL 引用："
-                "组合需全新实例化底模，预先 checkpoint.load 会白占一份内存")
-def _op_motion_load(ckpt, motion):
-    return ops.motion_load(models, ckpt, motion)
-
-
-@registry.register(
-    "lora.apply",
-    inputs={"model": "MODEL", "lora": "STRING", "strength": "FLOAT"},
-    outputs={"model": "MODEL", "clip": "CLIP"},
-    description="LoRA 加载：给 MODEL 挂增量补丁（可多个串联叠加），strength 默认 1.0；lora 为 LORAS_DIR 下文件名（可省略扩展名）")
-def _op_lora_apply(model, lora, strength=1.0):
-    return ops.lora_apply(models, model, lora, strength)
-
-
-@registry.register(
-    "vae.decode",
-    inputs={"vae": "VAE", "latent": "LATENT"},
-    outputs={"image": "IMAGE"},
-    description="VAE Decode：latent → PIL 图像")
-def _op_vae_decode(vae, latent):
-    return ops.vae_decode(vae, latent)
-
-
-@registry.register(
-    "vae.encode",
-    inputs={"vae": "VAE", "image": "IMAGE"},
-    outputs={"latent": "LATENT"},
-    description="VAE Encode：PIL 图像 → latent（图生图入口，配 sample 的 denoise<1 使用）")
-def _op_vae_encode(vae, image):
-    return ops.vae_encode(vae, image)
-
-
-def _video_on_step(preview_every):
-    """视频采样逐步回调：job 进度上报 + 进度卡片预览（3D latent 无法廉价投影）。"""
-    def on_step(latents, i, total):
-        job = execution.current()
-        if job is None:
-            return  # 同步 /op 调用无 job 上下文：不录预览
-        job.set_progress(i + 1, total)  # 异步 job 进度（轮询通道）
-        if preview_every > 0:
-            rec = preview.recorder_for(job.id, preview_every)
-            if rec.want(i, total):
-                # 视频 3D latent 无法廉价投影成图，录纯渲染的进度卡片帧
-                rec.push_pil(preview.progress_card(i + 1, total), (i + 1) / total)
-    return on_step
-
-
-@registry.register(
-    "video.sample",
-    inputs={"model": "MODEL", "prompt": "STRING", "neg_prompt": "STRING",
-            "image": "IMAGE", "width": "INT", "height": "INT",
-            "num_frames": "INT", "fps": "INT", "steps": "INT", "cfg": "FLOAT",
-            "seed": "INT", "decode_chunk_size": "INT",
-            "preview_every": "INT"},
-    outputs={"video": "VIDEO", "seed": "INT"},
-    description="Video Sample：文/图生视频，按管道签名自适应（Wan TI2V 文本+可选首帧 / "
-                "SVD 纯图生视频，cfg 映射 min/max_guidance_scale，fps 进采样条件）。"
-                "分钟级任务，请经 POST /jobs 异步执行；进度经 job 轮询上报，"
-                "preview_every>0 时进度卡片帧留在 GET /preview/{job_id}；"
-                "/interrupt 可取消")
-def _op_video_sample(model, prompt="", neg_prompt="", image=None,
-                     width=832, height=480, num_frames=121, fps=24,
-                     steps=50, cfg=5.0, seed=-1, decode_chunk_size=0,
-                     preview_every=0):
-    return ops.video_sample(model, prompt, neg_prompt, image, width, height,
-                            num_frames, fps, steps, cfg, seed, decode_chunk_size,
-                            preview_cb=_video_on_step(preview_every),
-                            interrupt_check=execution.check_cancelled)
-
-
-@registry.register(
-    "video.sample_latent",
-    inputs={"model": "MODEL", "prompt": "STRING", "neg_prompt": "STRING",
-            "image": "IMAGE", "width": "INT", "height": "INT",
-            "num_frames": "INT", "fps": "INT", "steps": "INT", "cfg": "FLOAT",
-            "seed": "INT", "preview_every": "INT"},
-    outputs={"latent": "LATENT", "seed": "INT"},
-    description="Video Sample（latent 模式）：只采样不解码，输出 3D latent 供 "
-                "vae.decode_video 接力——decode 精度（fp32）与分块成为流水线可调参数。"
-                "分钟级任务，请经 POST /jobs 异步执行")
-def _op_video_sample_latent(model, prompt="", neg_prompt="", image=None,
-                            width=832, height=480, num_frames=121, fps=24,
-                            steps=50, cfg=5.0, seed=-1, preview_every=0):
-    return ops.video_sample(model, prompt, neg_prompt, image, width, height,
-                            num_frames, fps, steps, cfg, seed,
-                            output_type="latent",
-                            preview_cb=_video_on_step(preview_every),
-                            interrupt_check=execution.check_cancelled)
-
-
-@registry.register(
-    "vae.decode_video",
-    inputs={"vae": "VAE", "latents": "LATENT", "num_frames": "INT",
-            "decode_chunk_size": "INT", "force_fp32": "BOOL", "fps": "INT"},
-    outputs={"video": "VIDEO"},
-    description="VAE Decode（视频）：3D latent → VIDEO。force_fp32 防 Pascal fp16 "
-                "解码过曝/亮度漂移；decode_chunk_size 分块控制显存峰值（SVD 有效）")
-def _op_vae_decode_video(vae, latents, num_frames=0, decode_chunk_size=14,
-                         force_fp32=True, fps=24):
-    return ops.vae_decode_video(vae, latents, num_frames, decode_chunk_size,
-                                force_fp32, fps)
-
-
-@registry.register(
-    "embedding.load",
-    inputs={"clip": "CLIP", "names": "STRING"},
-    outputs={"clip": "CLIP"},
-    description="Textual Inversion 加载：把 EMBEDDINGS_DIR 下的 embedding（逗号分隔，"
-                "如 badhandv4,EasyNegative）载进 CLIP 文本编码器；之后正/反提示词里直接写"
-                "该词生效（常用于负面压制缺陷）。幂等，已加载自动跳过")
-def _op_embedding_load(clip, names):
-    return ops.embedding_load(clip, EMBEDDINGS_DIR, names)
-
-
-@registry.register(
-    "image.upscale",
-    inputs={"image": "IMAGE", "scale": "FLOAT", "width": "INT",
-            "height": "INT", "method": "STRING"},
-    outputs={"image": "IMAGE"},
-    description="Image Upscale：按 scale 倍率（默认 2.0）或目标 width/height 放大图像，"
-                "method 支持 lanczos/bicubic/bilinear/nearest；结果对齐 8 的倍数。"
-                "hires.fix 前置：放大 → vae.encode → sample(denoise 0.3~0.5) 精修细节")
-def _op_image_upscale(image, scale=2.0, width=0, height=0, method="lanczos"):
-    return ops.image_upscale(image, scale, width, height, method)
-
-
-@registry.register(
-    "image.load",
-    inputs={"name": "STRING"},
-    outputs={"image": "IMAGE"},
-    description="Load Image：读 INPUT_DIR 下的服务端本地图片（仅文件名）；客户端上传用 POST /images")
-def _op_image_load(name):
-    return ops.image_load(INPUT_DIR, name)
-
-
 # ---------- 插件算子（启动扫描 + 运行时上传热加载） ----------
 
-# 启动扫描：plugins.d 下既有插件全量注册（reserved=核心算子名，防遮蔽只喊不拦）
+# 启动扫描：plugins.d 下既有插件全量注册（核心不再内置算子，reserved 恒为空集，
+# 保留参数位防未来重新引入核心算子时失去防遮蔽告警）
 _core_ops = set(registry._ops)
 for _fn, _op_names in plugins.scan_plugins(PLUGINS_DIR, registry,
                                            reserved=_core_ops).items():

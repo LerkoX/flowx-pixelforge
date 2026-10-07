@@ -29,8 +29,9 @@ from app.plugins import check_plugin_source, load_plugin, sha256_of
 from app.registry import Registry
 from app.ops import ControlBundle
 
-PLUGIN = os.path.join(os.path.dirname(__file__), "..", "plugins",
-                      "instantid_ops.py")
+PLUGIN = os.path.join(os.path.dirname(__file__), "..", "..", "nodes",
+                     "_common", "server_ops",
+                      "instantid.py")
 
 EXPECTED = {
     "face.analyze": ({"image": "IMAGE", "face_index": "INT",
@@ -82,7 +83,7 @@ def _expect_err(fn, needle):
 def main():
     with open(PLUGIN, "rb") as f:
         content = f.read()
-    err = check_plugin_source("instantid_ops.py", content)
+    err = check_plugin_source("instantid.py", content)
     assert err is None, f"check_plugin_source: {err}"
     print(f"ok: check_plugin_source pass (sha256={sha256_of(content)[:12]}...)")
 
@@ -99,7 +100,7 @@ def main():
     print(f"ok: 注册契约 {sorted(EXPECTED)}，FACE 对象类型入表")
 
     import importlib
-    mod = importlib.import_module("flowx_plugin_instantid_ops")
+    mod = importlib.import_module("flowx_plugin_instantid")
 
     # face_analyze：非 PIL 输入（在校验后才触重依赖导入）
     _expect_err(lambda: mod.face_analyze("not-an-image"),

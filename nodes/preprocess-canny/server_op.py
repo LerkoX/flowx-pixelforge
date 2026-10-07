@@ -6,11 +6,12 @@
   训练时用的就是 MiDaS dpt_hybrid，预处理器与权重最对口）
 
 用途：闭环"人物替换保动作"——load-image(真人照片) → preprocess.openpose
-→ controlnet.apply(openpose 权重) → sample(换服装/风格提示词)，姿势由骨架锁定。
+→ sd.controlnet.apply(openpose 权重) → sd.sample(换服装/风格提示词)，姿势由骨架锁定。
 depth 则锁构图/空间层次（室内、产品、场景改造）。
 
-部署：本文件放 PLUGINS_DIR（默认 /models/plugins.d，bind-mount 持久化）重启自动
-扫描注册，或经 POST /admin/plugins 热上传。使用：经 inference-op 通用节点调用。
+分发：本文件是节点共享算子族（单一事实源），由 nodes/_tools/sync-common.py
+分发为各成员节点的 server_op.py，节点运行时经 ensure_plugin 自注册到推理服务
+（POST /admin/plugins，hash 幂等）。使用：对应专属节点或 inference-op 通用节点。
 
 依赖：opencv-python-headless（canny）、controlnet_aux（openpose），均烘焙进镜像；
 numpy/cv2/controlnet_aux 一律函数内懒加载（本地无 GPU 契约测试可导入）。
@@ -122,7 +123,7 @@ def preprocess_depth(image, detect_resolution=512):
         import numpy as np
         out = Image.fromarray(np.asarray(out))
     # MidasDetector 输出尺寸由 image_resolution 决定（resize_image 语义），
-    # 统一回缩到输入尺寸，保证下游 controlnet.apply 的 hint 与出图尺寸对齐
+    # 统一回缩到输入尺寸，保证下游 sd.controlnet.apply 的 hint 与出图尺寸对齐
     if out.size != img.size:
         out = out.resize(img.size, Image.BILINEAR)
     print(f"[preprocess.depth] {img.size} detect_res={det_res}", flush=True)

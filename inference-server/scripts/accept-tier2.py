@@ -111,21 +111,21 @@ def check_img(tag, png, lo=10.0, hi=245.0):
 
 
 def decode(vae, latent, tag, **kw):
-    img_id = op("vae.decode", vae=vae, latent=latent)["image"]
+    img_id = op("sd.vae.decode", vae=vae, latent=latent)["image"]
     return check_img(tag, fetch_image(img_id), **kw)
 
 
 def main():
     print(f"[accept] base={BASE} ckpt={CKPT} vae={VAE_NAME}", flush=True)
 
-    out = op("checkpoint.load", ckpt=CKPT)
+    out = op("sd.checkpoint.load", ckpt=CKPT)
     model, clip, vae = out["model"], out["clip"], out["vae"]
-    pos = op("clip.encode", clip=clip, text=PROMPT)["cond"]
-    neg = op("clip.encode", clip=clip, text="")["cond"]
-    latent0 = op("latent.empty", width=512, height=512, batch_size=1)["latent"]
+    pos = op("sd.clip.encode", clip=clip, text=PROMPT)["cond"]
+    neg = op("sd.clip.encode", clip=clip, text="")["cond"]
+    latent0 = op("sd.latent.empty", width=512, height=512, batch_size=1)["latent"]
 
     # t1 回归：默认参数 vs M2 基线逐字节一致
-    lat_full = op("sample", model=model, pos=pos, neg=neg, latent=latent0,
+    lat_full = op("sd.sample", model=model, pos=pos, neg=neg, latent=latent0,
                   seed=SEED, steps=STEPS, cfg=7.0)["latent"]
     sha_full, _, _ = decode(vae, lat_full, "t1_default_euler")
     if os.path.isfile(BASELINE_T1):
@@ -139,9 +139,9 @@ def main():
         print(f"[accept] t1 SKIP: 基线不存在 {BASELINE_T1}（仅记录出图）", flush=True)
 
     # t2 分段接力：0→10（end_at_step）+ 10→20（start_at_step + add_noise=false）
-    lat_seg1 = op("sample", model=model, pos=pos, neg=neg, latent=latent0,
+    lat_seg1 = op("sd.sample", model=model, pos=pos, neg=neg, latent=latent0,
                   seed=SEED, steps=STEPS, cfg=7.0, end_at_step=10)["latent"]
-    lat_seg2 = op("sample", model=model, pos=pos, neg=neg, latent=lat_seg1,
+    lat_seg2 = op("sd.sample", model=model, pos=pos, neg=neg, latent=lat_seg1,
                   seed=SEED, steps=STEPS, cfg=7.0, start_at_step=10,
                   add_noise=False)["latent"]
     sha_seg, _, _ = decode(vae, lat_seg2, "t2_segmented_euler")
@@ -154,27 +154,27 @@ def main():
     decode(vae, lat_seg1, "t3_half_baked", lo=2.0, hi=253.0)
 
     # t4 vae.load：外挂 VAE decode 同一 latent
-    vae_ext = op("vae.load", name=VAE_NAME)["vae"]
+    vae_ext = op("sd.vae.load", name=VAE_NAME)["vae"]
     sha_ext, _, _ = decode(vae_ext, lat_full, "t4_external_vae")
     if sha_ext != sha_full:
         print("[accept] t4 PASS: 外挂 VAE 生效（与内置结果不同）", flush=True)
     else:
         failures.append("t4: 外挂 VAE 与内置结果逐字节相同，疑似未生效")
     # vae.encode 兼容 shim（外挂 VAE 编码原图回 latent 再解码）
-    img_id = op("vae.decode", vae=vae, latent=lat_full)["image"]
-    lat_re = op("vae.encode", vae=vae_ext, image=img_id)["latent"]
+    img_id = op("sd.vae.decode", vae=vae, latent=lat_full)["image"]
+    lat_re = op("sd.vae.encode", vae=vae_ext, image=img_id)["latent"]
     decode(vae_ext, lat_re, "t4b_ext_vae_roundtrip")
 
     # t5 cond.combine / cond.average
-    ca = op("clip.encode", clip=clip, text="a cat")["cond"]
-    cb = op("clip.encode", clip=clip,
+    ca = op("sd.clip.encode", clip=clip, text="a cat")["cond"]
+    cb = op("sd.clip.encode", clip=clip,
             text="sitting on a windowsill, warm sunset light")["cond"]
     cond_comb = op("cond.combine", cond_a=ca, cond_b=cb)["cond"]
-    lat = op("sample", model=model, pos=cond_comb, neg=neg, latent=latent0,
+    lat = op("sd.sample", model=model, pos=cond_comb, neg=neg, latent=latent0,
              seed=SEED, steps=STEPS, cfg=7.0)["latent"]
     decode(vae, lat, "t5a_cond_combine")
     cond_avg = op("cond.average", cond_a=ca, cond_b=cb, weight=0.7)["cond"]
-    lat = op("sample", model=model, pos=cond_avg, neg=neg, latent=latent0,
+    lat = op("sd.sample", model=model, pos=cond_avg, neg=neg, latent=latent0,
              seed=SEED, steps=STEPS, cfg=7.0)["latent"]
     decode(vae, lat, "t5b_cond_average")
 
@@ -188,7 +188,7 @@ def main():
         failures.append(f"t6: upscale 尺寸错误 {size} != (1024, 1024)")
 
     # t7 latent.composite：两个不同 seed 的 latent 左右拼接
-    lat_b = op("sample", model=model, pos=pos, neg=neg, latent=latent0,
+    lat_b = op("sd.sample", model=model, pos=pos, neg=neg, latent=latent0,
                seed=777, steps=STEPS, cfg=7.0)["latent"]
     lat_comp = op("latent.composite", dst=lat_full, src=lat_b,
                   x=256, y=0, feather=32)["latent"]

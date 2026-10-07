@@ -1,5 +1,5 @@
-"""flux_ops 插件契约测试（本机无 torch/diffusers：桩覆盖注册契约 + 校验链 +
-GGUF shape 语义回归保护；补丁与数学路径在真机验收覆盖）。
+"""flux 节点插件（nodes/flux-*/server_op.py）契约测试（本机无 torch/diffusers：
+桩覆盖注册契约 + 校验链 + GGUF shape 语义回归保护；补丁与数学路径在真机验收覆盖）。
 
 运行：python3 -m tests.test_flux_plugin
 """
@@ -49,17 +49,31 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from app.plugins import check_plugin_source, load_plugin, sha256_of
 from app.registry import Registry
 
-PLUGIN = os.path.join(os.path.dirname(__file__), "..", "plugins", "flux_ops.py")
+PLUGIN = os.path.join(os.path.dirname(__file__), "..", "..", "nodes",
+                     "flux-sampler", "server_op.py")
 
 EXPECTED = {
-    "flux.load": ({"transformer": "STRING", "t5": "STRING", "offload": "STRING"},
-                  {"model": "MODEL"}),
-    "flux.encode": ({"model": "MODEL", "text": "STRING", "max_seq": "INT",
-                     "release_t5": "INT"}, {"cond": "COND"}),
-    "flux.sample": ({"model": "MODEL", "cond": "COND", "width": "INT",
-                     "height": "INT", "seed": "INT", "steps": "INT",
-                     "guidance": "FLOAT", "preview_every": "INT"},
-                    {"image": "IMAGE", "seed": "INT"}),
+    "flux.unet_load": ({"transformer": "STRING"}, {"model": "MODEL"}),
+    "flux.dual_clip_load": ({"t5": "STRING"}, {"clip": "CLIP"}),
+    "flux.vae_load": ({"name": "STRING"}, {"vae": "VAE"}),
+    "flux.encode": ({"clip": "CLIP", "text": "STRING", "max_seq": "INT",
+                     "release_t5": "INT"}, {"cond": "COND", "info": "STRING"}),
+    "flux.empty_latent": ({"width": "INT", "height": "INT",
+                           "batch_size": "INT"}, {"latent": "LATENT"}),
+    "flux.sample": ({"model": "MODEL", "cond": "COND", "latent": "LATENT",
+                     "seed": "INT", "steps": "INT", "guidance": "FLOAT",
+                     "denoise": "FLOAT", "preview_every": "INT"},
+                    {"latent": "LATENT", "seed": "INT"}),
+    "flux.vae_decode": ({"vae": "VAE", "latent": "LATENT"}, {"image": "IMAGE"}),
+    "flux.vae_encode": ({"vae": "VAE", "image": "IMAGE"}, {"latent": "LATENT"}),
+    "flux.detail_refine": ({"model": "MODEL", "vae": "VAE", "cond": "COND",
+                            "image": "IMAGE", "detector": "STRING",
+                            "conf": "FLOAT", "padding": "FLOAT",
+                            "denoise": "FLOAT", "steps": "INT",
+                            "guidance": "FLOAT", "seed": "INT",
+                            "guide_size": "INT", "max_targets": "INT",
+                            "feather": "INT"},
+                           {"image": "IMAGE", "count": "INT"}),
 }
 
 
@@ -86,7 +100,7 @@ def test_torch_compat_install():
         assert "torch>=2.5" in str(e)
     # 幂等：再次安装不重复包裹
     import sys as _s2
-    flux_ops = _s2.modules["flowx_plugin_flux_ops"]
+    flux_ops = _s2.modules["flowx_plugin_server_op"]
     flux_ops._install_torch_compat()
     assert getattr(_functional.scaled_dot_product_attention,
                    "_flux_gqa_shim", False)
@@ -94,7 +108,7 @@ def test_torch_compat_install():
 
 
 def test_t5_tensor_map():
-    import sys as _s; mod = _s.modules["flowx_plugin_flux_ops"]
+    import sys as _s; mod = _s.modules["flowx_plugin_server_op"]
     m = mod._T5_TENSOR_MAP
     assert m["attn_q.weight"] == "layer.0.SelfAttention.q.weight"
     assert m["ffn_gate.weight"] == "layer.1.DenseReluDense.wi_0.weight"
@@ -129,27 +143,50 @@ def test_registry_contract():
     for name, (ins, outs) in EXPECTED.items():
         assert specs[name]["inputs"] == ins, f"{name} inputs: {specs[name]['inputs']}"
         assert specs[name]["outputs"] == outs, f"{name} outputs"
-    print("ok: 注册契约（flux.load/encode/sample 端口与类型）")
+    print("ok: 注册契约（flux 家族 9 算子端口与类型）")
 
 
 def test_validation_chain():
+    # flux.encode/flux.sample 函数体内 import diffusers.FluxPipeline / numpy，
+    # 校验链测试只需走到参数校验，补齐最小桩
+    _fake_diffusers.FluxPipeline = type("FluxPipeline", (), {})
+    _pf = types.ModuleType("diffusers.pipelines.flux.pipeline_flux")
+    _pf.calculate_shift = lambda *a, **k: None
+    _pfl = types.ModuleType("diffusers.pipelines.flux")
+    _pfl.pipeline_flux = _pf
+    _p = types.ModuleType("diffusers.pipelines")
+    _p.flux = _pfl
+    sys.modules.setdefault("diffusers.pipelines", _p)
+    sys.modules.setdefault("diffusers.pipelines.flux", _pfl)
+    sys.modules.setdefault("diffusers.pipelines.flux.pipeline_flux", _pf)
+    sys.modules.setdefault("numpy", types.ModuleType("numpy"))
+
     reg = load()
 
-    class FakePipe:
+    class NotDualClip:
         pass
     try:
-        reg.get("flux.encode").fn(FakePipe(), "hi")
-        raise AssertionError("非 FluxPipeline 应拒绝")
+        reg.get("flux.encode").fn(NotDualClip(), "hi")
+        raise AssertionError("非 dual_clip_load 产物应拒绝")
     except ValueError as e:
-        assert "FluxPipeline" in str(e)
+        assert "flux.dual_clip_load" in str(e)
 
-    fake_flux_cls = type("FluxPipeline", (), {})
+    class FakeTransformer:
+        pass
     try:
-        reg.get("flux.sample").fn(fake_flux_cls(), {"foo": 1})
+        reg.get("flux.sample").fn(FakeTransformer(), {"prompt_embeds": 1},
+                                  {"width": 1024})
+        raise AssertionError("非 unet_load 产物应拒绝")
+    except ValueError as e:
+        assert "flux.unet_load" in str(e)
+
+    fake_tx = type("FluxTransformer2DModel", (), {})()
+    try:
+        reg.get("flux.sample").fn(fake_tx, {"foo": 1}, {"width": 1024})
         raise AssertionError("坏 cond 应拒绝")
     except ValueError as e:
         assert "flux.encode" in str(e)
-    print("ok: 校验链（非 FLUX 管道 / 坏 cond 明确报错）")
+    print("ok: 校验链（非 dual-clip / 非 unet 产物 / 坏 cond 明确报错）")
 
 
 if __name__ == "__main__":

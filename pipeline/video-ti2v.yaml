@@ -16,7 +16,7 @@ Nodes:
   Ensure:
     name: 服务健康检查
     config:
-      nodeRef: inference-ensure@1.0.0
+      nodeRef: inference-ensure@1.1.0
       executor: local
       params:
         service_url: "{{ Param.service_url }}"
@@ -25,7 +25,7 @@ Nodes:
   LoadCheckpoint:
     name: 视频模型加载
     config:
-      nodeRef: checkpoint-loader@1.0.0
+      nodeRef: checkpoint-loader@1.3.0
       executor: local
       params:
         service_url: "{{ Ensure.service_url }}"
@@ -34,7 +34,7 @@ Nodes:
   LoadImage:
     name: 加载首帧（可选）
     config:
-      nodeRef: load-image@1.0.0
+      nodeRef: load-image@1.2.0
       executor: local
       params:
         service_url: "{{ Ensure.service_url }}"
@@ -43,7 +43,7 @@ Nodes:
   VideoGen:
     name: 视频生成
     config:
-      nodeRef: video-gen@1.0.0
+      nodeRef: video-gen@1.2.0
       executor: local
       params:
         service_url: "{{ Ensure.service_url }}"
@@ -62,7 +62,7 @@ Nodes:
   SaveVideo:
     name: 保存视频
     config:
-      nodeRef: save-video@1.0.0
+      nodeRef: save-video@1.2.0
       executor: local
       params:
         service_url: "{{ Ensure.service_url }}"

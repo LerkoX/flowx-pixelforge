@@ -116,13 +116,13 @@ def main():
     t0 = time.time()
 
     # ---------- t1 SD1.5 回归 ----------
-    mcv = op("checkpoint.load", ckpt=CKPT)
-    pos = op("clip.encode", clip=mcv["clip"], text=T1_PROMPT)["cond"]
-    neg = op("clip.encode", clip=mcv["clip"], text="")["cond"]
-    lat = op("latent.empty", width=512, height=512, batch_size=1)["latent"]
-    r = op("sample", model=mcv["model"], pos=pos, neg=neg, latent=lat,
+    mcv = op("sd.checkpoint.load", ckpt=CKPT)
+    pos = op("sd.clip.encode", clip=mcv["clip"], text=T1_PROMPT)["cond"]
+    neg = op("sd.clip.encode", clip=mcv["clip"], text="")["cond"]
+    lat = op("sd.latent.empty", width=512, height=512, batch_size=1)["latent"]
+    r = op("sd.sample", model=mcv["model"], pos=pos, neg=neg, latent=lat,
            seed=424242, steps=20, cfg=7.0, sampler_name="euler")
-    png = fetch_image(op("vae.decode", vae=mcv["vae"],
+    png = fetch_image(op("sd.vae.decode", vae=mcv["vae"],
                          latent=r["latent"])["image"])
     save("t1_regression", png)
     sha = hashlib.sha1(png).hexdigest()
@@ -163,12 +163,12 @@ def main():
 
     # ---------- t3 端到端 FaceDetailer ----------
     # 3.1 生成人像（512 小图，人脸必糊——FaceDetailer 的典型场景）
-    p3 = op("clip.encode", clip=mcv["clip"], text=PORTRAIT)["cond"]
-    n3 = op("clip.encode", clip=mcv["clip"], text=NEG)["cond"]
-    lat3 = op("latent.empty", width=512, height=512, batch_size=1)["latent"]
-    r3 = op("sample", model=mcv["model"], pos=p3, neg=n3, latent=lat3,
+    p3 = op("sd.clip.encode", clip=mcv["clip"], text=PORTRAIT)["cond"]
+    n3 = op("sd.clip.encode", clip=mcv["clip"], text=NEG)["cond"]
+    lat3 = op("sd.latent.empty", width=512, height=512, batch_size=1)["latent"]
+    r3 = op("sd.sample", model=mcv["model"], pos=p3, neg=n3, latent=lat3,
             seed=SEED, steps=20, cfg=7.0, sampler_name="euler")
-    orig_id = op("vae.decode", vae=mcv["vae"], latent=r3["latent"])["image"]
+    orig_id = op("sd.vae.decode", vae=mcv["vae"], latent=r3["latent"])["image"]
     orig_im = Image.open(io.BytesIO(fetch_image(orig_id))).convert("RGB")
     save("t3a_portrait_orig", fetch_image(orig_id))
 
@@ -196,13 +196,13 @@ def main():
     up_id = op("image.upscale", image=crop_id, width=up_w, height=up_h,
                method="lanczos")["image"]
     print(f"[accept] t3 crop {cw}x{ch} -> upscale {up_w}x{up_h}", flush=True)
-    lat_fix = op("vae.encode", vae=mcv["vae"], image=up_id)["latent"]
-    p_fix = op("clip.encode", clip=mcv["clip"],
+    lat_fix = op("sd.vae.encode", vae=mcv["vae"], image=up_id)["latent"]
+    p_fix = op("sd.clip.encode", clip=mcv["clip"],
                text=PORTRAIT + ", " + FIX_PROMPT)["cond"]
-    r_fix = op("sample", model=mcv["model"], pos=p_fix, neg=n3,
+    r_fix = op("sd.sample", model=mcv["model"], pos=p_fix, neg=n3,
                latent=lat_fix, seed=SEED + 1, steps=20, cfg=7.0,
                sampler_name="euler", denoise=0.35)
-    fix_id = op("vae.decode", vae=mcv["vae"], latent=r_fix["latent"])["image"]
+    fix_id = op("sd.vae.decode", vae=mcv["vae"], latent=r_fix["latent"])["image"]
     fix_up_im = Image.open(io.BytesIO(fetch_image(fix_id))).convert("RGB")
     save("t3c_face_fixed", fetch_image(fix_id))
     # 缩回 crop 原尺寸（LANCZOS，客户端 PIL 语义）

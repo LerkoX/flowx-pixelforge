@@ -21,7 +21,7 @@ Nodes:
   Ensure:
     name: 服务健康检查
     config:
-      nodeRef: inference-ensure@1.0.0
+      nodeRef: inference-ensure@1.1.0
       params:
         service_url: "{{ Param.service_url }}"
         service_token: "{{ Param.service_token }}"
@@ -29,7 +29,7 @@ Nodes:
   LoadCheckpoint:
     name: Checkpoint加载
     config:
-      nodeRef: checkpoint-loader@1.0.0
+      nodeRef: checkpoint-loader@1.3.0
       params:
         service_url: "{{ Ensure.service_url }}"
         service_token: "{{ Param.service_token }}"
@@ -37,7 +37,7 @@ Nodes:
   LoraLoader:
     name: LoRA加载
     config:
-      nodeRef: lora-loader@1.0.0
+      nodeRef: lora-loader@1.2.0
       params:
         service_url: "{{ Ensure.service_url }}"
         service_token: "{{ Param.service_token }}"
@@ -47,7 +47,7 @@ Nodes:
   EncodePos:
     name: 正向提示词
     config:
-      nodeRef: clip-text-encode@1.0.0
+      nodeRef: clip-text-encode@1.2.0
       params:
         service_url: "{{ Ensure.service_url }}"
         service_token: "{{ Param.service_token }}"
@@ -56,7 +56,7 @@ Nodes:
   EncodeNeg:
     name: 反向提示词
     config:
-      nodeRef: clip-text-encode@1.0.0
+      nodeRef: clip-text-encode@1.2.0
       params:
         service_url: "{{ Ensure.service_url }}"
         service_token: "{{ Param.service_token }}"
@@ -65,7 +65,7 @@ Nodes:
   EmptyLatent:
     name: 空Latent
     config:
-      nodeRef: empty-latent@1.0.0
+      nodeRef: empty-latent@1.1.0
       params:
         service_url: "{{ Ensure.service_url }}"
         service_token: "{{ Param.service_token }}"
@@ -75,7 +75,7 @@ Nodes:
   KSampler:
     name: KSampler采样
     config:
-      nodeRef: ksampler@1.0.0
+      nodeRef: ksampler@1.5.0
       params:
         service_url: "{{ Ensure.service_url }}"
         service_token: "{{ Param.service_token }}"
@@ -91,7 +91,7 @@ Nodes:
   VAEDecode:
     name: VAE解码
     config:
-      nodeRef: vae-decode@1.0.0
+      nodeRef: vae-decode@1.1.0
       params:
         service_url: "{{ Ensure.service_url }}"
         service_token: "{{ Param.service_token }}"
@@ -100,7 +100,7 @@ Nodes:
   SaveImage:
     name: 保存图像
     config:
-      nodeRef: save-image@1.0.0
+      nodeRef: save-image@1.2.0
       params:
         service_url: "{{ Ensure.service_url }}"
         service_token: "{{ Param.service_token }}"

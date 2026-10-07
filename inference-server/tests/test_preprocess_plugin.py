@@ -23,8 +23,9 @@ sys.modules.setdefault("diffusers", _fake_diffusers)
 from app.plugins import check_plugin_source, load_plugin, sha256_of
 from app.registry import Registry
 
-PLUGIN = os.path.join(os.path.dirname(__file__), "..", "plugins",
-                      "preprocess_ops.py")
+PLUGIN = os.path.join(os.path.dirname(__file__), "..", "..", "nodes",
+                     "_common", "server_ops",
+                      "preprocess.py")
 
 EXPECTED = {
     "preprocess.canny": ({"image": "IMAGE", "low_threshold": "INT",
@@ -39,7 +40,7 @@ EXPECTED = {
 def main():
     with open(PLUGIN, "rb") as f:
         content = f.read()
-    err = check_plugin_source("preprocess_ops.py", content)
+    err = check_plugin_source("preprocess.py", content)
     assert err is None, f"check_plugin_source: {err}"
     print(f"ok: check_plugin_source pass (sha256={sha256_of(content)[:12]}...)")
 
@@ -57,7 +58,7 @@ def main():
     # 参数校验逻辑（不触重依赖的分支）：非 IMAGE 入参必须明确报错
     from PIL import Image  # noqa: F401  （本地有 PIL）
     sys.path.insert(0, os.path.join(os.path.dirname(PLUGIN)))
-    import preprocess_ops as po
+    import preprocess as po
     try:
         po.preprocess_canny("not-an-image")
         raise AssertionError("preprocess.canny 应拒绝非 IMAGE")

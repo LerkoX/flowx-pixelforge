@@ -82,7 +82,7 @@ curl http://127.0.0.1:8100/health
 # 期望返回：{"status": "ok", "cuda_available": true, ...}
 ```
 
-首次 `checkpoint.load` 调用时才会把模型载入显存（服务启动本身不加载模型）。
+首次 `sd.checkpoint.load` 调用时才会把模型载入显存（服务启动本身不加载模型）。
 
 ### 2.1 Pascal 显卡（GTX 10xx / Tesla P4/P40/P100，sm_60/61）
 
@@ -117,7 +117,7 @@ docker compose -f docker-compose.yml -f docker-compose.pascal.yml up -d --build
 | `VRAM_LOAD_FACTOR` | `1.25` | 体积估算放大系数（权重之外的 CUDA 上下文/缓冲） |
 | `OFFLOAD_MODE` | `none` | 显存治理档位：`none` 整模型驻留 / `model` 子模块级搬移 / `sequential` 逐层搬移（最省显存、吞吐最低，视频模型用）。旧开关 `ENABLE_CPU_OFFLOAD=1` 仍兼容（等价 `model`） |
 | `QUANTIZATION` | `none` | 权重量化：`fp8` 接口已预留（当前版本识别配置但未实现，加载时告警并按原 dtype 继续） |
-| `INFERENCE_TOKEN` | 空 | **非空则启用 Bearer 鉴权**，公网暴露时强烈建议设置 |
+| `INFERENCE_TOKEN` | 无（必填） | **必填**：算子全面插件化（节点 server_op.py 经 /admin/plugins 自注册），无 token 服务启动即失败；同时作为 Bearer 鉴权令牌 |
 | `OBJECT_TTL_SECONDS` | `3600` | 对象仓库（中间张量）的 TTL |
 | `INPUT_DIR` | `/input` | image.load 算子读取服务端本地图片的目录（compose 默认挂载 `./input`） |
 | `VIDEO_DIR` | `/videos` | VIDEO 对象 mp4 落盘目录（compose 默认挂载 `./videos`），`GET /videos/{id}` 下载 |
@@ -164,7 +164,7 @@ docker compose down
 # 更新代码后重新构建
 docker compose up -d --build
 
-# 新增模型：把文件（或 diffusers 目录）放进 models/ 后无需重启，下次 checkpoint.load 即用
+# 新增模型：把文件（或 diffusers 目录）放进 models/ 后无需重启，下次 sd.checkpoint.load 即用
 # 下载模型（远程 daemon 也适用，走 hf-mirror；只拉 fp16 权重 + 配置）：
 ./scripts/download-model.sh svd    # SVD-XT 1.1 图生视频（~9.6GB）
 ./scripts/download-model.sh Org/some-model
@@ -212,7 +212,7 @@ curl http://127.0.0.1:8100/ops
 # 3. 端到端冒烟：加载模型
 curl -X POST http://127.0.0.1:8100/op \
   -H "Content-Type: application/json" \
-  -d '{"name": "checkpoint.load", "inputs": {"ckpt": "v1-5-pruned-emaonly.safetensors"}}'
+  -d '{"name": "sd.checkpoint.load", "inputs": {"ckpt": "v1-5-pruned-emaonly.safetensors"}}'
 ```
 
 无 GPU 的本地开发环境可跑引擎单元测试：
@@ -255,7 +255,7 @@ running 任务在下一个检查点（图节点间 / 采样每步）生效。
 | `cuda_available: false` | 宿主机 `nvidia-smi` 是否正常 → toolkit 是否安装并 `restart docker` → compose 里 `deploy.resources` 段是否保留 |
 | 启动时报 OOM / CUDA out of memory | 先用 `POST /model/unload {}` 卸载常驻模型；仍不够再 `OFFLOAD_MODE=model`（还不够上 `sequential`）/ 降低 `VRAM_RESERVE_MB`；确认没有其他进程占显存 |
 | 报错 "CUDA out of memory in op '...'：已淘汰全部可淘汰的非在用模型仍不足" | 这是自愈失败后的指引：降分辨率/步数、`offload=model|sequential`、卸载其他模型后重试 |
-| `checkpoint.load` 报文件不存在 | 确认文件名（含扩展名）与 `models/` 内一致；容器内路径是 `/models` |
+| `sd.checkpoint.load` 报文件不存在 | 确认文件名（含扩展名）与 `models/` 内一致；容器内路径是 `/models` |
 | 401 invalid token | `INFERENCE_TOKEN` 设置后，请求头必须是 `Authorization: Bearer <token>`（注意 Bearer 后一个空格） |
 | 构建拉取基础镜像慢 | `pytorch/pytorch` 镜像约 8 GB，可预先 `docker pull`，或配置镜像加速器 |
 | 首次推理很慢 | 属正常：首次调用才加载模型到显存；之后命中常驻缓存 |

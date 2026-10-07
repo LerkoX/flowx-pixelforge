@@ -26,8 +26,9 @@ from app.plugins import check_plugin_source, load_plugin, sha256_of
 from app.registry import Registry
 from app.sniff import list_model_files
 
-PLUGIN = os.path.join(os.path.dirname(__file__), "..", "plugins",
-                      "ipadapter_ops.py")
+PLUGIN = os.path.join(os.path.dirname(__file__), "..", "..", "nodes",
+                     "_common", "server_ops",
+                      "ipadapter.py")
 
 EXPECTED = {
     "clip_vision.load": ({"name": "STRING"}, {"clip_vision": "CLIP_VISION"}),
@@ -47,7 +48,7 @@ class _StubPipe:
 def main():
     with open(PLUGIN, "rb") as f:
         content = f.read()
-    err = check_plugin_source("ipadapter_ops.py", content)
+    err = check_plugin_source("ipadapter.py", content)
     assert err is None, f"check_plugin_source: {err}"
     print(f"ok: check_plugin_source pass (sha256={sha256_of(content)[:12]}...)")
 
@@ -114,7 +115,7 @@ def main():
             print(f"ok: load 拒绝路径穿越: {str(e)[:40]}...")
         # 顶层键校验：monkeypatch _load_state_dict 避开真实权重解析
         import importlib
-        mod = importlib.import_module("flowx_plugin_ipadapter_ops")
+        mod = importlib.import_module("flowx_plugin_ipadapter")
         open(os.path.join(d, "bad.safetensors"), "wb").write(b"x")
         orig = mod._load_state_dict
         mod._load_state_dict = lambda p: {"foo": {}}

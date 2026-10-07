@@ -109,13 +109,13 @@ def main():
     t0 = time.time()
 
     # ---------- t1 回归：默认路径逐字节一致 ----------
-    mcv = op("checkpoint.load", ckpt=CKPT)
-    pos = op("clip.encode", clip=mcv["clip"], text=PROMPT)["cond"]
-    neg = op("clip.encode", clip=mcv["clip"], text="")["cond"]
-    lat = op("latent.empty", width=512, height=512, batch_size=1)["latent"]
-    r = op("sample", model=mcv["model"], pos=pos, neg=neg, latent=lat,
+    mcv = op("sd.checkpoint.load", ckpt=CKPT)
+    pos = op("sd.clip.encode", clip=mcv["clip"], text=PROMPT)["cond"]
+    neg = op("sd.clip.encode", clip=mcv["clip"], text="")["cond"]
+    lat = op("sd.latent.empty", width=512, height=512, batch_size=1)["latent"]
+    r = op("sd.sample", model=mcv["model"], pos=pos, neg=neg, latent=lat,
            seed=SEED, steps=STEPS, cfg=7.0, sampler_name="euler")
-    img_id = op("vae.decode", vae=mcv["vae"], latent=r["latent"])["image"]
+    img_id = op("sd.vae.decode", vae=mcv["vae"], latent=r["latent"])["image"]
     png = fetch_image(img_id)
     save("t1_regression", png)
     sha = hashlib.sha1(png).hexdigest()
@@ -151,17 +151,17 @@ def main():
         failures.append(f"t2: 灰度层次不足（跨度 {spread:.0f}，疑似平坦输出）")
 
     # ---------- t3 端到端：depth 控制采样 ----------
-    cn = op("controlnet.load", name=CN_DEPTH)["control_net"]
-    ctrl = op("controlnet.apply", control_net=cn, image=t2_id,
+    cn = op("sd.controlnet.load", name=CN_DEPTH)["control_net"]
+    ctrl = op("sd.controlnet.apply", control_net=cn, image=t2_id,
               strength=1.0)["control"]
-    pos3 = op("clip.encode", clip=mcv["clip"],
+    pos3 = op("sd.clip.encode", clip=mcv["clip"],
               text="a small wooden cabin in a snowy forest, night, "
                    "warm light in the window, highly detailed")["cond"]
-    lat3 = op("latent.empty", width=512, height=512, batch_size=1)["latent"]
-    r3 = op("sample", model=mcv["model"], pos=pos3, neg=neg, latent=lat3,
+    lat3 = op("sd.latent.empty", width=512, height=512, batch_size=1)["latent"]
+    r3 = op("sd.sample", model=mcv["model"], pos=pos3, neg=neg, latent=lat3,
             seed=777, steps=STEPS, cfg=7.0, sampler_name="euler",
             control=ctrl)
-    img3 = op("vae.decode", vae=mcv["vae"], latent=r3["latent"])["image"]
+    img3 = op("sd.vae.decode", vae=mcv["vae"], latent=r3["latent"])["image"]
     check_img("t3_cabin_depth", fetch_image(img3))
 
     # 回收：CN 常驻显存释放（8GB 卡纪律）

@@ -15,14 +15,16 @@ A2 UPSCALE_MODEL 模型链：
 
 B 插件硬化（事故序列重演）：
 - t4 跨文件重名上传无 force → 409，且运行时 preprocess.canny 签名不变（未被静默劫持）
-- t5 force=true 显式接管 → took_over 生效；再 force 传回 preprocess_ops.py 恢复；
+- t5 force=true 显式接管 → took_over 生效；再 force 传回 preprocess 族文件恢复；
   删除临时文件后归属簿干净
-- t6 遮蔽核心算子（sample）→ 409 owner=core
+- t6 遮蔽既有插件算子（sd.sample）→ 409 owner=sd_sample.py
 - t7 /op 对缺失文件（image.load 不存在）→ 400 而非 500
 
 回归：
 - t8 默认 sample 与 M2 基线逐字节一致（镜像重建后行为不变性证明）
 
+前置：算子已全面插件化，先预热（上传各节点 server_op.py）：
+  python3 scripts/push_plugins.py --base $BASE --token $TOKEN
 运行：BASE=http://5.tcp.cpolar.top:11538 TOKEN=xxx python3 scripts/accept-m6.py
 """
 import hashlib
@@ -140,7 +142,7 @@ def register(registry):
 
 FAKE_CORE_SHADOW = '''
 def register(registry):
-    registry.register("sample", inputs={}, outputs={"latent": "LATENT"},
+    registry.register("sd.sample", inputs={}, outputs={"latent": "LATENT"},
                       description="遮蔽核心（验收用，不应存活）")(lambda: {"latent": None})
 '''
 
@@ -164,33 +166,33 @@ def main():
     t0 = time.time()
 
     # ---------- 公共初采样（两条 hires 路径共用） ----------
-    mcv = op("checkpoint.load", ckpt=CKPT)
-    pos = op("clip.encode", clip=mcv["clip"], text=PROMPT)["cond"]
-    neg = op("clip.encode", clip=mcv["clip"], text="")["cond"]
-    lat = op("latent.empty", width=512, height=512, batch_size=1)["latent"]
-    r1 = op("sample", model=mcv["model"], pos=pos, neg=neg, latent=lat,
+    mcv = op("sd.checkpoint.load", ckpt=CKPT)
+    pos = op("sd.clip.encode", clip=mcv["clip"], text=PROMPT)["cond"]
+    neg = op("sd.clip.encode", clip=mcv["clip"], text="")["cond"]
+    lat = op("sd.latent.empty", width=512, height=512, batch_size=1)["latent"]
+    r1 = op("sd.sample", model=mcv["model"], pos=pos, neg=neg, latent=lat,
             seed=SEED, steps=STEPS, cfg=7.0, sampler_name="euler")
-    img512 = op("vae.decode", vae=mcv["vae"], latent=r1["latent"])["image"]
+    img512 = op("sd.vae.decode", vae=mcv["vae"], latent=r1["latent"])["image"]
     check_img("t0_base_512", fetch_image(img512), expect_size=(512, 512))
 
     # ---------- t0 hires fix latent 路径 ----------
     lat2x = op("latent.upscale", latent=r1["latent"], scale=2.0,
                method="bicubic")["latent"]
-    r2 = op("sample", model=mcv["model"], pos=pos, neg=neg, latent=lat2x,
+    r2 = op("sd.sample", model=mcv["model"], pos=pos, neg=neg, latent=lat2x,
             seed=SEED + 1, steps=STEPS, cfg=7.0, sampler_name="euler",
             denoise=DENOISE)
-    img_lat = op("vae.decode", vae=mcv["vae"], latent=r2["latent"])["image"]
+    img_lat = op("sd.vae.decode", vae=mcv["vae"], latent=r2["latent"])["image"]
     check_img("t0_hires_latent_path", fetch_image(img_lat),
               expect_size=(1024, 1024))
 
     # ---------- t1 hires fix 像素路径 ----------
     img2x = op("image.upscale", image=img512, scale=2.0,
                method="lanczos")["image"]
-    lat_px = op("vae.encode", vae=mcv["vae"], image=img2x)["latent"]
-    r3 = op("sample", model=mcv["model"], pos=pos, neg=neg, latent=lat_px,
+    lat_px = op("sd.vae.encode", vae=mcv["vae"], image=img2x)["latent"]
+    r3 = op("sd.sample", model=mcv["model"], pos=pos, neg=neg, latent=lat_px,
             seed=SEED + 2, steps=STEPS, cfg=7.0, sampler_name="euler",
             denoise=DENOISE)
-    img_px = op("vae.decode", vae=mcv["vae"], latent=r3["latent"])["image"]
+    img_px = op("sd.vae.decode", vae=mcv["vae"], latent=r3["latent"])["image"]
     check_img("t1_hires_pixel_path", fetch_image(img_px),
               expect_size=(1024, 1024))
 
@@ -212,7 +214,7 @@ def main():
         failures.append(f"t4: 期望 409，got {code} {body}")
     else:
         c = body["detail"]["conflicts"]
-        if c != [{"op": "preprocess.canny", "owner": "preprocess_ops.py"}]:
+        if c != [{"op": "preprocess.canny", "owner": "preprocess_canny.py"}]:
             failures.append(f"t4: conflicts 不符 {c}")
     spec = get_op_spec("preprocess.canny")
     if list(spec["inputs"].keys()) != ["image", "low_threshold", "high_threshold"]:
@@ -228,10 +230,10 @@ def main():
     if spec.get("plugin_file") != "zz_accept_fake_canny.py":
         failures.append(f"t5: 归属未转移 {spec.get('plugin_file')}")
     # force 传回真身恢复
-    with open(os.path.join(os.path.dirname(__file__), "..", "plugins",
-                           "preprocess_ops.py"), encoding="utf-8") as f:
+    with open(os.path.join(os.path.dirname(__file__), "..", "..", "nodes",
+                           "_common", "server_ops", "preprocess.py"), encoding="utf-8") as f:
         real_src = f.read()
-    code, body = upload_plugin("preprocess_ops.py", real_src, force=True)
+    code, body = upload_plugin("preprocess_canny.py", real_src, force=True)
     if code != 200 or "preprocess.canny" not in body.get("took_over", []):
         failures.append(f"t5: 恢复接管失败 {code} {body}")
     # 删临时文件（此时归属簿已不属它，不应误摘）
@@ -243,19 +245,19 @@ def main():
     if d.get("unregistered") not in ([], None):
         failures.append(f"t5: 删除临时文件误摘算子 {d}")
     spec = get_op_spec("preprocess.canny")
-    if (spec.get("plugin_file") != "preprocess_ops.py"
+    if (spec.get("plugin_file") != "preprocess_canny.py"
             or list(spec["inputs"].keys()) != ["image", "low_threshold",
                                                "high_threshold"]):
         failures.append(f"t5: 恢复后签名/归属异常 {spec}")
     print("[accept] t5 force 接管→恢复→清理: ok", flush=True)
 
-    # ---------- t6 遮蔽核心算子 → 409 owner=core ----------
+    # ---------- t6 遮蔽既有插件算子 → 409 owner=sd_sample.py ----------
     code, body = upload_plugin("zz_accept_shadow.py", FAKE_CORE_SHADOW)
     if code != 409:
         failures.append(f"t6: 期望 409，got {code} {body}")
-    elif body["detail"]["conflicts"] != [{"op": "sample", "owner": "core"}]:
+    elif body["detail"]["conflicts"] != [{"op": "sd.sample", "owner": "sd_sample.py"}]:
         failures.append(f"t6: conflicts 不符 {body}")
-    print(f"[accept] t6 核心遮蔽拒绝: {'ok' if code == 409 else 'FAIL'}",
+    print(f"[accept] t6 插件算子遮蔽拒绝: {'ok' if code == 409 else 'FAIL'}",
           flush=True)
 
     # ---------- t7 /op FileNotFoundError → 400 ----------

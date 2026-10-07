@@ -123,7 +123,7 @@ def check_img(tag, png, lo=10.0, hi=245.0):
 
 
 def decode(vae, latent, tag, **kw):
-    img_id = op("vae.decode", vae=vae, latent=latent)["image"]
+    img_id = op("sd.vae.decode", vae=vae, latent=latent)["image"]
     return check_img(tag, fetch_image(img_id), **kw)
 
 
@@ -153,14 +153,14 @@ def make_right_half_mask_png(w=512, h=512):
 def main():
     print(f"[accept] base={BASE} ckpt={CKPT} cn={CN_NAME}", flush=True)
 
-    out = op("checkpoint.load", ckpt=CKPT)
+    out = op("sd.checkpoint.load", ckpt=CKPT)
     model, clip, vae = out["model"], out["clip"], out["vae"]
-    pos = op("clip.encode", clip=clip, text=PROMPT)["cond"]
-    neg = op("clip.encode", clip=clip, text="")["cond"]
-    latent0 = op("latent.empty", width=512, height=512, batch_size=1)["latent"]
+    pos = op("sd.clip.encode", clip=clip, text=PROMPT)["cond"]
+    neg = op("sd.clip.encode", clip=clip, text="")["cond"]
+    latent0 = op("sd.latent.empty", width=512, height=512, batch_size=1)["latent"]
 
     # t1 回归：默认参数 vs M2 基线逐字节一致
-    lat_full = op("sample", model=model, pos=pos, neg=neg, latent=latent0,
+    lat_full = op("sd.sample", model=model, pos=pos, neg=neg, latent=latent0,
                   seed=SEED, steps=STEPS, cfg=7.0)["latent"]
     sha_full, _, _ = decode(vae, lat_full, "t1_default_euler")
     if os.path.isfile(BASELINE_T1):
@@ -175,30 +175,30 @@ def main():
 
     # t2 controlnet 加载
     t0 = time.time()
-    control_net = op("controlnet.load", name=CN_NAME)["control_net"]
+    control_net = op("sd.controlnet.load", name=CN_NAME)["control_net"]
     print(f"[accept] t2 PASS: controlnet.load 成功 "
           f"（{time.time()-t0:.1f}s，含冷加载）", flush=True)
 
     # hint：t1 出图的边缘线稿（上传 /images 登记为 IMAGE 对象）
-    base_png = fetch_image(op("vae.decode", vae=vae, latent=lat_full)["image"])
+    base_png = fetch_image(op("sd.vae.decode", vae=vae, latent=lat_full)["image"])
     hint_png = make_hint_png(base_png)
     save("t3_hint_edges", hint_png)
     hint_id = upload_image(hint_png)
 
     # t3 canny 控制：换 prompt（cat→dog）构图应对齐线稿
-    pos_dog = op("clip.encode", clip=clip,
+    pos_dog = op("sd.clip.encode", clip=clip,
                  text="a dog sitting on a windowsill, warm sunset light, "
                       "high quality")["cond"]
-    control = op("controlnet.apply", control_net=control_net, image=hint_id,
+    control = op("sd.controlnet.apply", control_net=control_net, image=hint_id,
                  strength=1.0)["control"]
-    lat = op("sample", model=model, pos=pos_dog, neg=neg, latent=latent0,
+    lat = op("sd.sample", model=model, pos=pos_dog, neg=neg, latent=latent0,
              seed=SEED, steps=STEPS, cfg=7.0, control=control)["latent"]
     decode(vae, lat, "t3_canny_control_dog")
 
     # t4 strength=0 ≡ t1 逐字节一致（零强度注入回归）
-    control0 = op("controlnet.apply", control_net=control_net, image=hint_id,
+    control0 = op("sd.controlnet.apply", control_net=control_net, image=hint_id,
                   strength=0.0)["control"]
-    lat = op("sample", model=model, pos=pos, neg=neg, latent=latent0,
+    lat = op("sd.sample", model=model, pos=pos, neg=neg, latent=latent0,
              seed=SEED, steps=STEPS, cfg=7.0, control=control0)["latent"]
     sha0, _, _ = decode(vae, lat, "t4_strength_zero")
     if sha0 == sha_full:
@@ -208,10 +208,10 @@ def main():
                         f"{sha0[:12]} != {sha_full[:12]}")
 
     # t5a 空步窗口（round 后 lo>=hi）≡ t1 逐字节一致
-    control_win = op("controlnet.apply", control_net=control_net, image=hint_id,
+    control_win = op("sd.controlnet.apply", control_net=control_net, image=hint_id,
                      strength=1.0, start_percent=0.999,
                      end_percent=1.0)["control"]
-    lat = op("sample", model=model, pos=pos, neg=neg, latent=latent0,
+    lat = op("sd.sample", model=model, pos=pos, neg=neg, latent=latent0,
              seed=SEED, steps=STEPS, cfg=7.0, control=control_win)["latent"]
     sha_win, _, _ = decode(vae, lat, "t5a_empty_window")
     if sha_win == sha_full:
@@ -221,33 +221,33 @@ def main():
                         f"{sha_win[:12]} != {sha_full[:12]}")
 
     # t5b 半程窗口 [0.5,1.0)：出图正常（窗口语义存图人工核对）
-    control_half = op("controlnet.apply", control_net=control_net,
+    control_half = op("sd.controlnet.apply", control_net=control_net,
                       image=hint_id, strength=1.0, start_percent=0.5,
                       end_percent=1.0)["control"]
-    lat = op("sample", model=model, pos=pos_dog, neg=neg, latent=latent0,
+    lat = op("sd.sample", model=model, pos=pos_dog, neg=neg, latent=latent0,
              seed=SEED, steps=STEPS, cfg=7.0, control=control_half)["latent"]
     decode(vae, lat, "t5b_half_window_dog")
 
     # t6 cond.set_area：左猫右狗分区构图
-    ca = op("clip.encode", clip=clip, text="a cat")["cond"]
-    cb = op("clip.encode", clip=clip, text="a dog")["cond"]
+    ca = op("sd.clip.encode", clip=clip, text="a cat")["cond"]
+    cb = op("sd.clip.encode", clip=clip, text="a dog")["cond"]
     seg_a = op("cond.set_area", cond=ca, x=0, y=0, width=256, height=512,
                strength=1.0)["cond"]
     seg_b = op("cond.set_area", cond=cb, x=256, y=0, width=256, height=512,
                strength=1.0)["cond"]
     pos_area = op("cond.combine", cond_a=seg_a, cond_b=seg_b)["cond"]
-    lat = op("sample", model=model, pos=pos_area, neg=neg, latent=latent0,
+    lat = op("sd.sample", model=model, pos=pos_area, neg=neg, latent=latent0,
              seed=SEED, steps=STEPS, cfg=7.0)["latent"]
     decode(vae, lat, "t6_set_area_cat_dog")
 
     # t7 latent.set_noise_mask：原图右半重绘成狗（inpaint）
-    lat_orig = op("vae.encode", vae=vae,
-                      image=op("vae.decode", vae=vae,
+    lat_orig = op("sd.vae.encode", vae=vae,
+                      image=op("sd.vae.decode", vae=vae,
                                latent=lat_full)["image"])["latent"]
     mask_id = upload_image(make_right_half_mask_png())
     lat_masked = op("latent.set_noise_mask", latent=lat_orig,
                     mask=mask_id)["latent"]
-    lat = op("sample", model=model, pos=pos_dog, neg=neg, latent=lat_masked,
+    lat = op("sd.sample", model=model, pos=pos_dog, neg=neg, latent=lat_masked,
              seed=777, steps=STEPS, cfg=7.0, denoise=0.75)["latent"]
     decode(vae, lat, "t7_noise_mask_inpaint")
 

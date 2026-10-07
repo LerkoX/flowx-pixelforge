@@ -14,7 +14,7 @@ Nodes:
   Ensure:
     name: 服务健康检查
     config:
-      nodeRef: inference-ensure@1.0.0
+      nodeRef: inference-ensure@1.1.0
       executor: local
       params:
         service_url: "{{ Param.service_url }}"
@@ -23,7 +23,7 @@ Nodes:
   MotionLoad:
     name: Motion组合
     config:
-      nodeRef: motion-loader@1.0.0
+      nodeRef: motion-loader@1.1.0
       executor: local
       params:
         service_url: "{{ Ensure.service_url }}"
@@ -33,7 +33,7 @@ Nodes:
   VideoGen:
     name: 视频生成
     config:
-      nodeRef: video-gen@1.1.0
+      nodeRef: video-gen@1.2.0
       executor: local
       params:
         service_url: "{{ Ensure.service_url }}"
@@ -52,7 +52,7 @@ Nodes:
   SaveVideo:
     name: 保存视频
     config:
-      nodeRef: save-video@1.1.0
+      nodeRef: save-video@1.2.0
       executor: local
       params:
         service_url: "{{ Ensure.service_url }}"

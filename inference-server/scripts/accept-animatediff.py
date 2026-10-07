@@ -45,7 +45,7 @@ def main():
     print(f"[accept-t2v] base={BASE} ckpt={ckpt} motion={motion}", flush=True)
 
     t0 = time.time()
-    ad = op("motion.load", ckpt=ckpt, motion=motion)
+    ad = op("sd.motion.load", ckpt=ckpt, motion=motion)
     print(f"[accept-t2v] motion composed ({time.time()-t0:.0f}s) -> {ad['model']}",
           flush=True)
 

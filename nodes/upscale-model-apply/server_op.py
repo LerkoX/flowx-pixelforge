@@ -8,11 +8,12 @@
   fp16 约 1.5~2GB 可过；更大输入请开 tile）
 
 与 hires fix 的分工：本算子是**像素空间模型放大**（真实细节重建，4x 直出）；
-hires fix 走 image.upscale/latent.upscale + sample(denoise<1) 重采样精修
+hires fix 走 image.upscale/latent.upscale + sd.sample(denoise<1) 重采样精修
 （构图锁定下的细节再生）。可串联：先模型放大保底，再低 denoise 精修。
 
-部署：本文件放 PLUGINS_DIR（默认 /models/plugins.d，bind-mount 持久化）重启自动
-扫描注册，或经 POST /admin/plugins 热上传。使用：经 inference-op 通用节点调用。
+分发：本文件是节点共享算子族（单一事实源），由 nodes/_tools/sync-common.py
+分发为各成员节点的 server_op.py，节点运行时经 ensure_plugin 自注册到推理服务
+（POST /admin/plugins，hash 幂等）。使用：对应专属节点或 inference-op 通用节点。
 
 依赖：spandrel（烘焙进镜像）；torch/numpy/spandrel 一律函数内懒加载
 （本地无 GPU 契约测试可导入）。

@@ -22,8 +22,9 @@ sys.modules.setdefault("diffusers", _fake_diffusers)
 from app.plugins import check_plugin_source, load_plugin, sha256_of
 from app.registry import Registry
 
-PLUGIN = os.path.join(os.path.dirname(__file__), "..", "plugins",
-                      "cond_latent_ops.py")
+PLUGIN = os.path.join(os.path.dirname(__file__), "..", "..", "nodes",
+                     "_common", "server_ops",
+                      "cond_latent.py")
 
 EXPECTED = {
     "cond.combine": ({"cond_a": "COND", "cond_b": "COND"}, {"cond": "COND"}),
@@ -45,7 +46,7 @@ def main():
     with open(PLUGIN, "rb") as f:
         content = f.read()
     # 上传前置校验契约（与 /admin/plugins 同源检查）
-    err = check_plugin_source("cond_latent_ops.py", content)
+    err = check_plugin_source("cond_latent.py", content)
     assert err is None, f"check_plugin_source: {err}"
     print(f"ok: check_plugin_source pass (sha256={sha256_of(content)[:12]}...)")
 

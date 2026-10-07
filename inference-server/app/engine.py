@@ -3,8 +3,8 @@
 graph 格式（对齐 ComfyUI /prompt）：
 {
   "nodes": {
-    "1": {"op": "checkpoint.load", "inputs": {"ckpt": "v1-5"}},
-    "2": {"op": "clip.encode", "inputs": {"clip": ["1", "clip"], "text": "a cat"}}
+    "1": {"op": "sd.checkpoint.load", "inputs": {"ckpt": "v1-5"}},
+    "2": {"op": "sd.clip.encode", "inputs": {"clip": ["1", "clip"], "text": "a cat"}}
   }
 }
 对象端口引用：["节点ID", "输出端口"]；字面量直接写值。

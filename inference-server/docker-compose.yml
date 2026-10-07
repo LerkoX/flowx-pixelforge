@@ -11,7 +11,7 @@ services:
       VIDEO_DIR: /videos              # VIDEO 对象 mp4 落盘目录（GET /videos/{id} 下载）
       MAX_RESIDENT_MODELS: "2"        # 显存常驻模型上限，超出按 LRU 淘汰
       OFFLOAD_MODE: "none"            # 显存治理：none / model（子模块搬移）/ sequential（逐层搬移，视频模型用）
-      INFERENCE_TOKEN: ""             # 非空则启用 Bearer 鉴权
+      INFERENCE_TOKEN: "change-me"     # 必填（算子全面插件化，无 token 启动即失败）；改强随机值
     volumes:
       - ./models:/models              # 把 safetensors/ckpt 模型文件放到 ./models
       - ./loras:/loras                # LoRA 文件放到 ./loras

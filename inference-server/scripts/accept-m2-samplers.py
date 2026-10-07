@@ -86,10 +86,10 @@ def sample_and_decode(model, vae, pos, neg, latent0, tag, sampler, scheduler,
     """一轮 sample+decode，返回 (png_bytes, mean)；失败记 failures 返回 None。"""
     label = f"{sampler}+{scheduler}" if scheduler else sampler
     t0 = time.time()
-    lat = op("sample", model=model, pos=pos, neg=neg, latent=latent0,
+    lat = op("sd.sample", model=model, pos=pos, neg=neg, latent=latent0,
              seed=SEED, steps=STEPS, cfg=7.0, sampler_name=sampler,
              scheduler=scheduler or "normal", denoise=1.0)["latent"]
-    img_id = op("vae.decode", vae=vae, latent=lat)["image"]
+    img_id = op("sd.vae.decode", vae=vae, latent=lat)["image"]
     png = fetch_image(img_id)
     from PIL import Image, ImageStat
     im = Image.open(io.BytesIO(png)).convert("L")
@@ -110,12 +110,12 @@ def sample_and_decode(model, vae, pos, neg, latent0, tag, sampler, scheduler,
 def main():
     print(f"[accept] base={BASE} ckpt={CKPT} steps={STEPS} seed={SEED}", flush=True)
 
-    out = op("checkpoint.load", ckpt=CKPT)
+    out = op("sd.checkpoint.load", ckpt=CKPT)
     model, clip, vae = out["model"], out["clip"], out["vae"]
     print(f"[accept] checkpoint loaded: model={model}", flush=True)
-    pos = op("clip.encode", clip=clip, text=PROMPT)["cond"]
-    neg = op("clip.encode", clip=clip, text="")["cond"]
-    latent0 = op("latent.empty", width=512, height=512, batch_size=1)["latent"]
+    pos = op("sd.clip.encode", clip=clip, text=PROMPT)["cond"]
+    neg = op("sd.clip.encode", clip=clip, text="")["cond"]
+    latent0 = op("sd.latent.empty", width=512, height=512, batch_size=1)["latent"]
 
     # 1. 确定性对照：旧一体名 vs 新写法，同 seed 必须逐字节一致
     png_old, _ = sample_and_decode(model, vae, pos, neg, latent0,
@@ -135,7 +135,7 @@ def main():
         sample_and_decode(model, vae, pos, neg, latent0, f"t2{i}", s, sc)
 
     # 3. 非法组合必须明确报错
-    _, err = run_job("sample", model=model, pos=pos, neg=neg, latent=latent0,
+    _, err = run_job("sd.sample", model=model, pos=pos, neg=neg, latent=latent0,
                      seed=SEED, steps=4, cfg=7.0, sampler_name="euler_a",
                      scheduler="karras", denoise=1.0)
     if err and "euler_a" in err and "karras" in err:
