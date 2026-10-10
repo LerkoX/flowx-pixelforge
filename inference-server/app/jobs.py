@@ -12,15 +12,17 @@ import time
 import uuid
 
 from .execution import JobCancelled, bind, unbind
+from . import lease as _lease
 
 MAX_RETAINED = 200  # 已完成任务保留上限
 
 
 class Job:
-    def __init__(self, kind, payload):
+    def __init__(self, kind, payload, lease=None):
         self.id = uuid.uuid4().hex
         self.kind = kind            # "graph" | "op"
         self.payload = payload
+        self.lease = lease          # 执行租约（§43.2，X-FlowX-Lease 头；可空）
         self.status = "pending"     # pending/running/done/failed/cancelled
         self.cancel_event = threading.Event()
         self.progress = {"current": 0, "total": 0}
@@ -41,6 +43,8 @@ class Job:
              "created_at": self.created_at,
              "started_at": self.started_at,
              "finished_at": self.finished_at}
+        if self.lease:
+            v["lease"] = self.lease
         if self.status == "done":
             v["result"] = self.result
         if self.error is not None:
@@ -61,8 +65,8 @@ class JobManager:
         threading.Thread(target=self._worker, daemon=True,
                          name="job-worker").start()
 
-    def submit(self, kind, payload) -> str:
-        job = Job(kind, payload)
+    def submit(self, kind, payload, lease=None) -> str:
+        job = Job(kind, payload, lease=lease)
         with self._lock:
             self._jobs[job.id] = job
         self._queue.put(job)
@@ -108,6 +112,7 @@ class JobManager:
             job.status = "running"
             job.started_at = time.time()
             bind(job)
+            _lease.bind(job.lease)
             try:
                 job.result = self._run(job.kind, job.payload)
                 job.status = "done"
@@ -118,6 +123,7 @@ class JobManager:
                 job.status = "failed"
                 job.error = str(e)
             finally:
+                _lease.unbind()
                 unbind()
                 job.finished_at = time.time()
                 self._evict()

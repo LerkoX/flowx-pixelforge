@@ -16,7 +16,7 @@ import time
 import torch
 import diffusers
 
-from . import offload, ops, sniff, vram
+from . import lease, offload, ops, sniff, vram
 
 MODELS_DIR = os.environ.get("MODELS_DIR", "/models")
 LORAS_DIR = os.environ.get("LORAS_DIR", "/loras")
@@ -91,6 +91,7 @@ class ModelManager:
         self._sizes = {}     # pipe_key -> 估算显存占用（字节，用于预算式淘汰与诊断）
         self._estimate_cache = {}  # (path, dtype) -> 估算字节数
         self._pins = set()   # 执行中在用的 key（淘汰跳过；引擎算子执行期间 pin）
+        self.leases = lease.LeaseBook()  # 执行租约 → 持有 keys（dev-plan §43.2）
         self._lock = threading.Lock()
         # 淘汰回调 fn(pipe)：装配层注入，用于断开外部引用
         # （如 ObjectStore 中 model/clip/vae 视图持有的管道本体）。
@@ -120,6 +121,12 @@ class ModelManager:
                 if d is p:
                     out.add(k)
         return out
+
+    def _attribute(self, key):
+        """把常驻条目归入当前租约（dev-plan §43.2；无租约调用为零成本 no-op）。"""
+        lid = lease.current()
+        if lid:
+            self.leases.touch(lid, [key])
 
     def resolve(self, name: str):
         """按名称在 MODELS_DIR 中定位模型：diffusers 目录 或 safetensors/ckpt 文件
@@ -248,6 +255,7 @@ class ModelManager:
         with self._lock:
             if key in self._pipes:
                 self._last_used[key] = time.time()
+                self._attribute(key)
                 return key, False
             est = self.estimate(path, dt)
             self._evict_if_needed(est)
@@ -270,6 +278,7 @@ class ModelManager:
             self._last_used[key] = time.time()
             print(f"[model-manager] loaded '{key}' ({cls_name}) in {time.time()-t0:.1f}s",
                   flush=True)
+            self._attribute(key)
             return key, True
 
     def load_vae(self, name: str, dtype="auto"):
@@ -284,6 +293,7 @@ class ModelManager:
         with self._lock:
             if key in self._pipes:
                 self._last_used[key] = time.time()
+                self._attribute(key)
                 return key, False
             kind, loader = sniff.sniff_component(path)
             if kind != "vae":
@@ -305,6 +315,7 @@ class ModelManager:
             self._last_used[key] = time.time()
             print(f"[model-manager] loaded vae '{key}' in {time.time()-t0:.1f}s",
                   flush=True)
+            self._attribute(key)
             return key, True
 
     def load_controlnet(self, name: str, dtype="auto"):
@@ -319,6 +330,7 @@ class ModelManager:
         with self._lock:
             if key in self._pipes:
                 self._last_used[key] = time.time()
+                self._attribute(key)
                 return key, False
             kind, loader = sniff.sniff_component(path)
             if kind != "controlnet":
@@ -341,11 +353,13 @@ class ModelManager:
             self._last_used[key] = time.time()
             print(f"[model-manager] loaded controlnet '{key}' "
                   f"in {time.time()-t0:.1f}s", flush=True)
+            self._attribute(key)
             return key, True
 
     def get(self, name: str):
         if name in self._pipes:  # 组合键（base+motion:x）不是文件路径，命中缓存直接返回
             self._last_used[name] = time.time()
+            self._attribute(name)
             return self._pipes[name]
         key, _ = self.load(name)
         self._last_used[key] = time.time()
@@ -374,19 +388,27 @@ class ModelManager:
         raise FileNotFoundError(
             f"motion adapter '{name}' not found in {mdir}; available: {available or '(empty)'}")
 
-    def load_motion(self, base_key: str, motion: str):
+    def load_motion(self, base_key: str, motion: str,
+                    dtype="auto", offload="auto"):
         """SD1.x checkpoint + MotionAdapter 组合 → AnimateDiffPipeline。
         组合管以独立缓存键 '{base}+motion:{motion}' 常驻，参与同一 LRU。
-        返回 (key, newly_loaded)。
+        dtype/offload 为性能旋钮（auto 继承进程级环境变量/历史默认 fp16，
+        语义与 load() 一致）；任一显式指定则缓存键扩展 '|dtype=..|offload=..'，
+        同模型不同旋钮 = 独立常驻条目（同一 LRU）。返回 (key, newly_loaded)。
 
         注意：不复用常驻基础管的组件——sequential offload 下基础管权重在 meta
         设备上，UNetMotionModel.from_unet2d 复制会报 'Cannot copy out of meta
         tensor'；且两个管道的 offload 钩子不能挂同一组件。故从磁盘全新实例化
         CPU 管道再组合（代价 ~1-2 分钟加载）。"""
+        dt = _resolve_dtype(dtype)
+        om = _resolve_offload(offload)
         key = f"{base_key}+motion:{motion}"
+        if dtype not in (None, "", "auto") or offload not in (None, "", "auto"):
+            key = f"{key}|dtype={dt}|offload={om}"
         with self._lock:
             if key in self._pipes:
                 self._last_used[key] = time.time()
+                self._attribute(key)
                 return key, False
             path, _ = self.resolve(base_key)
             loader, cls_name = sniff.sniff_arch(path)
@@ -396,22 +418,25 @@ class ModelManager:
                     f"AnimateDiff v1.5 系运动模块不兼容其他架构")
             mpath = self.resolve_motion(motion)
             # 组合管体积 ≈ 底模 + 运动模块（连同旧底模一起算，避免"底模+组合管"双份）
-            est = self.estimate(path, "fp16") + self.estimate(mpath, "fp16")
+            est = self.estimate(path, dt) + self.estimate(mpath, dt)
             self._evict_if_needed(est)  # 组合前腾地方（显存预算 + 条目上限）
             gc.collect()
             torch.cuda.empty_cache()
             t0 = time.time()
             from diffusers import AnimateDiffPipeline, MotionAdapter
-            base = self._instantiate(path, loader, cls_name)  # CPU 实例
+            base = self._instantiate(path, loader, cls_name,
+                                     dtype=_DTYPES[dt])  # CPU 实例
             if os.path.isdir(mpath):
                 try:
                     adapter = MotionAdapter.from_pretrained(
-                        mpath, variant="fp16", torch_dtype=torch.float16)
+                        mpath, variant="fp16", torch_dtype=_DTYPES[dt])
                 except Exception as e:
                     print(f"[model-manager] motion fp16 variant 不可用（{e}），回退默认权重", flush=True)
-                    adapter = MotionAdapter.from_pretrained(mpath, torch_dtype=torch.float16)
+                    adapter = MotionAdapter.from_pretrained(
+                        mpath, torch_dtype=_DTYPES[dt])
             else:
-                adapter = MotionAdapter.from_single_file(mpath, torch_dtype=torch.float16)
+                adapter = MotionAdapter.from_single_file(
+                    mpath, torch_dtype=_DTYPES[dt])
             # AnimateDiffPipeline 无 from_single_file（0.30.3），但构造函数接受普通
             # UNet2DConditionModel 并自动 UNetMotionModel.from_unet2d 转换（复制 UNet 权重 ~0.9GB）
             pipe = AnimateDiffPipeline(
@@ -444,7 +469,7 @@ class ModelManager:
                 pipe.vae.decode = _decode_fp32
                 print("[model-manager] composed vae -> fp32 (VAE_FP32=1, 防黑图)",
                       flush=True)
-            pipe = self._apply_offload(pipe)
+            pipe = self._apply_offload(pipe, mode=om)
             pipe.set_progress_bar_config(disable=True)
             self._pipes[key] = pipe
             self._archs[key] = "AnimateDiffPipeline"
@@ -452,6 +477,7 @@ class ModelManager:
             self._last_used[key] = time.time()
             print(f"[model-manager] composed '{key}' (AnimateDiffPipeline) "
                   f"in {time.time()-t0:.1f}s", flush=True)
+            self._attribute(key)
             return key, True
 
     def arch_of(self, key: str) -> str:
@@ -528,10 +554,14 @@ class ModelManager:
         return sum(int(self._sizes.get(k, 0)) for k in self._pipes)
 
     def pin(self, *keys):
-        """标记 key 为"执行中在用"：淘汰跳过（引擎在算子执行期间调用）。"""
-        for k in keys:
-            if k:
-                self._pins.add(k)
+        """标记 key 为"执行中在用"：淘汰跳过（引擎在算子执行期间调用）。
+        同时归入当前租约名下（租约保护的是"执行用到的模型"，dev-plan §43.2）。"""
+        ks = [k for k in keys if k]
+        for k in ks:
+            self._pins.add(k)
+        lid = lease.current()
+        if lid and ks:
+            self.leases.touch(lid, ks)
 
     def unpin(self, *keys):
         for k in keys:
@@ -547,6 +577,7 @@ class ModelManager:
         self._archs.pop(victim, None)
         self._adapters.pop(victim, None)
         self._pins.discard(victim)
+        self.leases.forget_keys([victim])
         print(f"[model-manager] evicting '{victim}' (LRU, ~{size / 1024**2:.0f}MB)", flush=True)
         # 先断开外部引用（ObjectStore 中的 model/clip/vae 视图等）：
         # 不断引用直接 GC 收不掉；引用计数为 0 但组件/钩子互相引用形成
@@ -561,6 +592,69 @@ class ModelManager:
         torch.cuda.empty_cache()
         return True
 
+    def _evict_pass(self, need, free):
+        """单轮淘汰：pin（执行期 + 对象仓库引用 + 其它活跃租约持有）跳过，
+        其余交 app.vram.plan_eviction 决策并执行。可重复调用（幂等）。"""
+        pinned = set(self._pins)
+        if self.extra_pinned is not None:
+            try:
+                pinned |= set(self.extra_pinned() or ())
+            except Exception:
+                pass  # 回调故障不阻断加载（退回纯执行期 pin 语义）
+        # 其它活跃租约持有的条目视同 pin（并发执行排队而非互踩，§43.2）；
+        # 本租约自己的条目对自己可淘汰（同流水线内换模型不受影响）
+        pinned |= self.leases.keys_of_others(lease.current())
+        plan = vram.plan_eviction(
+            [(k, self._sizes.get(k, 0), self._last_used.get(k, 0)) for k in self._pipes],
+            free_bytes=free or 0,
+            need_bytes=need if free is not None else 0,
+            reserve_bytes=VRAM_RESERVE_MB * 1024**2 if free is not None else 0,
+            max_resident=MAX_RESIDENT,
+            pinned=pinned)
+        for victim in plan:
+            self._do_evict(victim)
+
+    def _wait_for_leases(self, need, need_total):
+        """租约排队（§43.2 决策 2）：余量不足且可淘汰条目被其它活跃租约占着
+        时，阻塞等待（LEASE_WAIT_TIMEOUT）——周期清扫过期租约并重做淘汰
+        （对端流水线 model-unload 或租约 TTL 到期都会在本循环内被接住）；
+        超时抛带可执行指引的 RuntimeError。
+        无租约可等（纯体积不足）时直接返回，走既有 WARNING 路径。
+        调用纪律：必须在 self._lock 持锁状态下调用（所有 load 路径均如此）——
+        睡眠前会临时释放该锁（真机复现的事故）：对端"释放显存"走的是
+        model/unload → models.unload → 同一把 self._lock——持锁睡眠会把
+        解锁唯一的生路堵死（A 的 unload 被 B 的等待锁挡到 B 超时才放行，
+        两边全输）。锁外睡眠期间 _pipes 可能被改动，醒后所有判断重新做。"""
+        lid = lease.current()
+        deadline = time.time() + lease.LEASE_WAIT_TIMEOUT
+        announced = False
+        while True:
+            others = self.leases.keys_of_others(lid) & set(self._pipes)
+            if not others:
+                return
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                holders = self.leases.leases_holding(others, exclude=lid)
+                raise RuntimeError(
+                    lease.wait_help(holders, lease.LEASE_WAIT_TIMEOUT))
+            if not announced:
+                print(f"[model-manager] 等待其它执行租约释放显存 "
+                      f"（占用：{sorted(others)}，"
+                      f"timeout={lease.LEASE_WAIT_TIMEOUT:.0f}s）", flush=True)
+                announced = True
+            self._lock.release()
+            try:
+                time.sleep(min(2.0, max(remaining, 0.1)))
+            finally:
+                self._lock.acquire()
+            expired = self.leases.sweep()
+            if expired:
+                print(f"[model-manager] 租约 TTL 过期释放：{expired}", flush=True)
+            free = self._free_bytes()
+            if free is not None and free >= need_total:
+                return
+            self._evict_pass(need, free)  # 过期/卸载后新可汰条目补汰
+
     def _evict_if_needed(self, need_bytes=0):
         """加载前腾地方：条目数上限 + 显存预算（app.vram.plan_eviction 决策）。
 
@@ -571,28 +665,19 @@ class ModelManager:
             return
         need = int(need_bytes * VRAM_LOAD_FACTOR) if need_bytes else 0
         free = self._free_bytes() if (VRAM_BUDGET and need) else None
-        pinned = set(self._pins)
-        if self.extra_pinned is not None:
-            try:
-                pinned |= set(self.extra_pinned() or ())
-            except Exception:
-                pass  # 回调故障不阻断加载（退回纯执行期 pin 语义）
-        plan = vram.plan_eviction(
-            [(k, self._sizes.get(k, 0), self._last_used.get(k, 0)) for k in self._pipes],
-            free_bytes=free or 0,
-            need_bytes=need if free is not None else 0,
-            reserve_bytes=VRAM_RESERVE_MB * 1024**2 if free is not None else 0,
-            max_resident=MAX_RESIDENT,
-            pinned=pinned)
-        for victim in plan:
-            self._do_evict(victim)
-        if free is not None:
+        self._evict_pass(need, free)
+        if free is None:
+            return
+        need_total = need + VRAM_RESERVE_MB * 1024**2
+        after = self._free_bytes()
+        if after is not None and after < need_total:
+            # 余量仍不足：若被其它活跃租约占用则排队等待（可能抛超时）
+            self._wait_for_leases(need, need_total)
             after = self._free_bytes()
-            need_total = need + VRAM_RESERVE_MB * 1024**2
-            if after is not None and after < need_total:
-                print(f"[model-manager] WARNING: 余量仍不足（free={after / 1024**2:.0f}MB "
-                      f"< need+reserve={need_total / 1024**2:.0f}MB）："
-                      f"可淘汰条目已用尽或体积未知（pin={sorted(self._pins)}）", flush=True)
+        if after is not None and after < need_total:
+            print(f"[model-manager] WARNING: 余量仍不足（free={after / 1024**2:.0f}MB "
+                  f"< need+reserve={need_total / 1024**2:.0f}MB）："
+                  f"可淘汰条目已用尽或体积未知（pin={sorted(self._pins)}）", flush=True)
 
     # ---------- 显式卸载（dev-plan §21.3 任务 2） ----------
 
@@ -634,27 +719,33 @@ class ModelManager:
     def unload(self, target) -> list:
         """显式卸载：target 为空/all/* = 全部；否则按 find_keys 匹配。
         走与其他加载完全一致的淘汰路径（断对象仓库视图 → gc → empty_cache）。
+        跳过：执行中 pin 的条目 + 其它活跃租约持有的条目（本租约可卸自己的）。
         返回实际卸载的 key 列表。"""
         with self._lock:
             if str(target or "").strip().lower() in ("", "all", "*"):
                 keys = list(self._pipes.keys())
             else:
                 keys = self.find_keys(target)
-            # 执行中在用（pin）的条目不动：卸载正在被别的 job 使用的模型＝抽走它脚下的地板
-            busy = [k for k in keys if k in self._pins]
+            # 执行中在用（pin）或其它租约持有的条目不动：
+            # 卸载正在被别的 job/流水线使用的模型＝抽走它脚下的地板
+            others = self.leases.keys_of_others(lease.current())
+            busy = [k for k in keys if k in self._pins or k in others]
             if busy:
-                print(f"[model-manager] skip in-use (pinned): {busy}", flush=True)
-            done = [k for k in keys if k not in self._pins and self._do_evict(k)]
+                print(f"[model-manager] skip in-use (pinned/leased): {busy}", flush=True)
+            done = [k for k in keys if k not in self._pins and k not in others
+                    and self._do_evict(k)]
             if done:
                 print(f"[model-manager] unloaded {done}；resident={self.resident()}",
                       flush=True)
             return done
 
     def evict_idle(self, limit=1) -> int:
-        """淘汰至多 limit 个**非在用**（未 pin）的最久未用条目；返回实际个数。
-        OOM 自愈用（dev-plan §21.3 任务 3）：绝不动 pin 住的模型。"""
+        """淘汰至多 limit 个**非在用**（未 pin、未被其它租约持有）的最久未用条目；
+        返回实际个数。OOM 自愈用（dev-plan §21.3 任务 3）：绝不动 pin 住的模型，
+        也不动其它执行租约的模型（§43.2）；本租约自己的闲置条目可汰。"""
         with self._lock:
-            idle = sorted((k for k in self._pipes if k not in self._pins),
+            protected = set(self._pins) | self.leases.keys_of_others(lease.current())
+            idle = sorted((k for k in self._pipes if k not in protected),
                           key=lambda k: self._last_used.get(k, 0))
             done = 0
             for key in idle[:max(0, int(limit))]:

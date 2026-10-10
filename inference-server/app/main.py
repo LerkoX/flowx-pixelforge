@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, Response
 from PIL import Image
 from pydantic import BaseModel, Field
 
-from . import engine, ops, plugins, preview, sniff
+from . import engine, lease, ops, plugins, preview, sniff
 from . import model_manager as _mm
 from .jobs import JobManager
 from .model_manager import OFFLOAD_MODE, QUANTIZATION, ModelManager
@@ -76,6 +76,16 @@ def admin_auth(authorization: str = Header(default="")):
                             "(set INFERENCE_TOKEN to enable)")
     if authorization != f"Bearer {TOKEN}":
         raise HTTPException(status_code=401, detail="invalid token")
+
+
+def _bind_lease(x_flowx_lease: str):
+    """X-FlowX-Lease 头 → 当前线程租约绑定 + 活动刷新（TTL 滑动）。
+    返回净化后的租约 id（无头/非法 → None，调用方行为与租约机制引入前一致）。"""
+    lid = lease.sanitize(x_flowx_lease)
+    lease.bind(lid)
+    if lid:
+        models.leases.touch(lid)
+    return lid
 
 
 # ---------- 插件算子（启动扫描 + 运行时上传热加载） ----------
@@ -344,11 +354,17 @@ class UnloadReq(BaseModel):
 
 
 @app.post("/model/unload", dependencies=[Depends(auth)])
-def model_unload(req: UnloadReq | None = None):
+def model_unload(req: UnloadReq | None = None,
+                 x_flowx_lease: str = Header(default="")):
     """显式卸载常驻模型（等价 model.unload 算子；运维/自愈用）。
-    body {"target": "majicmixRealistic_v7"} 或 {}（全部）。"""
-    target = (req.target if req is not None else "") or ""
-    return ops.model_unload(models, target)
+    body {"target": "majicmixRealistic_v7"} 或 {}（全部）。
+    其它活跃租约持有的条目跳过（X-FlowX-Lease 头标识本租约，§43.2）。"""
+    _bind_lease(x_flowx_lease)
+    try:
+        target = (req.target if req is not None else "") or ""
+        return ops.model_unload(models, target)
+    finally:
+        lease.unbind()
 
 
 @app.post("/gc", dependencies=[Depends(auth)])
@@ -378,23 +394,31 @@ def list_ops():
 
 
 @app.post("/op", dependencies=[Depends(auth)])
-def run_op(req: OpReq):
+def run_op(req: OpReq, x_flowx_lease: str = Header(default="")):
     """单算子调用；对象端口用 {"$id": uuid} 引用，字面量直接传值。"""
+    _bind_lease(x_flowx_lease)
     try:
-        return engine.run_op(store, registry, req.name, req.inputs)
-    except (KeyError, TypeError, ValueError, FileNotFoundError, RuntimeError) as e:
-        # RuntimeError 含显存自愈失败的可执行指引（dev-plan §21.3 任务 3）：
-        # 必须作为 detail 回到调用方节点，否则只剩一句 "HTTP 500"
-        raise HTTPException(status_code=400, detail=str(e))
+        try:
+            return engine.run_op(store, registry, req.name, req.inputs)
+        except (KeyError, TypeError, ValueError, FileNotFoundError, RuntimeError) as e:
+            # RuntimeError 含显存自愈失败的可执行指引（dev-plan §21.3 任务 3）：
+            # 必须作为 detail 回到调用方节点，否则只剩一句 "HTTP 500"
+            raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        lease.unbind()
 
 
 @app.post("/graph", dependencies=[Depends(auth)])
-def run_graph(req: GraphReq):
+def run_graph(req: GraphReq, x_flowx_lease: str = Header(default="")):
     """整图执行：拓扑调度 + 跨调用缓存；对象端口用 ["node_id", "port"] 引用。"""
+    _bind_lease(x_flowx_lease)
     try:
-        return engine.run_graph(store, registry, {"nodes": req.nodes})
-    except (KeyError, TypeError, ValueError, FileNotFoundError, RuntimeError) as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        try:
+            return engine.run_graph(store, registry, {"nodes": req.nodes})
+        except (KeyError, TypeError, ValueError, FileNotFoundError, RuntimeError) as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        lease.unbind()
 
 
 # ---------- 能力运行时端点（异步任务） ----------
@@ -410,18 +434,25 @@ jobman = JobManager(_execute_job)
 
 
 @app.post("/jobs", dependencies=[Depends(auth)])
-def submit_job(req: JobReq):
+def submit_job(req: JobReq, x_flowx_lease: str = Header(default="")):
     """提交异步任务（视频等分钟级任务走此通道）：返回 job_id，轮询 GET /jobs/{id}。
-    body 二选一：{"nodes": {...}}（graph，同 /graph）或 {"name", "inputs"}（op，同 /op）。"""
-    if req.nodes:
-        return {"job_id": jobman.submit("graph", {"nodes": req.nodes}),
-                "status": "pending"}
-    if req.name:
-        return {"job_id": jobman.submit(
-            "op", {"name": req.name, "inputs": req.inputs}),
-                "status": "pending"}
-    raise HTTPException(status_code=400,
-                        detail="job requires 'nodes' (graph) or 'name' (op)")
+    body 二选一：{"nodes": {...}}（graph，同 /graph）或 {"name", "inputs"}（op，同 /op）。
+    X-FlowX-Lease 头携带的执行租约随 job 记录，worker 执行期间生效（§43.2）。"""
+    lid = _bind_lease(x_flowx_lease)
+    try:
+        if req.nodes:
+            return {"job_id": jobman.submit("graph", {"nodes": req.nodes},
+                                            lease=lid),
+                    "status": "pending"}
+        if req.name:
+            return {"job_id": jobman.submit(
+                "op", {"name": req.name, "inputs": req.inputs},
+                lease=lid),
+                    "status": "pending"}
+        raise HTTPException(status_code=400,
+                            detail="job requires 'nodes' (graph) or 'name' (op)")
+    finally:
+        lease.unbind()
 
 
 @app.get("/jobs", dependencies=[Depends(auth)])
@@ -430,12 +461,24 @@ def list_jobs():
 
 
 @app.get("/jobs/{job_id}", dependencies=[Depends(auth)])
-def get_job(job_id: str):
-    """任务状态/进度轮询：done 时带 result（同 /graph 返回），failed/cancelled 时带 error。"""
+def get_job(job_id: str, x_flowx_lease: str = Header(default="")):
+    """任务状态/进度轮询：done 时带 result（同 /graph 返回），failed/cancelled 时带 error。
+    轮询也算租约活动（节点每 2s 轮询 = 长任务期间租约 TTL 持续滑动刷新）。"""
+    lid = lease.sanitize(x_flowx_lease)
+    if lid:
+        models.leases.touch(lid)
     try:
         return jobman.get(job_id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.get("/leases", dependencies=[Depends(auth)])
+def list_leases():
+    """执行租约观测（dev-plan §43.2）：活跃租约及其持有的常驻条目/空闲时长。"""
+    return {"leases": models.leases.view(),
+            "lease_ttl_seconds": lease.LEASE_TTL,
+            "lease_wait_timeout_seconds": lease.LEASE_WAIT_TIMEOUT}
 
 
 @app.post("/interrupt", dependencies=[Depends(auth)])

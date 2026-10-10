@@ -790,12 +790,13 @@ def lora_apply(models, model, lora, strength=1.0):
             "clip": pipe}
 
 
-def motion_load(models, ckpt, motion):
+def motion_load(models, ckpt, motion, dtype="auto", offload="auto"):
     """Motion 加载：SD1.x checkpoint + MotionAdapter → AnimateDiffPipeline（文生视频）。
     直接收底模名（非 MODEL 引用）：组合过程需要全新实例化底模，先 checkpoint.load
     只会让旧底模被对象仓库钉在内存里（8GB WSL 会 OOM）。
+    dtype/offload 为加载旋钮（auto 继承进程级默认，见 model_manager.load_motion）。
     返回与 checkpoint_load 同构的 model/clip/vae 三视图。"""
-    key, _ = models.load_motion(ckpt, motion)
+    key, _ = models.load_motion(ckpt, motion, dtype=dtype, offload=offload)
     ad_pipe = models.get(key)
     return {"model": ad_pipe, "clip": ad_pipe, "vae": ad_pipe}
 

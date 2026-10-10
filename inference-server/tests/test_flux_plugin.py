@@ -32,6 +32,7 @@ _torch.nn = _nn
 _torch.device = lambda x: ("dev", x)
 _torch.bfloat16 = "bf16"
 _torch.float16 = "fp16"
+_torch.float32 = "fp32"
 _torch.cuda = types.SimpleNamespace(is_available=lambda: False)
 sys.modules.setdefault("torch", _torch)
 sys.modules.setdefault("torch.nn", _nn)
@@ -53,9 +54,11 @@ PLUGIN = os.path.join(os.path.dirname(__file__), "..", "..", "nodes",
                      "flux-sampler", "server_op.py")
 
 EXPECTED = {
-    "flux.unet_load": ({"transformer": "STRING"}, {"model": "MODEL"}),
-    "flux.dual_clip_load": ({"t5": "STRING"}, {"clip": "CLIP"}),
-    "flux.vae_load": ({"name": "STRING"}, {"vae": "VAE"}),
+    "flux.unet_load": ({"transformer": "STRING", "dtype": "STRING"},
+                       {"model": "MODEL"}),
+    "flux.dual_clip_load": ({"t5": "STRING", "dtype": "STRING"},
+                            {"clip": "CLIP"}),
+    "flux.vae_load": ({"name": "STRING", "dtype": "STRING"}, {"vae": "VAE"}),
     "flux.encode": ({"clip": "CLIP", "text": "STRING", "max_seq": "INT",
                      "release_t5": "INT"}, {"cond": "COND", "info": "STRING"}),
     "flux.empty_latent": ({"width": "INT", "height": "INT",

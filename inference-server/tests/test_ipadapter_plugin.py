@@ -9,7 +9,11 @@ import sys
 import tempfile
 import types
 
-sys.modules.setdefault("torch", types.ModuleType("torch"))
+_torch_stub = types.ModuleType("torch")
+_torch_stub.float16 = "fp16"
+_torch_stub.bfloat16 = "bf16"
+_torch_stub.float32 = "fp32"
+sys.modules.setdefault("torch", _torch_stub)
 
 _fake_diffusers = types.ModuleType("diffusers")
 for _n in ("DDIMScheduler", "DPMSolverMultistepScheduler",
@@ -31,7 +35,8 @@ PLUGIN = os.path.join(os.path.dirname(__file__), "..", "..", "nodes",
                       "ipadapter.py")
 
 EXPECTED = {
-    "clip_vision.load": ({"name": "STRING"}, {"clip_vision": "CLIP_VISION"}),
+    "clip_vision.load": ({"name": "STRING", "dtype": "STRING"},
+                         {"clip_vision": "CLIP_VISION"}),
     "ipadapter.load": ({"name": "STRING"}, {"ipadapter": "IPADAPTER"}),
     "ipadapter.apply": ({"model": "MODEL", "ipadapter": "IPADAPTER",
                          "clip_vision": "CLIP_VISION", "image": "IMAGE",
