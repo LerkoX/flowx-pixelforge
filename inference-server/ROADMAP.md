@@ -161,6 +161,33 @@ SD1.5 的 fp16 VAE 解码会偶发纯黑图，社区标准修法是 VAE 单独 f
   save-video 内嵌 mp4 播放器（小体积 base64）——外壳零改动
 - 验收（待 GPU 实测）：图生视频出片；首帧+尾帧插帧出片；长任务可取消、进度可见
 
+### 阶段 10：图像后处理与电商能力补齐（2026-10-10 立项，清单见 dev-plan §四十四）
+
+对标 ComfyUI 六大类图像处理能力盘点后的缺口补齐（已覆盖部分见 dev-plan §44.1，勿重复投入）：
+- **B1（低成本先行）**：传统滤镜算子（`image.adjust/curves/blur/sharpen/noise/channel`，PIL 零 GPU）+
+  Outpainting 扩图（`image.pad` + 既有 inpaint 链）+ 预处理器补齐
+  （`preprocess.anyline/teed/normal/lineart/softedge/scribble/seg`，controlnet_aux 已在依赖）
+- **B2（核心价值）**：RMBG 自动抠图（`matting.rmbg`，优选 transformers 路径零新依赖）→
+  面部修复（`face.restore`，CodeFormer/GFPGAN）
+- **B3**：SAM / GroundingDINO 交互与文本分割（`seg.sam` / `seg.grounding`）+ 分块重绘超分
+  （`image.tiled_upscale`，对标 Ultimate SD Upscale）
+- **B4（重工程，各自立项）**：DDColor 上色 → IC-Light 重打光 → PuLID → 电商流水线模板
+
+**已拍板决策（2026-10-10）**：① 一律**细粒度节点**拆分（加载/处理/合成分离，中间产物对象引用接线）；
+② **所有新节点必须带自定义 UI**（`ui/node-widget.js`，基于 `_common/widget-base.js`），
+不允许裸参数面板。节点清单共 34 个（dev-plan §44.6.1）。
+
+由此新增的基建改动：
+- `nodes/_common/widget-base.js` 新增控件 spec：`curves` / `directionPicker` / `pointSelect` /
+  `compareAB` / `checkerPreview` / `channelToggles` / `tileGridOverlay`（改后 `_tools/build-widget.py`
+  **全量重建所有节点 bundle**，`check-bundle.py` 作发布门槛）
+- `inference-server/app/registry.py` 的 `OBJ_TYPES` 新增模型句柄类型（`MATTING_MODEL` / `SEG_MODEL` /
+  `GROUNDING_MODEL` / `RESTORE_MODEL` / `COLORIZE_MODEL` / `ICLIGHT_MODEL` / `PULID_MODEL`，
+  或收敛为单个 `AUX_MODEL` + 子类型）——按 §1 例外条款，这是本阶段**唯一**需要动服务端核心的地方
+
+约束：新增依赖须同改 `requirements.txt` + `requirements-pascal.txt` 并重建镜像；
+Pascal 钉版（transformers==4.44.2 / diffusers==0.35.2 / numpy<2）不得随意放开。
+
 ## 3. 架构守护：`sample()` 的分派纪律
 
 唯一「加法做多了会欠债」的地方。规则：
@@ -241,3 +268,4 @@ exec 361/362）。这与遗留清单 #6 的次生教训（decode OOM 后 22s/步
 | M7 体验 | 7 | 进度/取消/懒执行 | 引擎 + WS（进度/取消 ✅；WS 推送与懒执行未做） |
 | M8 Flux | 8 | 最新架构 | 独立采样路径（SD3.5 ✅ 已点亮；FLUX 未做） |
 | M9 视频 | 9 | i2v / 首尾帧插帧 | 异步任务 + 显存治理（i2v ✅；FLF2V 搁置） |
+| M10 图像后处理与电商 | 10 | 滤镜/扩图/抠图/分割/分块超分/修复/上色/重打光 | 算子插件为主（34 个细粒度节点，全带 UI），清单见 dev-plan §四十四（待实施，B1~B4） |
