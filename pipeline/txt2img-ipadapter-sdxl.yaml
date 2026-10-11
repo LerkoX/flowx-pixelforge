@@ -99,7 +99,7 @@ Nodes:
   LoadCV:
     name: CLIP Vision加载
     config:
-      nodeRef: clip-vision-load@1.0.0
+      nodeRef: clip-vision-load@1.2.0
       params:
         service_url: "{{ Param.service_url_internal }}"
         service_url_host: "{{ Param.service_url }}"
@@ -108,7 +108,7 @@ Nodes:
   LoadIPA:
     name: SDXL IPA加载
     config:
-      nodeRef: ipadapter-load@1.0.0
+      nodeRef: ipadapter-load@1.1.0
       params:
         service_url: "{{ Param.service_url_internal }}"
         service_url_host: "{{ Param.service_url }}"
@@ -117,7 +117,7 @@ Nodes:
   ApplyIPA:
     name: IPA应用
     config:
-      nodeRef: ipadapter-apply@1.0.0
+      nodeRef: ipadapter-apply@1.1.0
       params:
         service_url: "{{ Param.service_url_internal }}"
         service_url_host: "{{ Param.service_url }}"

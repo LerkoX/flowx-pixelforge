@@ -95,7 +95,7 @@ Nodes:
   Depth:
     name: 深度提取
     config:
-      nodeRef: preprocess-depth@1.0.0
+      nodeRef: preprocess-depth@1.1.0
       params:
         service_url: "{{ Param.service_url_internal }}"
         service_url_host: "{{ Param.service_url }}"

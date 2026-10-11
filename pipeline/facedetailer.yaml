@@ -136,7 +136,7 @@ Nodes:
   FaceMask:
     name: 人脸蒙版
     config:
-      nodeRef: face-mask@1.0.0
+      nodeRef: face-mask@1.1.0
       params:
         service_url: "{{ Param.service_url_internal }}"
         service_url_host: "{{ Param.service_url }}"
@@ -149,7 +149,7 @@ Nodes:
   Crop:
     name: 裁剪脸部
     config:
-      nodeRef: image-crop@1.0.0
+      nodeRef: image-crop@1.1.0
       executor: local
       params:
         service_url: "{{ Param.service_url }}"
@@ -228,7 +228,7 @@ Nodes:
   MaskCrop:
     name: 裁剪蒙版
     config:
-      nodeRef: image-crop@1.0.0
+      nodeRef: image-crop@1.1.0
       executor: local
       params:
         service_url: "{{ Param.service_url }}"
@@ -241,7 +241,7 @@ Nodes:
   Composite:
     name: 贴回
     config:
-      nodeRef: image-composite@1.0.0
+      nodeRef: image-composite@1.1.0
       executor: local
       params:
         service_url: "{{ Param.service_url }}"

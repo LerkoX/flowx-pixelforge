@@ -101,7 +101,7 @@ Nodes:
   LatentUp:
     name: latent放大1.5x
     config:
-      nodeRef: latent-upscale@1.0.0
+      nodeRef: latent-upscale@1.1.0
       params:
         service_url: "{{ Param.service_url_internal }}"
         service_url_host: "{{ Param.service_url }}"
