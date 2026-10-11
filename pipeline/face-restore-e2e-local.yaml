@@ -1,0 +1,253 @@
+Name: face-restore-e2e-local
+Description: >-
+  B2 / G6 人脸修复真机链（dev-plan §48.6 A6）：三张人脸图 × GFPGAN(up=1/2) /
+  RestoreFormer(up=1)。串行提交（单 GPU worker）；本变体不含落盘节点（手机不在
+  局域网时用），产物由宿主侧脚本拉取后写 D:\flowx-data\models\_e2e 复核。
+Param:
+  service_url: "http://172.17.0.1:8100"
+  # 全 local 执行器：节点在手机侧跑，必须用手机可达地址
+  service_url_local: "http://192.168.5.60:8100"
+  service_token: "30e494999da13134808ee280aea6dffd"
+  face_sharp: "30ee241e44ab480bab9373e838978eee"
+  face_small: "cca93e5889734ba98d8503d3437a1ff0"
+  face_photo: "3860147b317d4d43b21493465b057b79"
+Graph: |
+  stateDiagram-v2
+    [*] --> FG1
+    FG1 --> FG2
+    FG2 --> FR1
+    FR1 --> FS1
+    FS1 --> FP1
+    FG1 --> SaveFG1
+    FG2 --> SaveFG2
+    FR1 --> FR2
+    FR1 --> SaveFR1
+    FR2 --> SaveFR2
+    FS1 --> SaveFS1
+    FP1 --> SaveFP1
+    [*] --> SaveIn1
+    [*] --> SaveIn2
+    [*] --> SaveIn3
+    FP1 --> [*]
+    SaveFG1 --> [*]
+    SaveFG2 --> [*]
+    SaveFR1 --> [*]
+    SaveFR2 --> [*]
+    SaveFS1 --> [*]
+    SaveFP1 --> [*]
+    SaveIn1 --> [*]
+    SaveIn2 --> [*]
+    SaveIn3 --> [*]
+Nodes:
+  FG1:
+    name: GFPGAN up1（AI 清晰脸）
+    config:
+      nodeRef: face-restore@1.0.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.face_sharp }}"
+        model: "gfpgan"
+        upscale: "1.0"
+        padding: "0.3"
+        feather: "16"
+        only_center: "true"
+        max_faces: "1"
+        det_thresh: "0.5"
+  FG2:
+    name: GFPGAN up1（小脸）
+    config:
+      nodeRef: face-restore@1.0.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.face_small }}"
+        model: "gfpgan"
+        upscale: "1.0"
+        padding: "0.3"
+        feather: "16"
+        only_center: "true"
+        max_faces: "1"
+        det_thresh: "0.5"
+  FR1:
+    name: RestoreFormer up1（小脸）
+    config:
+      nodeRef: face-restore@1.0.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.face_small }}"
+        model: "restoreformer"
+        upscale: "1.0"
+        padding: "0.3"
+        feather: "16"
+        only_center: "true"
+        max_faces: "1"
+        det_thresh: "0.5"
+  FS1:
+    name: GFPGAN up1（真人照片）
+    config:
+      nodeRef: face-restore@1.0.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.face_photo }}"
+        model: "gfpgan"
+        upscale: "1.0"
+        padding: "0.3"
+        feather: "16"
+        only_center: "true"
+        max_faces: "1"
+        det_thresh: "0.5"
+  FP1:
+    name: GFPGAN up1（真人照片）
+    config:
+      nodeRef: face-restore@1.0.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.face_photo }}"
+        model: "gfpgan"
+        upscale: "1.0"
+        padding: "0.3"
+        feather: "16"
+        only_center: "true"
+        max_faces: "1"
+        det_thresh: "0.5"
+
+  SaveFG1:
+    name: 落盘 fg1_t2_gfpgan_up1
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ FG1.image }}"
+        filename_prefix: "face_fg1_t2_gfpgan_up1"
+        output_dir: "~/flowx-e2e-out"
+
+
+  SaveFG2:
+    name: 落盘 fg2_small_gfpgan_up1
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ FG2.image }}"
+        filename_prefix: "face_fg2_small_gfpgan_up1"
+        output_dir: "~/flowx-e2e-out"
+
+
+  SaveFR1:
+    name: 落盘 fr1_small_restoreformer_up1
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ FR1.image }}"
+        filename_prefix: "face_fr1_small_restoreformer_up1"
+        output_dir: "~/flowx-e2e-out"
+
+
+  SaveFS1:
+    name: 落盘 fs1_photo_gfpgan_up1
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ FS1.image }}"
+        filename_prefix: "face_fs1_photo_gfpgan_up1"
+        output_dir: "~/flowx-e2e-out"
+
+
+  SaveFP1:
+    name: 落盘 fp1_photo_gfpgan_up1
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ FP1.image }}"
+        filename_prefix: "face_fp1_photo_gfpgan_up1"
+        output_dir: "~/flowx-e2e-out"
+
+
+  SaveIn1:
+    name: 落盘输入 face_sharp
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.face_sharp }}"
+        filename_prefix: "face_in1_face_sharp"
+        output_dir: "~/flowx-e2e-out"
+
+
+  SaveIn2:
+    name: 落盘输入 face_small
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.face_small }}"
+        filename_prefix: "face_in2_face_small"
+        output_dir: "~/flowx-e2e-out"
+
+
+  SaveIn3:
+    name: 落盘输入 face_photo
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.face_photo }}"
+        filename_prefix: "face_in3_face_photo"
+        output_dir: "~/flowx-e2e-out"
+
+  FR2:
+    name: RestoreFormer up2（小脸，放大修复）
+    config:
+      nodeRef: face-restore@1.0.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.face_small }}"
+        model: "restoreformer"
+        upscale: "2.0"
+        padding: "0.3"
+        feather: "16"
+        only_center: "true"
+        max_faces: "1"
+        det_thresh: "0.5"
+
+  SaveFR2:
+    name: 落盘 fr2_small_restoreformer_up2
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ FR2.image }}"
+        filename_prefix: "face_fr2_small_restoreformer_up2"
+        output_dir: "~/flowx-e2e-out"

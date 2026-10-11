@@ -1,0 +1,164 @@
+Name: matting-defringe-local
+Description: >-
+  B2 / G1 去白边专项（dev-plan §48.11 补测）：输入是一张**白底商品图**（主体贴在纯白上，
+  边缘即"主体 × 白底"混色）。同一张图跑两遍 BiRefNet，只有 `refine` 不同：
+  refine=false（alpha 用 BiRefNet 原值，RGB 用原图 = 带白边）与 refine=true
+  （官方 refine_foreground 前后景分离，RGB 被反解成前景色 = 去白边）。
+  两个 alpha 完全一致 ⇒ 差异只来自 RGB ⇒ 干净对照。
+  再各自换到**纯绿色底**（#00B050）上，白边残留会被放大成可见的浅色环。
+  全 local 执行器；末端全部落盘便于本机复核。
+Param:
+  service_url_local: "http://192.168.5.60:8100"
+  service_token: "30e494999da13134808ee280aea6dffd"
+  # 白底商品图对象（exec 633 的 comp_white 产物）
+  white_bg_image: "82d11445107f42138a5424711acc7d7d"
+  bg_color: "#00B050"
+Graph: |
+  stateDiagram-v2
+    [*] --> MattePlain
+    MattePlain --> MatteRefined
+    MatteRefined --> CompPlain
+    CompPlain --> CompRefined
+    CompRefined --> [*]
+
+    MattePlain --> SaveWhiteBg
+    MattePlain --> SaveMaskPlain
+    MattePlain --> SaveRgbaPlain
+    MatteRefined --> SaveMaskRefined
+    MatteRefined --> SaveRgbaRefined
+    CompPlain --> SaveCompPlain
+    CompRefined --> SaveCompRefined
+
+    SaveWhiteBg --> [*]
+    SaveMaskPlain --> [*]
+    SaveRgbaPlain --> [*]
+    SaveMaskRefined --> [*]
+    SaveRgbaRefined --> [*]
+    SaveCompPlain --> [*]
+    SaveCompRefined --> [*]
+Nodes:
+  MattePlain:
+    name: 抠图 main@1024（refine 关 = 带白边）
+    config:
+      nodeRef: matting-birefnet@1.0.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.white_bg_image }}"
+        variant: "main"
+        resolution: "1024"
+        refine: "false"
+  MatteRefined:
+    name: 抠图 main@1024（refine 开 = 去白边）
+    config:
+      nodeRef: matting-birefnet@1.0.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.white_bg_image }}"
+        variant: "main"
+        resolution: "1024"
+        refine: "true"
+  CompPlain:
+    name: 换绿底（refine 关）
+    config:
+      nodeRef: matting-composite@1.0.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ MattePlain.image }}"
+        mask: "{{ MattePlain.mask }}"
+        bg_mode: "color"
+        bg_color: "{{ Param.bg_color }}"
+  CompRefined:
+    name: 换绿底（refine 开）
+    config:
+      nodeRef: matting-composite@1.0.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ MatteRefined.image }}"
+        mask: "{{ MatteRefined.mask }}"
+        bg_mode: "color"
+        bg_color: "{{ Param.bg_color }}"
+  SaveWhiteBg:
+    name: 落盘-白底商品图输入
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.white_bg_image }}"
+        filename_prefix: "defringe_input_whitebg"
+        output_dir: "~/flowx-e2e-out"
+  SaveMaskPlain:
+    name: 落盘-mask(refine 关)
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ MattePlain.mask }}"
+        filename_prefix: "defringe_mask_plain"
+        output_dir: "~/flowx-e2e-out"
+  SaveRgbaPlain:
+    name: 落盘-RGBA(refine 关)
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ MattePlain.image }}"
+        filename_prefix: "defringe_rgba_plain"
+        output_dir: "~/flowx-e2e-out"
+  SaveMaskRefined:
+    name: 落盘-mask(refine 开)
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ MatteRefined.mask }}"
+        filename_prefix: "defringe_mask_refined"
+        output_dir: "~/flowx-e2e-out"
+  SaveRgbaRefined:
+    name: 落盘-RGBA(refine 开)
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ MatteRefined.image }}"
+        filename_prefix: "defringe_rgba_refined"
+        output_dir: "~/flowx-e2e-out"
+  SaveCompPlain:
+    name: 落盘-绿底合成(refine 关)
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ CompPlain.image }}"
+        filename_prefix: "defringe_comp_plain"
+        output_dir: "~/flowx-e2e-out"
+  SaveCompRefined:
+    name: 落盘-绿底合成(refine 开)
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ CompRefined.image }}"
+        filename_prefix: "defringe_comp_refined"
+        output_dir: "~/flowx-e2e-out"

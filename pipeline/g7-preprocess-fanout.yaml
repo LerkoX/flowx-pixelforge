@@ -1,0 +1,296 @@
+Name: g7-preprocess-e2e
+Description: >-
+  G7 预处理器族真机 e2e（B1 §45.7）：同一张输入图扇出到 7 个预处理器节点
+  （anyline / lineart 三档 / softedge 两档 / scribble / mlsd / normal / shuffle），
+  一次运行产出 10 份提示图（+输入图）并**全部落盘**（save-image，local 执行器写手机磁盘，
+  ~/flowx-e2e-out），可离线逐份复核：尺寸=输入尺寸、黑底白线语义、法线蓝紫、变体互不相同。
+  执行器 docker（容器内网直连推理服务）；检测器 CPU 推理不占显存。
+  分支**串行**（每个节点仍读同一张原图，串行只用于定序）：避免 10 路并发加载检测器
+  挤爆内存/CPU，也避免同族插件并发自注册的竞态。
+Param:
+  service_url: "http://172.17.0.1:8100"
+  # save-image 等 local 执行器节点在手机侧跑，必须用手机可达地址
+  service_url_local: "http://192.168.5.60:8100"
+  service_token: "30e494999da13134808ee280aea6dffd"   # 服务端 INFERENCE_TOKEN（docker 执行器直连内网）
+  input_image: "b4d217d20b0940ac9f59723bd1fc346a"
+Graph: |
+  stateDiagram-v2
+    [*] --> Anyline
+    Anyline --> SaveAnyline
+    SaveAnyline --> [*]
+    [*] --> Lineart
+    Lineart --> SaveLineart
+    SaveLineart --> [*]
+    [*] --> LineartAnime
+    LineartAnime --> SaveLineartAnime
+    SaveLineartAnime --> [*]
+    [*] --> LineartStd
+    LineartStd --> SaveLineartStd
+    SaveLineartStd --> [*]
+    [*] --> Softedge
+    Softedge --> SaveSoftedge
+    SaveSoftedge --> [*]
+    [*] --> SoftedgeHED
+    SoftedgeHED --> SaveSoftedgeHED
+    SaveSoftedgeHED --> [*]
+    [*] --> Scribble
+    Scribble --> SaveScribble
+    SaveScribble --> [*]
+    [*] --> MLSD
+    MLSD --> SaveMLSD
+    SaveMLSD --> [*]
+    [*] --> Normal
+    Normal --> SaveNormal
+    SaveNormal --> [*]
+    [*] --> Shuffle
+    Shuffle --> SaveShuffle
+    SaveShuffle --> [*]
+    [*] --> SaveInput
+    SaveInput --> [*]
+Nodes:
+  Anyline:
+    name: Anyline 高精度线稿
+    config:
+      nodeRef: preprocess-anyline@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.input_image }}"
+        detect_resolution: "1280"
+        guassian_sigma: "2.0"
+        intensity_threshold: "3"
+  Lineart:
+    name: 线稿（写实）
+    config:
+      nodeRef: preprocess-lineart@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.input_image }}"
+        variant: "lineart"
+        detect_resolution: "512"
+        coarse: "false"
+  LineartAnime:
+    name: 线稿（动漫）
+    config:
+      nodeRef: preprocess-lineart@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.input_image }}"
+        variant: "anime"
+        detect_resolution: "512"
+        coarse: "false"
+  LineartStd:
+    name: 线稿（standard 无权重）
+    config:
+      nodeRef: preprocess-lineart@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.input_image }}"
+        variant: "standard"
+        detect_resolution: "512"
+        coarse: "false"
+  Softedge:
+    name: 软边缘（PidiNet）
+    config:
+      nodeRef: preprocess-softedge@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.input_image }}"
+        variant: "pidi"
+        detect_resolution: "512"
+        safe: "true"
+  SoftedgeHED:
+    name: 软边缘（HED）
+    config:
+      nodeRef: preprocess-softedge@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.input_image }}"
+        variant: "hed"
+        detect_resolution: "512"
+        safe: "true"
+  Scribble:
+    name: 涂鸦稿
+    config:
+      nodeRef: preprocess-scribble@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.input_image }}"
+        detect_resolution: "512"
+        safe: "true"
+  MLSD:
+    name: M-LSD 直线
+    config:
+      nodeRef: preprocess-mlsd@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.input_image }}"
+        detect_resolution: "512"
+        thr_v: "0.1"
+        thr_d: "0.1"
+  Normal:
+    name: 法线图
+    config:
+      nodeRef: preprocess-normal@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.input_image }}"
+        detect_resolution: "512"
+  Shuffle:
+    name: 内容打乱
+    config:
+      nodeRef: preprocess-shuffle@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.input_image }}"
+        detect_resolution: "512"
+  SaveInput:
+    name: 落盘 g7_input
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.input_image }}"
+        filename_prefix: "g7_input"
+        output_dir: "~/flowx-e2e-out"
+
+  SaveAnyline:
+    name: 落盘 g7_anyline
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Anyline.image }}"
+        filename_prefix: "g7_anyline"
+        output_dir: "~/flowx-e2e-out"
+
+  SaveLineart:
+    name: 落盘 g7_lineart
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Lineart.image }}"
+        filename_prefix: "g7_lineart"
+        output_dir: "~/flowx-e2e-out"
+
+  SaveLineartAnime:
+    name: 落盘 g7_lineart_anime
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ LineartAnime.image }}"
+        filename_prefix: "g7_lineart_anime"
+        output_dir: "~/flowx-e2e-out"
+
+  SaveLineartStd:
+    name: 落盘 g7_lineart_standard
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ LineartStd.image }}"
+        filename_prefix: "g7_lineart_standard"
+        output_dir: "~/flowx-e2e-out"
+
+  SaveSoftedge:
+    name: 落盘 g7_softedge_pidi
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Softedge.image }}"
+        filename_prefix: "g7_softedge_pidi"
+        output_dir: "~/flowx-e2e-out"
+
+  SaveSoftedgeHED:
+    name: 落盘 g7_softedge_hed
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ SoftedgeHED.image }}"
+        filename_prefix: "g7_softedge_hed"
+        output_dir: "~/flowx-e2e-out"
+
+  SaveScribble:
+    name: 落盘 g7_scribble
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Scribble.image }}"
+        filename_prefix: "g7_scribble"
+        output_dir: "~/flowx-e2e-out"
+
+  SaveMLSD:
+    name: 落盘 g7_mlsd
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ MLSD.image }}"
+        filename_prefix: "g7_mlsd"
+        output_dir: "~/flowx-e2e-out"
+
+  SaveNormal:
+    name: 落盘 g7_normal
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Normal.image }}"
+        filename_prefix: "g7_normal"
+        output_dir: "~/flowx-e2e-out"
+
+  SaveShuffle:
+    name: 落盘 g7_shuffle
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Shuffle.image }}"
+        filename_prefix: "g7_shuffle"
+        output_dir: "~/flowx-e2e-out"

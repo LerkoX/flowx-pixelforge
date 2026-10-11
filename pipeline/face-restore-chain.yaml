@@ -1,0 +1,100 @@
+Name: face-restore-chain
+Description: >-
+  B2 / G6 人脸修复真机链（dev-plan §48.6 A6）：三张人脸图 × GFPGAN(up=1/2) /
+  RestoreFormer(up=1)。串行提交（单 GPU worker）；本变体不含落盘节点（手机不在
+  局域网时用），产物由宿主侧脚本拉取后写 D:\flowx-data\models\_e2e 复核。
+Param:
+  service_url: "http://172.17.0.1:8100"
+  service_token: "30e494999da13134808ee280aea6dffd"
+  face_sharp: "30ee241e44ab480bab9373e838978eee"
+  face_small: "cca93e5889734ba98d8503d3437a1ff0"
+  face_photo: "3860147b317d4d43b21493465b057b79"
+Graph: |
+  stateDiagram-v2
+    [*] --> FG1
+    FG1 --> FG2
+    FG2 --> FR1
+    FR1 --> FS1
+    FS1 --> FP1
+    FP1 --> [*]
+Nodes:
+  FG1:
+    name: GFPGAN up1（AI 清晰脸）
+    config:
+      nodeRef: face-restore@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.face_sharp }}"
+        model: "gfpgan"
+        upscale: "1.0"
+        padding: "0.3"
+        feather: "16"
+        only_center: "true"
+        max_faces: "1"
+        det_thresh: "0.5"
+  FG2:
+    name: GFPGAN up2（小脸，放大修复）
+    config:
+      nodeRef: face-restore@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.face_small }}"
+        model: "gfpgan"
+        upscale: "2.0"
+        padding: "0.3"
+        feather: "16"
+        only_center: "true"
+        max_faces: "1"
+        det_thresh: "0.5"
+  FR1:
+    name: RestoreFormer up1（小脸）
+    config:
+      nodeRef: face-restore@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.face_small }}"
+        model: "restoreformer"
+        upscale: "1.0"
+        padding: "0.3"
+        feather: "16"
+        only_center: "true"
+        max_faces: "1"
+        det_thresh: "0.5"
+  FS1:
+    name: GFPGAN up1（真人照片）
+    config:
+      nodeRef: face-restore@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.face_photo }}"
+        model: "gfpgan"
+        upscale: "1.0"
+        padding: "0.3"
+        feather: "16"
+        only_center: "true"
+        max_faces: "1"
+        det_thresh: "0.5"
+  FP1:
+    name: GFPGAN up2（真人照片）
+    config:
+      nodeRef: face-restore@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.face_photo }}"
+        model: "gfpgan"
+        upscale: "2.0"
+        padding: "0.3"
+        feather: "16"
+        only_center: "true"
+        max_faces: "1"
+        det_thresh: "0.5"

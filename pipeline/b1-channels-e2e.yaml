@@ -1,0 +1,175 @@
+Name: b1-channels-e2e
+Description: >-
+  G5 通道族 + G3 扩图真机 e2e：输入图 → R/G/B 三路通道分离（并行）→ 通道合并（应还原原图）
+  → 扩画布（右扩 192px + 羽化蒙版），验证 image-channel-extract / merge / image-pad 三者。
+Param:
+  service_url: "http://172.17.0.1:8100"
+  # save-image 等 local 执行器节点在手机侧跑，必须用手机可达地址
+  service_url_local: "http://192.168.5.60:8100"
+  service_token: "30e494999da13134808ee280aea6dffd"   # 服务端 INFERENCE_TOKEN（docker 执行器直连内网，不经隧道）
+  input_image: "b4d217d20b0940ac9f59723bd1fc346a"
+Graph: |
+  stateDiagram-v2
+    [*] --> ExtractR
+    [*] --> ExtractG
+    [*] --> ExtractB
+    ExtractR --> Merge
+    ExtractG --> Merge
+    ExtractB --> Merge
+    Merge --> Pad
+    Pad --> [*]
+    [*] --> SaveInput
+    ExtractR --> SaveR
+    ExtractG --> SaveG
+    ExtractB --> SaveB
+    Merge --> SaveMerge
+    Pad --> SavePad
+    Pad --> SavePadMask
+    SaveInput --> [*]
+    SaveR --> [*]
+    SaveG --> [*]
+    SaveB --> [*]
+    SaveMerge --> [*]
+    SavePad --> [*]
+    SavePadMask --> [*]
+Nodes:
+  ExtractR:
+    name: 分离 R 通道
+    config:
+      nodeRef: image-channel-extract@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.input_image }}"
+        channel: "red"
+  ExtractG:
+    name: 分离 G 通道
+    config:
+      nodeRef: image-channel-extract@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.input_image }}"
+        channel: "green"
+  ExtractB:
+    name: 分离 B 通道
+    config:
+      nodeRef: image-channel-extract@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.input_image }}"
+        channel: "blue"
+  Merge:
+    name: 三路合并
+    config:
+      nodeRef: image-channel-merge@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        r_image: "{{ ExtractR.image }}"
+        g_image: "{{ ExtractG.image }}"
+        b_image: "{{ ExtractB.image }}"
+        alpha_image: ""
+  Pad:
+    name: 右扩画布
+    config:
+      nodeRef: image-pad@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Merge.image }}"
+        left: "0"
+        right: "192"
+        top: "0"
+        bottom: "0"
+        fill: "edge"
+        feather: "24"
+  SaveInput:
+    name: 落盘 b1_ch_input
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.input_image }}"
+        filename_prefix: "b1_ch_input"
+        output_dir: "~/flowx-e2e-out"
+
+  SaveR:
+    name: 落盘 b1_ch_1_red
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ ExtractR.image }}"
+        filename_prefix: "b1_ch_1_red"
+        output_dir: "~/flowx-e2e-out"
+
+  SaveG:
+    name: 落盘 b1_ch_2_green
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ ExtractG.image }}"
+        filename_prefix: "b1_ch_2_green"
+        output_dir: "~/flowx-e2e-out"
+
+  SaveB:
+    name: 落盘 b1_ch_3_blue
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ ExtractB.image }}"
+        filename_prefix: "b1_ch_3_blue"
+        output_dir: "~/flowx-e2e-out"
+
+  SaveMerge:
+    name: 落盘 b1_ch_4_merge
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Merge.image }}"
+        filename_prefix: "b1_ch_4_merge"
+        output_dir: "~/flowx-e2e-out"
+
+  SavePad:
+    name: 落盘 b1_ch_5_pad
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Pad.image }}"
+        filename_prefix: "b1_ch_5_pad"
+        output_dir: "~/flowx-e2e-out"
+
+  SavePadMask:
+    name: 落盘 b1_ch_6_pad_mask
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Pad.mask }}"
+        filename_prefix: "b1_ch_6_pad_mask"
+        output_dir: "~/flowx-e2e-out"

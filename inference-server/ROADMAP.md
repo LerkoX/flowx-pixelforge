@@ -5,6 +5,20 @@
 > 本文档给出差距清单与分阶段演进计划。判断依据：ComfyUI 生态流行度（ControlNet 系、SDXL 系、
 > 高清放大链为流量大头）与对本服务现有代码的侵入程度。
 
+
+### 阶段 10 / B3：分割与分块超分（2026-10-11 实施完成）
+
+- **G2 SAM/GroundingDINO**：`seg.py` 族（5 算子）——`SamModel` 点/框提示（image embedding 缓存 ⇒ 复选 0.08s）、
+  自动全图分割（mask-generation pipeline + IoU 去重 + keep 选择）、GroundingDINO 文本检测（`_norm_prompt` 补尾点）、
+  文本→SAM 像素级蒙版。模型走 `model_manager` LRU（`sam:<variant>` / `gd:<variant>`）。
+- **G4 分块重绘超分**：`tiled.py` 族 —— `tiled.plan`（纯计算切片网格，零 GPU）与 `tiled.apply`
+  （逐块 img2img + **权重归一化融合** `out=Σtile·W/ΣW` + 可选接缝带二次重绘 + job 逐块进度），
+  复用 `app.ops` 原语（`resolve_pipe`/`vae_encode`/`sample`/`vae_decode`）。
+- **服务端 `app/` 零改动**；依赖零新增（不做镜像重建）；8GB Pascal 实测 512×384→1024×768（tile 512/overlap 64，6 块×8 步）通过。
+- 未做：SAM2（`transformers==4.44.2` 无 `Sam2Model`，升版需重验 Pascal 全链）、Tiled Diffusion 跨块注意力、
+  fp16 SAM（Pascal fp16 吞吐 1/64）。
+
+
 ## 0. 现状盘点（已对齐的部分）
 
 | ComfyUI 概念 | 本服务对应 | 状态 |
@@ -164,11 +178,22 @@ SD1.5 的 fp16 VAE 解码会偶发纯黑图，社区标准修法是 VAE 单独 f
 ### 阶段 10：图像后处理与电商能力补齐（2026-10-10 立项，清单见 dev-plan §四十四）
 
 对标 ComfyUI 六大类图像处理能力盘点后的缺口补齐（已覆盖部分见 dev-plan §44.1，勿重复投入）：
-- **B1（低成本先行）**：传统滤镜算子（`image.adjust/curves/blur/sharpen/noise/channel`，PIL 零 GPU）+
-  Outpainting 扩图（`image.pad` + 既有 inpaint 链）+ 预处理器补齐
-  （`preprocess.anyline/teed/normal/lineart/softedge/scribble/seg`，controlnet_aux 已在依赖）
-- **B2（核心价值）**：RMBG 自动抠图（`matting.rmbg`，优选 transformers 路径零新依赖）→
-  面部修复（`face.restore`，CodeFormer/GFPGAN）
+- **B1（已交付）**：传统滤镜算子（`image.adjust/curves/blur/sharpen/noise/channel`，PIL 零 GPU）
+  【✅ G5 滤镜 8 节点 + G3 扩图：镜 v1.10.0，exec 600/601/602 全绿，见 dev-plan §四十六】
+  Outpainting 扩图（`image.pad` + 既有 inpaint 链）【✅ 判决 10.9x】
+  + 预处理器补齐【✅ G7 已交付 7 算子：anyline / lineart(三档) / softedge(pidi|hed) / scribble /
+  mlsd / normal / shuffle，镜 v1.11.2，exec 605 全绿】；**teed**（`TheMistoAI/TEED` 仓库已私有，401）
+  与 **seg**（controlnet_aux 0.0.10 无语义分割检测器）未纳入，seg 语义并入 G2（SAM）批次。
+  预处理器权重清单见 `nodes/README.md`（宿主机 `/models/preprocessors/`，零网络加载）
+- **B2（核心价值，2026-10-11 实施中）**：抠图算子 `matting.birefnet`（**BiRefNet**，用户拍板；
+  `RMBG-2.0` 为 gated 401、`RMBG-1.4` 备选）+ 人脸修复算子 `face.restore`
+  （spandrel **GFPGAN / RestoreFormer**；**CodeFormer 不在 spandrel 0.4.2 发布版里**，不做）。
+  新增依赖 `timm==0.9.16` / `kornia==0.7.4` / `einops==0.8.0`
+  （kornia 0.8+ 要求 py≥3.11，Pascal 基础镜像 py3.10 ⇒ 排除）。权重清单见 `nodes/README.md`
+  （`/models/matting/{lite,main,portrait}` 各 4 件、`/models/facerestore/*.pth`）。
+  真机探针（GTX 1080 fp16）：lite@1024 **930MB / ~1.5s**、main@1024 1810MB、portrait@1024 2251MB、
+  lite@2048 4315MB（reserved 6.2G，8GB 卡余量紧）；两次调用逐字节一致。
+  详见 dev-plan §四十八
 - **B3**：SAM / GroundingDINO 交互与文本分割（`seg.sam` / `seg.grounding`）+ 分块重绘超分
   （`image.tiled_upscale`，对标 Ultimate SD Upscale）
 - **B4（重工程，各自立项）**：DDColor 上色 → IC-Light 重打光 → PuLID → 电商流水线模板
@@ -187,6 +212,15 @@ SD1.5 的 fp16 VAE 解码会偶发纯黑图，社区标准修法是 VAE 单独 f
 
 约束：新增依赖须同改 `requirements.txt` + `requirements-pascal.txt` 并重建镜像；
 Pascal 钉版（transformers==4.44.2 / diffusers==0.35.2 / numpy<2）不得随意放开。
+
+**⚠️ 真机验收环境纪律（2026-10-11 实测，修正前一版结论）**：
+- **手机经局域网可直连推理服务** `http://192.168.5.60:8100`（鉴权头完好，`/ops` 200 全量算子）
+  ⇒ **local 执行器完全可用**（service_url 填宿主机局域网地址）；docker 执行器填容器内网
+  `http://172.17.0.1:8100`。
+- cpolar **HTTPS 公网隧道会剥离 `Authorization` 头**（`/health` 免鉴权才通）⇒ 经隧道的鉴权调用一律 401，
+  不可用于验收；需要外网侧访问时用端口隧道（TCP）而非 HTTPS 隧道。
+- 插件上传：文件名 = `op_name.replace(".", "_") + ".py"`，**跨文件重名算子一律 409 全量回滚** ⇒
+  新算子族必须独立文件（`nodes/_tools/check-ops.py` 已作为 gate J 静态拦截）。
 
 ## 3. 架构守护：`sample()` 的分派纪律
 
@@ -268,4 +302,20 @@ exec 361/362）。这与遗留清单 #6 的次生教训（decode OOM 后 22s/步
 | M7 体验 | 7 | 进度/取消/懒执行 | 引擎 + WS（进度/取消 ✅；WS 推送与懒执行未做） |
 | M8 Flux | 8 | 最新架构 | 独立采样路径（SD3.5 ✅ 已点亮；FLUX 未做） |
 | M9 视频 | 9 | i2v / 首尾帧插帧 | 异步任务 + 显存治理（i2v ✅；FLF2V 搁置） |
-| M10 图像后处理与电商 | 10 | 滤镜/扩图/抠图/分割/分块超分/修复/上色/重打光 | 算子插件为主（34 个细粒度节点，全带 UI），清单见 dev-plan §四十四（待实施，B1~B4） |
+| M10 图像后处理与电商 | 10 | 滤镜/扩图/抠图/分割/分块超分/修复/上色/重打光 | 算子插件为主（34 个细粒度节点，全带 UI），清单见 dev-plan §四十四：**B1 ✅ 已交付**（滤镜/扩图/预处理器）、**B2 🔄 实施中**（BiRefNet 抠图 + GFPGAN 人脸修复，dev-plan §48）、B3/B4 待立项 |
+
+### 算子名可能带版本后缀（F1，2026-10-11）
+
+节点侧交付的插件族文件现在把注册名写成 **`<基名>@<族内容 hash 前 12 位>`**
+（由 `nodes/_tools/sync-common.py` 打戳，族内注册调用统一经 `_VersionedRegistry` 包装），
+上传落盘名相应为 `<OP_FAMILY>_<版本>.py`。服务端**无需改动**（算子名对注册表是不透明
+字符串），但维护时注意：
+
+- `/ops` 里同名基名可能有多条（不同版本并存，各自 `plugin_hash`/`plugin_file` 不同）；
+  未版本化的历史算子（`sd.sample`、`preprocess.canny` 等）继续以基名存在，两种命名共存。
+- 内容寻址之后，"同文件名不同内容"的静默覆盖在版本化族里不再发生（不同内容 ⇒ 不同名
+  ⇒ 不同文件）；`detect_conflicts` 的 409 兜底只对**未版本化**的历史文件仍有意义。
+- 清理旧版本：`nodes/_tools/purge-plugin-versions.py`（默认 dry-run），按本地族版本戳
+  删除被取代的版本文件；删除会注销该版本的算子，旧节点再跑会自行重传（自愈）。
+- 已知服务端侧遗留：409 回滚后 `plugin_ops` 归属记账会串到失败文件上（删一个文件可能连带
+  注销 legacy 算子）——F1 之后该路径基本不再触发，但仍是待修项（见 `flowx-dev-plan.md` §46.7）。

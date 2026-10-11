@@ -11,3 +11,8 @@ imageio-ffmpeg>=0.5
 peft>=0.12
 ultralytics>=8.2  # detail.refine 算子（detail-refine 插件节点）的脸/手 YOLO 检测器依赖
 opencv-python-headless>=4.8  # ultralytics 的 cv2 依赖；必须用 headless 版（容器无 libGL，opencv-python 会 import 失败）
+# G1 抠图（BiRefNet，matting.py）：birefnet.py 用到 timm.layers / kornia.filters / einops。
+# kornia 钉 0.7.x（0.8+ 需 py>=3.11；Pascal 镜像基础是 py3.10，两镜像钉同版保持行为一致）。
+timm==0.9.16
+kornia==0.7.4
+einops==0.8.0

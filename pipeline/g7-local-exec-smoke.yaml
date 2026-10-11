@@ -1,0 +1,26 @@
+Name: g7-local-exec-smoke
+Description: >-
+  G7 本地执行器冒烟：node executor=local（Termux 侧直跑），service_url 用宿主机
+  局域网地址 http://192.168.5.60:8100（手机与宿主同网段，鉴权头不被剥离——
+  对比公网 HTTPS 隧道会剥 Authorization 头导致 401）。验证 local 执行器链路可用。
+Param:
+  service_url: "http://192.168.5.60:8100"
+  service_token: "30e494999da13134808ee280aea6dffd"
+  input_image: "b4d217d20b0940ac9f59723bd1fc346a"
+Graph: |
+  stateDiagram-v2
+    [*] --> LineartStd
+    LineartStd --> [*]
+Nodes:
+  LineartStd:
+    name: 线稿（standard，local 执行器）
+    config:
+      nodeRef: preprocess-lineart@1.0.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.input_image }}"
+        variant: "standard"
+        detect_resolution: "512"
+        coarse: "false"

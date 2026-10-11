@@ -1,0 +1,192 @@
+Name: b1-filters-e2e
+Description: >-
+  G5 滤镜族真机 e2e（B1 §45.6）：输入图 → 亮度/对比度/伽马 → HSL → 曲线 → 高斯模糊 →
+  USM 锐化 → 噪点，线性链逐级验证 6 个滤镜节点的真实行为（每级输出对象可逐个下载比对）。
+  节点侧纯 PIL，不占显存；执行器 local（Termux 侧）或 docker 均可。
+Param:
+  service_url: "http://172.17.0.1:8100"
+  # save-image 等 local 执行器节点在手机侧跑，必须用手机可达地址
+  service_url_local: "http://192.168.5.60:8100"
+  service_token: "30e494999da13134808ee280aea6dffd"   # 服务端 INFERENCE_TOKEN（docker 执行器直连内网，不经隧道）
+  input_image: "b4d217d20b0940ac9f59723bd1fc346a"
+Graph: |
+  stateDiagram-v2
+    [*] --> Adjust
+    Adjust --> Hue
+    Hue --> Curve
+    Curve --> Blur
+    Blur --> Sharp
+    Sharp --> Noise
+    Noise --> [*]
+    [*] --> SaveInput
+    Adjust --> SaveAdjust
+    Hue --> SaveHue
+    Curve --> SaveCurve
+    Blur --> SaveBlur
+    Sharp --> SaveSharp
+    Noise --> SaveNoise
+    SaveInput --> [*]
+    SaveAdjust --> [*]
+    SaveHue --> [*]
+    SaveCurve --> [*]
+    SaveBlur --> [*]
+    SaveSharp --> [*]
+    SaveNoise --> [*]
+Nodes:
+  Adjust:
+    name: 亮度对比度伽马
+    config:
+      nodeRef: image-adjust@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.input_image }}"
+        brightness: "1.25"
+        contrast: "1.1"
+        gamma: "0.9"
+        sharpness: "1.0"
+  Hue:
+    name: 色相饱和度
+    config:
+      nodeRef: image-hsl@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Adjust.image }}"
+        hue: "20"
+        saturation: "1.15"
+        lightness: "0.0"
+  Curve:
+    name: 曲线映射
+    config:
+      nodeRef: image-curves@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Hue.image }}"
+        channel: "all"
+        points: "0,0;128,150;255,255"
+  Blur:
+    name: 高斯模糊
+    config:
+      nodeRef: image-blur@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Curve.image }}"
+        mode: "gaussian"
+        radius: "3"
+        angle: "0"
+  Sharp:
+    name: USM 锐化
+    config:
+      nodeRef: image-sharpen@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Blur.image }}"
+        mode: "usm"
+        radius: "2"
+        percent: "200"
+        threshold: "2"
+  Noise:
+    name: 均匀噪点
+    config:
+      nodeRef: image-noise@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Sharp.image }}"
+        mode: "uniform"
+        amount: "0.12"
+        monochrome: "false"
+        seed: "7"
+  SaveInput:
+    name: 落盘 b1_filters_input
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.input_image }}"
+        filename_prefix: "b1_filters_input"
+        output_dir: "~/flowx-e2e-out"
+
+  SaveAdjust:
+    name: 落盘 b1_filters_1_adjust
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Adjust.image }}"
+        filename_prefix: "b1_filters_1_adjust"
+        output_dir: "~/flowx-e2e-out"
+
+  SaveHue:
+    name: 落盘 b1_filters_2_hue
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Hue.image }}"
+        filename_prefix: "b1_filters_2_hue"
+        output_dir: "~/flowx-e2e-out"
+
+  SaveCurve:
+    name: 落盘 b1_filters_3_curve
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Curve.image }}"
+        filename_prefix: "b1_filters_3_curve"
+        output_dir: "~/flowx-e2e-out"
+
+  SaveBlur:
+    name: 落盘 b1_filters_4_blur
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Blur.image }}"
+        filename_prefix: "b1_filters_4_blur"
+        output_dir: "~/flowx-e2e-out"
+
+  SaveSharp:
+    name: 落盘 b1_filters_5_sharp
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Sharp.image }}"
+        filename_prefix: "b1_filters_5_sharp"
+        output_dir: "~/flowx-e2e-out"
+
+  SaveNoise:
+    name: 落盘 b1_filters_6_noise
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Noise.image }}"
+        filename_prefix: "b1_filters_6_noise"
+        output_dir: "~/flowx-e2e-out"

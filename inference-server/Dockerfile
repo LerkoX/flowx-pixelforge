@@ -4,6 +4,7 @@ WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+RUN python -c "import importlib.metadata as im; import timm, kornia, einops; print('deps smoke ok, timm', im.version('timm'), 'kornia', im.version('kornia'))"
 
 COPY app/ ./app/
 

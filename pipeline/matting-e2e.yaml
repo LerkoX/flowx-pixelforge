@@ -1,0 +1,313 @@
+Name: matting-e2e
+Description: >-
+  B2 / G1 抠图族真机 e2e（dev-plan §48.6）：输入图 → BiRefNet 三变体（lite/main/portrait）
+  → alpha 精修（二值化+羽化 / 灰阶+羽化+扩张）→ 换底合成（纯白底 / 背景图）。
+  串行提交（服务端单 worker；三个变体进程级常驻，峰值约 3.2GB）。末端全部落盘
+  （save-image，local 执行器），便于本机纯文件复核。
+Param:
+  service_url: "http://172.17.0.1:8100"
+  # save-image 等 local 执行器节点在手机侧跑，必须用手机可达地址
+  service_url_local: "http://192.168.5.60:8100"
+  service_token: "30e494999da13134808ee280aea6dffd"
+  input_image: "371269f9f8e24d41af380557a4e28ab2"
+Graph: |
+  stateDiagram-v2
+    [*] --> BiRefLite
+    BiRefLite --> BiRefMain
+    BiRefMain --> BiRefPortrait
+    BiRefPortrait --> RefineLite
+    RefineLite --> RefineSoft
+    RefineSoft --> CompWhite
+    CompWhite --> CompImage
+    CompImage --> BiRefPlain
+    BiRefPlain --> CompWhitePure
+    CompWhitePure --> [*]
+    [*] --> SaveInput
+    BiRefLite --> SaveMaskLite
+    BiRefLite --> SaveRGBALite
+    BiRefMain --> SaveMaskMain
+    BiRefPortrait --> SaveMaskPortrait
+    RefineLite --> SaveMaskRefined
+    RefineSoft --> SaveMaskSoft
+    CompWhite --> SaveCompWhite
+    CompImage --> SaveCompImage
+    BiRefPlain --> SaveRGBAPlain
+    BiRefPlain --> CompWhitePure
+    CompWhitePure --> SaveCompWhitePure
+
+    SaveInput --> [*]
+    SaveMaskLite --> [*]
+    SaveRGBALite --> [*]
+    SaveMaskMain --> [*]
+    SaveMaskPortrait --> [*]
+    SaveMaskRefined --> [*]
+    SaveMaskSoft --> [*]
+    SaveCompWhite --> [*]
+    SaveCompImage --> [*]
+Nodes:
+  BiRefLite:
+    name: 抠图 lite@1024
+    config:
+      nodeRef: matting-birefnet@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.input_image }}"
+        variant: "lite"
+        resolution: "1024"
+        refine: "true"
+        refine_radius: "90"
+        alpha_gamma: "1.0"
+        use_checkpoint: "false"
+        invert: "false"
+  BiRefMain:
+    name: 抠图 main@1024
+    config:
+      nodeRef: matting-birefnet@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.input_image }}"
+        variant: "main"
+        resolution: "1024"
+        refine: "true"
+        refine_radius: "90"
+        alpha_gamma: "1.0"
+        use_checkpoint: "false"
+        invert: "false"
+  BiRefPortrait:
+    name: 抠图 portrait@1024
+    config:
+      nodeRef: matting-birefnet@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.input_image }}"
+        variant: "portrait"
+        resolution: "1024"
+        refine: "true"
+        refine_radius: "90"
+        alpha_gamma: "1.0"
+        use_checkpoint: "false"
+        invert: "false"
+  RefineLite:
+    name: 精修：二值化+羽化+去杂点
+    config:
+      nodeRef: matting-refine@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        mask: "{{ BiRefLite.mask }}"
+        threshold: "128"
+        gamma: "1.0"
+        contrast: "1.0"
+        feather: "2"
+        grow: "0"
+        despeckle: "5"
+        invert: "false"
+  RefineSoft:
+    name: 精修：灰阶+羽化+扩张
+    config:
+      nodeRef: matting-refine@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        mask: "{{ BiRefLite.mask }}"
+        threshold: "0"
+        gamma: "1.0"
+        contrast: "1.0"
+        feather: "6"
+        grow: "2"
+        despeckle: "0"
+        invert: "false"
+  CompWhite:
+    name: 换底：纯白底
+    config:
+      nodeRef: matting-composite@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ BiRefLite.image }}"
+        mask: "{{ RefineLite.mask }}"
+        bg_mode: "color"
+        bg_color: "#FFFFFF"
+        feather: "0"
+        x: "0"
+        y: "0"
+  CompImage:
+    name: 换底：背景图 cover
+    config:
+      nodeRef: matting-composite@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ BiRefLite.image }}"
+        mask: "{{ RefineSoft.mask }}"
+        bg_mode: "image"
+        bg_image: "{{ Param.input_image }}"
+        feather: "0"
+        x: "0"
+        y: "0"
+  SaveInput:
+    name: 落盘 input
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.input_image }}"
+        filename_prefix: "matting_input"
+        output_dir: "~/flowx-e2e-out"
+  SaveMaskLite:
+    name: 落盘 mask_lite
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ BiRefLite.mask }}"
+        filename_prefix: "matting_mask_lite"
+        output_dir: "~/flowx-e2e-out"
+  SaveRGBALite:
+    name: 落盘 rgba_lite
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ BiRefLite.image }}"
+        filename_prefix: "matting_rgba_lite"
+        output_dir: "~/flowx-e2e-out"
+  SaveMaskMain:
+    name: 落盘 mask_main
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ BiRefMain.mask }}"
+        filename_prefix: "matting_mask_main"
+        output_dir: "~/flowx-e2e-out"
+  SaveMaskPortrait:
+    name: 落盘 mask_portrait
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ BiRefPortrait.mask }}"
+        filename_prefix: "matting_mask_portrait"
+        output_dir: "~/flowx-e2e-out"
+  SaveMaskRefined:
+    name: 落盘 mask_refined
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ RefineLite.mask }}"
+        filename_prefix: "matting_mask_refined"
+        output_dir: "~/flowx-e2e-out"
+  SaveMaskSoft:
+    name: 落盘 mask_soft
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ RefineSoft.mask }}"
+        filename_prefix: "matting_mask_soft"
+        output_dir: "~/flowx-e2e-out"
+  SaveCompWhite:
+    name: 落盘 comp_white
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ CompWhite.image }}"
+        filename_prefix: "matting_comp_white"
+        output_dir: "~/flowx-e2e-out"
+  SaveCompImage:
+    name: 落盘 comp_image
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ CompImage.image }}"
+        filename_prefix: "matting_comp_image"
+        output_dir: "~/flowx-e2e-out"
+
+  BiRefPlain:
+    name: 抠图 lite@1024（refine 关，做逐字节判决）
+    config:
+      nodeRef: matting-birefnet@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.input_image }}"
+        variant: "lite"
+        resolution: "1024"
+        refine: "false"
+        refine_radius: "90"
+        alpha_gamma: "1.0"
+        use_checkpoint: "false"
+        invert: "false"
+
+  CompWhitePure:
+    name: 换底：纯白底（refine 关 + 原始 mask，逐字节无损）
+    config:
+      nodeRef: matting-composite@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ BiRefPlain.image }}"
+        mask: "{{ BiRefLite.mask }}"
+        bg_mode: "color"
+        bg_color: "#FFFFFF"
+        feather: "0"
+        x: "0"
+        y: "0"
+
+  SaveRGBAPlain:
+    name: 落盘 rgba_plain
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ BiRefPlain.image }}"
+        filename_prefix: "matting_rgba_plain"
+        output_dir: "~/flowx-e2e-out"
+
+  SaveCompWhitePure:
+    name: 落盘 comp_white_pure
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ CompWhitePure.image }}"
+        filename_prefix: "matting_comp_white_pure"
+        output_dir: "~/flowx-e2e-out"

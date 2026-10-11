@@ -39,7 +39,9 @@ numpy<2
 # opencv-python（headless 提供同一 cv2 API，ultralytics 运行时不受影响）。
 controlnet_aux==0.0.10
 # M6 UPSCALE_MODEL 链：像素放大模型加载（RealESRGAN/SwinIR 架构自动识别）。
-# 已真机试装验证：纯 python+torch 依赖，不拉动 numpy/torch 版本
+# 已真机试装验证：纯 python+torch 依赖，不拉动 numpy/torch 版本。
+# 0.4.2 = 当前最新发布版；实查其 wheel 内的 face 架构只有 GFPGAN + RestoreFormer，
+# **没有 CodeFormer**（dev-plan §48.3）——face.restore 的模型选择以此为准。
 spandrel==0.4.2
 # InstantID 人脸检测/识别（plugins/instantid_ops.py，face.analyze）：
 # insightface 本体纯 python（模型为 onnx，运行期走 onnxruntime CPU，不占显存）。
@@ -59,3 +61,13 @@ scipy
 # sentencepiece 供 T5 tokenizer_2（spiece.model）；0.17.1/0.2.0 组合实测通过
 gguf==0.17.1
 sentencepiece==0.2.0
+
+# M10 G1 抠图（BiRefNet，节点侧 server_ops/matting.py）：birefnet.py 顶层只用到
+#   timm.layers（DropPath/to_2tuple/trunc_normal_）、kornia.filters.laplacian、einops.rearrange
+# 三个都是纯 python/小体积轮子，不拉动 torch/numpy 版本。
+# kornia 必须钉 0.7.x：0.8.0+ 起 requires_python>=3.11，而本镜像基础是 py3.10。
+# 注意：BiRefNet 官方 requirements 里的 opencv-python/scipy/scikit-image 是训练/评测
+# 脚本的需求，birefnet.py 不需要——别顺手装（opencv 非 headless 会抢 cv2 命名空间）。
+timm==0.9.16
+kornia==0.7.4
+einops==0.8.0

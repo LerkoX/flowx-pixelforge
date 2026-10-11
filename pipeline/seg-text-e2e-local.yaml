@@ -1,0 +1,98 @@
+Name: seg-text-e2e-local
+Description: B3/G2 文本提示分割 e2e（全 local）：加载图 → 装载 GroundingDINO → 文本检测（框/标签/置信度）→ 框喂 SAM 出像素级蒙版 → 落盘标注/蒙版/框并集
+Param:
+  service_url: "http://4dc21d2a.r7.cpolar.cn"
+  service_url_host: "http://4dc21d2a.r7.cpolar.cn"
+  service_token: "30e494999da13134808ee280aea6dffd"
+  image_path: "~/flowx-input/b3_person.png"
+Graph: |
+  stateDiagram-v2
+    [*] --> Ensure
+    Ensure --> LoadImage
+    Ensure --> GDLoad
+    LoadImage --> GDDetect
+    GDLoad --> GDDetect
+    GDDetect --> RBox
+    GDDetect --> RMask
+    LoadImage --> SaveInput
+    RBox --> [*]
+    RMask --> [*]
+    SaveInput --> [*]
+Nodes:
+  Ensure:
+    name: 服务健康检查
+    config:
+      nodeRef: inference-ensure@1.1.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        wait_seconds: 60
+  LoadImage:
+    name: 加载原图
+    config:
+      nodeRef: load-image@1.3.0
+      executor: local
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image_path: "{{ Param.image_path }}"
+  GDLoad:
+    name: 装载 GroundingDINO（tiny）
+    config:
+      nodeRef: grounding-dino-load@1.0.0
+      executor: local
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        variant: "tiny"
+        dtype: "fp32"
+  GDDetect:
+    name: 文本检测（框→SAM 像素级）
+    config:
+      nodeRef: grounding-detect@1.0.0
+      executor: local
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ LoadImage.image }}"
+        model: "{{ GDLoad.model }}"
+        prompt: "person"
+        box_threshold: 0.30
+        text_threshold: 0.25
+        max_boxes: 8
+        sam_model: "sam:vit_l"
+        overlay: 0.5
+  RBox:
+    name: 落盘-检测框并集蒙版
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ GDDetect.mask }}"
+        filename_prefix: "seg_text_mask"
+        output_dir: "~/flowx-e2e-out"
+  RMask:
+    name: 落盘-检测标注图
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ GDDetect.annotated }}"
+        filename_prefix: "seg_text_annotated"
+        output_dir: "~/flowx-e2e-out"
+  SaveInput:
+    name: 落盘-输入图
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ LoadImage.image }}"
+        filename_prefix: "seg_text_input"
+        output_dir: "~/flowx-e2e-out"

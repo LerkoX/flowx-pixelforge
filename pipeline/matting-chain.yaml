@@ -1,0 +1,167 @@
+Name: matting-chain
+Description: >-
+  B2 / G1 抠图族真机 e2e（dev-plan §48.6）：输入图 → BiRefNet 三变体（lite/main/portrait）
+  → alpha 精修（二值化+羽化 / 灰阶+羽化+扩张）→ 换底合成（纯白底 / 背景图）。
+  串行提交（服务端单 worker；三个变体进程级常驻，峰值约 3.2GB）。本变体**不含落盘节点**（手机不在局域网时用）：产物只落在对象仓库，
+  由宿主侧脚本拉取后写 D:\flowx-data\models\_e2e 复核。
+Param:
+  service_url: "http://172.17.0.1:8100"
+  service_token: "30e494999da13134808ee280aea6dffd"
+  input_image: "371269f9f8e24d41af380557a4e28ab2"
+Graph: |
+  stateDiagram-v2
+    [*] --> BiRefLite
+    BiRefLite --> BiRefMain
+    BiRefMain --> BiRefPortrait
+    BiRefPortrait --> RefineLite
+    RefineLite --> RefineSoft
+    RefineSoft --> CompWhite
+    CompWhite --> CompImage
+    CompImage --> BiRefPlain
+    BiRefPlain --> CompWhitePure
+    CompWhitePure --> [*]
+    [*] --> SaveInput
+    BiRefPlain --> CompWhitePure
+Nodes:
+  BiRefLite:
+    name: 抠图 lite@1024
+    config:
+      nodeRef: matting-birefnet@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.input_image }}"
+        variant: "lite"
+        resolution: "1024"
+        refine: "true"
+        refine_radius: "90"
+        alpha_gamma: "1.0"
+        use_checkpoint: "false"
+        invert: "false"
+  BiRefMain:
+    name: 抠图 main@1024
+    config:
+      nodeRef: matting-birefnet@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.input_image }}"
+        variant: "main"
+        resolution: "1024"
+        refine: "true"
+        refine_radius: "90"
+        alpha_gamma: "1.0"
+        use_checkpoint: "false"
+        invert: "false"
+  BiRefPortrait:
+    name: 抠图 portrait@1024
+    config:
+      nodeRef: matting-birefnet@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.input_image }}"
+        variant: "portrait"
+        resolution: "1024"
+        refine: "true"
+        refine_radius: "90"
+        alpha_gamma: "1.0"
+        use_checkpoint: "false"
+        invert: "false"
+  RefineLite:
+    name: 精修：二值化+羽化+去杂点
+    config:
+      nodeRef: matting-refine@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        mask: "{{ BiRefLite.mask }}"
+        threshold: "128"
+        gamma: "1.0"
+        contrast: "1.0"
+        feather: "2"
+        grow: "0"
+        despeckle: "5"
+        invert: "false"
+  RefineSoft:
+    name: 精修：灰阶+羽化+扩张
+    config:
+      nodeRef: matting-refine@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        mask: "{{ BiRefLite.mask }}"
+        threshold: "0"
+        gamma: "1.0"
+        contrast: "1.0"
+        feather: "6"
+        grow: "2"
+        despeckle: "0"
+        invert: "false"
+  CompWhite:
+    name: 换底：纯白底
+    config:
+      nodeRef: matting-composite@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ BiRefLite.image }}"
+        mask: "{{ RefineLite.mask }}"
+        bg_mode: "color"
+        bg_color: "#FFFFFF"
+        feather: "0"
+        x: "0"
+        y: "0"
+  CompImage:
+    name: 换底：背景图 cover
+    config:
+      nodeRef: matting-composite@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ BiRefLite.image }}"
+        mask: "{{ RefineSoft.mask }}"
+        bg_mode: "image"
+        bg_image: "{{ Param.input_image }}"
+        feather: "0"
+        x: "0"
+        y: "0"
+  BiRefPlain:
+    name: 抠图 lite@1024（refine 关，做逐字节判决）
+    config:
+      nodeRef: matting-birefnet@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.input_image }}"
+        variant: "lite"
+        resolution: "1024"
+        refine: "false"
+        refine_radius: "90"
+        alpha_gamma: "1.0"
+        use_checkpoint: "false"
+        invert: "false"
+
+  CompWhitePure:
+    name: 换底：纯白底（refine 关 + 原始 mask，逐字节无损）
+    config:
+      nodeRef: matting-composite@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ BiRefPlain.image }}"
+        mask: "{{ BiRefLite.mask }}"
+        bg_mode: "color"
+        bg_color: "#FFFFFF"
+        feather: "0"
+        x: "0"
+        y: "0"

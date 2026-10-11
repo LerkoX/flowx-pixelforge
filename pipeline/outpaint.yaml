@@ -1,0 +1,162 @@
+Name: outpaint
+Description: >-
+  Outpainting（G3 §45.3）：输入图 → 扩画布（右扩 256px，edge 补边 + 羽化扩图蒙版）→ VAE 编码 →
+  latent 噪点蒙版 → KSampler(denoise=1.0) → VAE 解码，扩出区域由扩散模型补全内容。
+  判决口径（§39）：蒙版内平均差应远大于蒙版外（蒙版外仅 VAE 往返精度损失）。
+Param:
+  service_url: "http://172.17.0.1:8100"
+  # save-image 等 local 执行器节点在手机侧跑，必须用手机可达地址
+  service_url_local: "http://192.168.5.60:8100"
+  service_token: "30e494999da13134808ee280aea6dffd"   # 服务端 INFERENCE_TOKEN（docker 执行器直连内网，不经隧道）
+  input_image: "b4d217d20b0940ac9f59723bd1fc346a"
+Graph: |
+  stateDiagram-v2
+    [*] --> Ensure
+    Ensure --> LoadCheckpoint
+    Ensure --> Pad
+    LoadCheckpoint --> EncodePos
+    LoadCheckpoint --> EncodeNeg
+    LoadCheckpoint --> VAEEncode
+    Pad --> VAEEncode
+    VAEEncode --> SetNoiseMask
+    Pad --> SetNoiseMask
+    SetNoiseMask --> KSampler
+    EncodePos --> KSampler
+    EncodeNeg --> KSampler
+    KSampler --> VAEDecode
+    VAEDecode --> [*]
+    Pad --> SavePad
+    Pad --> SaveMask
+    VAEDecode --> SaveFinal
+    SavePad --> [*]
+    SaveMask --> [*]
+    SaveFinal --> [*]
+Nodes:
+  Ensure:
+    name: 服务健康检查
+    config:
+      nodeRef: inference-ensure@1.1.0
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        wait_seconds: 60
+  LoadCheckpoint:
+    name: Checkpoint加载
+    config:
+      nodeRef: checkpoint-loader@1.3.0
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        ckpt_name: "v1-5-pruned-emaonly"
+  EncodePos:
+    name: 正向提示词
+    config:
+      nodeRef: clip-text-encode@1.2.0
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        clip_ref: "{{ LoadCheckpoint.clip_ref }}"
+        text: "seamless continuation of the scene, forest and sky extending to the right, consistent lighting, masterpiece"
+  EncodeNeg:
+    name: 反向提示词
+    config:
+      nodeRef: clip-text-encode@1.2.0
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        clip_ref: "{{ LoadCheckpoint.clip_ref }}"
+        text: "lowres, blurry, watermark, text, seam, border"
+  Pad:
+    name: 右扩256
+    config:
+      nodeRef: image-pad@1.0.0
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Param.input_image }}"
+        left: "0"
+        right: "256"
+        top: "0"
+        bottom: "0"
+        fill: "edge"
+        feather: "32"
+  VAEEncode:
+    name: VAE编码
+    config:
+      nodeRef: vae-encode@1.1.0
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        vae_ref: "{{ LoadCheckpoint.vae_ref }}"
+        image: "{{ Pad.image }}"
+  SetNoiseMask:
+    name: 扩图噪点蒙版
+    config:
+      nodeRef: latent-set-noise-mask@1.1.0
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        latent: "{{ VAEEncode.latent }}"
+        mask: "{{ Pad.mask }}"
+  KSampler:
+    name: KSampler
+    config:
+      nodeRef: ksampler@1.5.0
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        model_ref: "{{ LoadCheckpoint.model_ref }}"
+        positive: "{{ EncodePos.conditioning }}"
+        negative: "{{ EncodeNeg.conditioning }}"
+        latent: "{{ SetNoiseMask.latent }}"
+        seed: "12345"
+        steps: "20"
+        cfg: "7"
+        sampler_name: "euler"
+        scheduler: "normal"
+        denoise: "1.0"
+        preview_every: "5"
+  VAEDecode:
+    name: VAE解码
+    config:
+      nodeRef: vae-decode@1.1.0
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        vae_ref: "{{ LoadCheckpoint.vae_ref }}"
+        latent: "{{ KSampler.latent }}"
+  SavePad:
+    name: 落盘 outpaint_1_pad
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Pad.image }}"
+        filename_prefix: "outpaint_1_pad"
+        output_dir: "~/flowx-e2e-out"
+
+  SaveMask:
+    name: 落盘 outpaint_2_mask
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Pad.mask }}"
+        filename_prefix: "outpaint_2_mask"
+        output_dir: "~/flowx-e2e-out"
+
+  SaveFinal:
+    name: 落盘 outpaint_3_final
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ VAEDecode.image }}"
+        filename_prefix: "outpaint_3_final"
+        output_dir: "~/flowx-e2e-out"
