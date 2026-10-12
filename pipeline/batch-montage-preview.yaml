@@ -1,0 +1,70 @@
+Name: batch-montage-preview
+Description: B5/52.2 G11 批量①：目录 → 批量加载 → 联系表拼图（序号标签）→ 落盘
+Param:
+  service_url: "http://4dc21d2a.r7.cpolar.cn"
+  service_url_host: "http://4dc21d2a.r7.cpolar.cn"
+  service_token: "30e494999da13134808ee280aea6dffd"
+  corpus_dir: "~/flowx-input"
+Graph: |
+  stateDiagram-v2
+  [*] --> Ensure
+  Ensure --> BatchLoad
+  BatchLoad --> Montage
+  Montage --> SavePreview
+  SavePreview --> [*]
+Nodes:
+  Ensure:
+    name: Ensure
+    config:
+      nodeRef: inference-ensure@1.1.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        wait_seconds: 60
+  BatchLoad:
+    name: BatchLoad
+    config:
+      nodeRef: image-batch-load@1.0.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_url_host: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        dir: "{{ Param.corpus_dir }}"
+        pattern: "*.png"
+        sort: "name"
+        reverse: "false"
+        limit: 0
+        offset: 0
+        recursive: "false"
+  Montage:
+    name: Montage
+    config:
+      nodeRef: image-montage@1.0.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_url_host: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        images: "{{ BatchLoad.images }}"
+        names: "{{ BatchLoad.names }}"
+        cols: 0
+        cell_w: 320
+        cell_h: 240
+        pad: 8
+        label: "name"
+        label_h: 20
+        bg: "#161618"
+        fit: "fit"
+  SavePreview:
+    name: SavePreview
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Montage.image }}"
+        filename_prefix: "batch_preview"
+        output_dir: "~/flowx-e2e-out"

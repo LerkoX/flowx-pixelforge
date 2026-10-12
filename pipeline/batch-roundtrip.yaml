@@ -1,0 +1,87 @@
+Name: batch-roundtrip
+Description: B5/52.2 G11 批量②：3 张同尺寸图 → 批量另存（逐字节核对）+ 1:1 拼图（格内逐字节核对）
+Param:
+  service_url: "http://4dc21d2a.r7.cpolar.cn"
+  service_url_host: "http://4dc21d2a.r7.cpolar.cn"
+  service_token: "30e494999da13134808ee280aea6dffd"
+  corpus_dir: "~/flowx-input"
+  trio: "faded.png;gray_person.png;old_yellow.png"
+Graph: |
+  stateDiagram-v2
+  [*] --> Ensure
+  Ensure --> BatchLoad
+  BatchLoad --> BatchSave
+  BatchLoad --> Montage
+  Montage --> SaveGrid
+  BatchSave --> [*]
+  SaveGrid --> [*]
+Nodes:
+  Ensure:
+    name: Ensure
+    config:
+      nodeRef: inference-ensure@1.1.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        wait_seconds: 60
+  BatchLoad:
+    name: BatchLoad
+    config:
+      nodeRef: image-batch-load@1.0.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_url_host: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        dir: "{{ Param.corpus_dir }}"
+        pattern: "{{ Param.trio }}"
+        sort: "name"
+        reverse: "false"
+        limit: 0
+        offset: 0
+        recursive: "false"
+  BatchSave:
+    name: BatchSave
+    config:
+      nodeRef: image-batch-save@1.0.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        images: "{{ BatchLoad.images }}"
+        output_dir: "~/flowx-e2e-out"
+        filename_prefix: "batch_rt"
+        start_index: 1
+        zero_pad: 3
+        ext: "png"
+  Montage:
+    name: Montage
+    config:
+      nodeRef: image-montage@1.0.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_url_host: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        images: "{{ BatchLoad.images }}"
+        names: "{{ BatchLoad.names }}"
+        cols: 3
+        cell_w: 0
+        cell_h: 0
+        pad: 0
+        label: "none"
+        label_h: 18
+        bg: "#161618"
+        fit: "fit"
+  SaveGrid:
+    name: SaveGrid
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Montage.image }}"
+        filename_prefix: "batch_grid"
+        output_dir: "~/flowx-e2e-out"

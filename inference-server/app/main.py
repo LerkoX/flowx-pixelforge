@@ -138,6 +138,7 @@ def upload_plugin(p: PluginUpload):
         # 回滚：恢复旧文件或删除；注册表全量恢复快照
         registry._ops.clear()
         registry._ops.update(before)
+        sys.modules.pop(plugins.plugin_module_name(p.filename), None)
         if backup is not None:
             with open(path, "wb") as f:
                 f.write(backup)
@@ -145,11 +146,22 @@ def upload_plugin(p: PluginUpload):
             os.unlink(path)
         raise HTTPException(status_code=400,
                             detail=f"plugin load failed (rolled back): {e}")
-    conflicts = plugins.detect_conflicts(claimed, p.filename, plugin_ops, before)
+    # 幽灵归属（A1）：归属簿写的文件已不在盘上（手工 rm 后未重启）⇒ 不算冲突，
+    # 否则新文件被"已删除的文件"假 409 拦住、且 DELETE 反 404 清不掉。这里只在
+    # **本地视图**里剔除幽灵（不动全局 plugin_ops，失败路径必须零副作用）。
+    stale = plugins.stale_owners(claimed, p.filename, plugin_ops, PLUGINS_DIR)
+    stale_set = set(stale)
+    if stale:
+        print(f"[plugins] WARN: {p.filename} 发现幽灵归属 {stale}"
+              f"（归属簿指向已不存在的文件）——本次视为空闲，接管后清理", flush=True)
+    owner_view = {k: v for k, v in plugin_ops.items() if k not in stale_set}
+    before_view = {k: v for k, v in before.items() if k not in stale_set}
+    conflicts = plugins.detect_conflicts(claimed, p.filename, owner_view, before_view)
     if conflicts and not p.force:
-        # 冲突拒绝：注册表 + 文件全量回滚，409 报明归属
+        # 冲突拒绝：注册表 + 文件 + 模块缓存全量回滚，409 报明归属
         registry._ops.clear()
         registry._ops.update(before)
+        sys.modules.pop(plugins.plugin_module_name(p.filename), None)
         if backup is not None:
             with open(path, "wb") as f:
                 f.write(backup)
@@ -166,19 +178,34 @@ def upload_plugin(p: PluginUpload):
         print(f"[plugins] WARN: {p.filename} force 接管算子 {took_over}；"
               f"旧文件仍在盘上，重启后归属按扫描顺序可能漂移，建议删除旧文件",
               flush=True)
-    for n in claimed:
-        plugin_ops[n] = {"file": p.filename, "sha256": h}
+    # 归属簿对账（A2）：摘除本文件"上次声明、这次不再声明"的陈旧算子（旧实现从不摘，
+    # 改名后旧算子永久留在注册表），再登记本次声明的归属。
+    rep = plugins.reconcile(p.filename, claimed, registry, plugin_ops, sha256=h)
+    if rep["stale_removed"]:
+        print(f"[plugins] {p.filename} 摘除陈旧算子 {rep['stale_removed']}", flush=True)
+    # 幽灵条目：文件已不在盘上；本次没接着声明的名字，注册表里也要摘掉（避免无主算子）
+    adopted = []
+    for n in stale:
+        if n in set(claimed):
+            adopted.append(n)
+        else:
+            registry._ops.pop(n, None)
+            plugin_ops.pop(n, None)
     print(f"[plugins] uploaded {p.filename} -> {claimed}", flush=True)
     return {"plugin": p.filename, "ops": claimed, "sha256": h,
-            "took_over": took_over}
+            "took_over": took_over, "stale_removed": rep["stale_removed"],
+            "adopted_stale": sorted(adopted)}
 
 
 @app.get("/admin/plugins", dependencies=[Depends(admin_auth)])
 def list_plugins():
     files = {}
     for name, info in plugin_ops.items():
-        files.setdefault(info["file"], {"sha256": info["sha256"],
-                                          "ops": []})["ops"].append(name)
+        ent = files.setdefault(info["file"], {"sha256": info["sha256"], "ops": [],
+                                              "missing_file": True})
+        ent["ops"].append(name)
+        if os.path.isfile(os.path.join(PLUGINS_DIR, info["file"])):
+            ent["missing_file"] = False
     return {"plugins_dir": PLUGINS_DIR, "plugins": files}
 
 

@@ -4539,3 +4539,68 @@ docker 版的 mask-paint，得改成对象存储 id 而不是路径。
 - D2 批量节点是否按"3 个（load/save/montage）"为完整范围（建议是；单独的 `image-batch-*` 不解决循环问题）
 - D3 `image-montage` 标签是否要支持中文（需 `font_path`；默认 ASCII 序号，同 `image-watermark` 限制）
 - D4 是否顺带把 `batch-*` 两条模板流水线也纳入本轮 e2e（建议是，成本低且产出人眼物料）
+
+### 52.3 Part A 实施记录（服务端插件归属簿，已入库；**未强制重启**）
+
+**改动**（`inference-server/app/{plugins.py,main.py}`，纯函数下沉 + 端点接线）
+
+| 缺陷 | 修法 |
+| --- | --- |
+| A1 幽灵归属 | 新增 `plugins.stale_owners(op_names, filename, plugin_ops, plugins_dir)`：归属簿里的文件**不在盘上**即视为幽灵 ⇒ 上传端点在**本地视图**（`owner_view`/`before_view`）里剔除后再判冲突 ⇒ 不再被已删除的文件假 409；成功接管后清掉幽灵条目（含注册表里的无主算子） |
+| A2 陈旧算子泄漏 | 新增 `plugins.reconcile(claiming_file, claimed, registry, plugin_ops, sha256)`：摘除"本文件上次声明、这次不再声明"的算子（**只摘归属仍是本文件的**，force 接手过的别人的名字不误摘），再登记本次归属 |
+| A3 回滚不完整 | 400/409 回滚路径补 `sys.modules.pop(plugins.plugin_module_name(filename))`；新增 `plugin_module_name()` 让加载与回滚同口径 |
+| 可观测 | `GET /admin/plugins` 每条标 `missing_file: true`；上传响应新增 `stale_removed` / `adopted_stale` |
+
+**测试**：`inference-server/tests/test_plugin_registry.py`（纯逻辑，无需 GPU/torch）**15/15 PASS** ——
+幽灵识别（含对照：不清幽灵时误报"已删除文件拥有"= 假 409 的真身）、陈旧摘除、越权保护、
+幂等重传零副作用、真实加载路径。既有 `tests/test_{engine,jobs,lease}.py` 全绿（无回归）。
+
+**部署**：按用户红线**不重启服务** ⇒ 下次自然重启即生效。（容器内 `import app.main` 验证本轮做不了：
+host 侧 docker 隧道连接被拒，见 §52.4；本地以 `ast.parse` + 两个纯逻辑测试兜底。）
+
+### 52.4 Part B 实施记录（G11 批量：3 节点 + 2 流水线，真机验收 10/10）
+
+**新节点（3 个，均声明 `supportedTypes: ["local"]` ⇒ 不进镜像、不需重建/重启）**
+
+| 节点 | id | 作用 |
+| --- | --- | --- |
+| `image-batch-load` | **229** | 目录 → N 个对象 ID（pattern 多组 `;` / sort=name\|mtime\|size / limit+offset 分页 / recursive） |
+| `image-batch-save` | **230** | N 个对象 ID → N 个文件（`<prefix>_<序号 3 位>.png`，start_index/zero_pad/ext 可调） |
+| `image-montage` | **231** | N 张 → 一张拼图（自动列数/自动格尺寸、序号或**文件名**标签、fit/cover、背景色） |
+
+共享件（`_common/`，由 `sync-common` 分发防漂移）：`image_batch.py`（目录/上传/下载/命名）、
+`image_montage.py`（拼图 + `_fit`）。
+
+**流水线**
+
+| 流水线 | wf | 执行 | 内容 |
+| --- | --- | --- | --- |
+| `batch-montage-preview` | **153** | 697 / **699** | `~/flowx-input/*.png` 全部 → 联系表（**文件名标签**，3 列 320×240，pad 8，label_h 20）→ 落盘 |
+| `batch-roundtrip` | **154** | **701** | 3 张同尺寸图 → 批量另存（逐字节核对）+ 1:1 拼图（格内逐字节核对） |
+
+**验收 `nodes/_tools/verify_batch.py`：PASSED = 10 / FAILED = 0**
+
+| 判据 | 实测 |
+| --- | --- |
+| A1 批量另存 | `batch_rt_001..003.png` 全部落盘，命名与序号规则一致 |
+| A2 等价性 | 逐字节一致 **2/3**；差额 1 张 `gray_person.png`（灰度模式源图）**像素仍逐字节一致** ⇒ 判据取"等价（逐字节或像素）"并如实打印等级 |
+| A3 尺寸公式 | 1:1 拼图 **1536×384** == 3*512+4*0 × 1*384+2*0；带标签联系表 **992×544** == 3*320+4*8 × 2*240+3*8+2*20 |
+| A4 格内保真 | 三个格内与来源**逐字节一致**（cell==图尺寸、pad=0） |
+| A5 网格自洽 | 由尺寸反推 grid == [3,1] |
+| A6 人眼物料 | `~/flowx-output/b5_batch_preview.png`（6 格联系表，带文件名标签） |
+
+**本轮新踩的 4 个坑（已修 + 已进纪律）**
+1. **`fit` 留边填黑**（我自己的 bug）：`_fit` 早期用 `crop` 把小图补进大框 ⇒ PIL 用**黑色**填边而不是
+   `bg`；本机单测抓到 ✓（正确做法：贴到 bg 画布上居中）。**教训**：视觉契约（背景色）要写进断言，
+   光看尺寸不算数。
+2. **服务端会归一化上传图编码**：`gray_person.png`（灰度模式）上传后对象字节 37605B→52387B（像素不变）
+   ⇒ 凡以"落盘字节 == 源文件字节"为判据的复核，必须允许"像素一致"档并如实分级。
+3. **`label=name` 原本打的是对象 ID**（对人无用）⇒ 给 `image-montage` 加 `names` 入参（接
+   `image-batch-load` 的 `names` 输出），缺 `names` 时**大声报错**而非静默打 ID。
+4. **门禁联动**：有预览（`emit_result_preview`）的节点必须声明 `service_url_host`（`check-bundle` 拦）；
+   `env.SERVICE_URL_HOST` 只能在**确实声明了该参数**时映射（`gate M` 拦）⇒ 生成器里 env 要条件化。
+
+**顺带的环境事实**：本轮 host 侧 docker 隧道（`tcp://8.162.7.178:12869`；域名仍解析到同一 IP）
+**连接被拒**（`ConnectionRefusedError`，`flowx-studio executor test --id 8` FAILED）⇒ 容器内验证与
+docker 路径 e2e 本轮做不了；3 个批量节点是 local-only（读写本机 FS）⇒ 不受影响，全部验收走 local ✓。
+需要时请在 Windows 上重启那条 docker 隧道。

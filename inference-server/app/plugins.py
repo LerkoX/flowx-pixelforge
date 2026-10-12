@@ -37,6 +37,11 @@ def check_plugin_source(filename: str, content: bytes):
     return None
 
 
+def plugin_module_name(filename: str) -> str:
+    """插件文件的模块名（`load_plugin` 与回滚路径共用同一口径）。"""
+    return "flowx_plugin_" + os.path.splitext(os.path.basename(filename))[0]
+
+
 def load_plugin(path: str, registry):
     """加载单个插件文件，返回该插件声明注册的**全部**算子名（含覆盖既有名）。
 
@@ -54,7 +59,7 @@ def load_plugin(path: str, registry):
 
     registry.register = _recording
     try:
-        mod_name = "flowx_plugin_" + os.path.splitext(os.path.basename(path))[0]
+        mod_name = plugin_module_name(path)
         spec = importlib.util.spec_from_file_location(mod_name, path)
         mod = importlib.util.module_from_spec(spec)
         sys.modules[mod_name] = mod  # 插件间 import 可见
@@ -89,6 +94,47 @@ def detect_conflicts(op_names, filename: str, plugin_ops: dict,
         elif n in before_ops:
             conflicts.append({"op": n, "owner": "core"})
     return sorted(conflicts, key=lambda c: c["op"])
+
+
+def stale_owners(op_names, filename: str, plugin_ops: dict, plugins_dir: str):
+    """找出"归属簿说属于**别的文件**、但那个文件已经不在盘上"的算子（幽灵归属）。
+
+    真机来路：B1 清理遗留插件时手工 `rm plugins.d/xxx.py`（没重启服务）⇒ 归属簿仍写着
+    `xxx.py` ⇒ ① 新文件声明同名算子被**假 409** 拦住（owner 是个已删除的文件）
+    ② `DELETE /admin/plugins/xxx.py` 反而 404 ⇒ 幽灵条目既拦人又清不掉。
+    本函数把它识别出来（返回 op 名列表），端点据此：不算冲突 + 告警 + 接管归属。
+    """
+    stale = []
+    for n in op_names:
+        info = plugin_ops.get(n)
+        if info is None or info.get("file") == filename:
+            continue
+        other = info.get("file")
+        if other and not os.path.isfile(os.path.join(plugins_dir, other)):
+            stale.append(n)
+    return sorted(stale)
+
+
+def reconcile(claiming_file: str, claimed, registry, plugin_ops: dict,
+              sha256: str = ""):
+    """一次成功加载后的归属簿对账（纯逻辑，可单测）。
+
+    做两件事：
+    1. **摘除陈旧算子**：该文件上一次声明、这次不再声明的算子 —— 从 `registry._ops`
+       摘掉并从归属簿删除（旧实现从不摘 ⇒ 改名后旧算子永久留在注册表，重启才自愈）；
+       只摘"归属仍是本文件"的条目（force 接管过的名字不许误摘别人的）。
+    2. **更新归属**：本次声明的算子全部记为 `claiming_file`。
+    返回 {"stale_removed": [...], "claimed": [...]}。冲突/失败路径**不得**调用本函数。
+    """
+    claimed_set = set(claimed)
+    stale = sorted(n for n, info in list(plugin_ops.items())
+                   if info.get("file") == claiming_file and n not in claimed_set)
+    for n in stale:
+        registry._ops.pop(n, None)
+        plugin_ops.pop(n, None)
+    for n in claimed:
+        plugin_ops[n] = {"file": claiming_file, "sha256": sha256}
+    return {"stale_removed": stale, "claimed": sorted(claimed_set)}
 
 
 def scan_plugins(plugins_dir: str, registry, reserved=()):
