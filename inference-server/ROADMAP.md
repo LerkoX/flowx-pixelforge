@@ -39,6 +39,19 @@
 - 未做（按 D7）：目录批量节点（`image-batch-load/save`）⇒ B5 候选；中文水印需外部 TTF 路径。
 
 
+
+### 阶段 10 / B4-S3：IC-Light 重打光（2026-10-12 实施完成）
+
+- 新算子族 `iclight.py`（`iclight.load` / `iclight.relight`）：SD1.5 基座 + IC-Light delta 权重，
+  UNet conv_in 扩到 8/12 通道 + 猴子补丁 forward 注入 `concat_conds`（官方 gradio demo 逐行等价）。
+  在 **diffusers 0.35.2**（比官方 pin 的 0.27.2 新）下实测完全兼容 ⇒ **零核心改动**。
+- 新节点 `iclight-load`(227) / `iclight`(228)；e2e wf 150（local）/ 151（docker）。
+- 验收 `_tools/verify_iclight.py` **17/17**：光方向物理翻转（Δ−19.7 → +50.2 / −100.6）、
+  同种子逐字节（local↔docker 六份一致）、主体保留（对输出再抠图 IoU 0.9823）。
+- 运维：常驻 4.07GB；与 flux 常驻互斥（8GB 卡）；fc/fbc 不要同时装载。
+- 未做：G10 PuLID（= B5，需改部署 + 重启服务）。
+
+
 ## 0. 现状盘点（已对齐的部分）
 
 | ComfyUI 概念 | 本服务对应 | 状态 |

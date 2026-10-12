@@ -4254,3 +4254,101 @@ docker 版的 mask-paint，得改成对象存储 id 而不是路径。
   localhost:8100/health` 通**，再从 Studio 整跑 wf113。
 - exec 686 是失败历史记录，**不重写快照**（含 `@1.1.0` 物化节点）；要复跑就整跑 wf113，
   并把 `service_url` 指向当时可用的地址（LAN 优先）。
+
+### 50.10 G9 IC-Light 兼容 spike 记录（D5 红线评估：通过）
+
+**风险背景**：官方 IC-Light（`gradio_demo.py` / `gradio_demo_bg.py`）pin `diffusers==0.27.2`
+`transformers==4.36.2`，本服务是 `diffusers 0.35.2` / `transformers 4.44.2`；且 IC-Light 用了三处
+非标准玩法：① `unet.conv_in` 扩通道手术 ② 权重是**增量 delta**（`origin + offset`）③ 猴子补丁
+`unet.forward` 走 `cross_attention_kwargs['concat_conds']` 注入条件（普通 diffusers 用户 API 不走这里）。
+⇒ D5 红线：适配超 1 工作日或需动核心 pipeline 组件 ⇒ 放弃 G9。
+
+**spike 做法**：detached 容器（`--gpus all`，推理镜像 `flowx-inference-server:pascal`）里加载宿主
+`/models/v1-5-pruned-emaonly-fp16`（已有 diffusers 目录格式 SD1.5，**基座零下载**）+ fc delta 权重，
+按官方逐行等价复刻，跑 4 组实验。脚本 `~/.flowx-tmp/spike_iclight.py`，产物 `icl_{none,left,right}.png`。
+
+| 实测项 | 结果 |
+| --- | --- |
+| delta 权重键匹配（690 键基座 vs 权重） | **686/686 严格匹配**（missing=0 extra=0 shape_bad=0），`strict=True` 加载成功 |
+| `conv_in` 8 通道手术 | 成功；新增 4 通道范数 = 0（官方 `zero_()` 语义） |
+| diffusers **0.35.2** 下双条件注入 | **工作正常**（无需改核心、无需降级、无需 vendored pipeline） |
+| 光方向物理校验（fc） | `bg_source=left` 主体左/右亮度 **201.3/139.3（Δ=+62.0）**；`right` **121.8/211.5（Δ=−89.6）** ⇒ 方向真翻转 |
+| determinism（同种子两遍） | DDIM **0 差** / dpmpp-sde **0 差**（显式 `torch.Generator` + `manual_seed`） |
+| 耗时 | 基座装载 80s；lowres 25 步 @512×384 **7.9s**；双阶段（含 highres 768×576）**31–33s** |
+| 峰值显存 | **5.66GB**（8GB GTX1080 可行；fp32，Pascal 纪律） |
+
+**结论**：适配成本 ≈ 0.5 天且**零核心改动**（只在插件族里做，服务端一行没动）⇒ **远低于 D5 红线，G9 实施**。
+
+### 50.11 S3 交付记录（G9 IC-Light 重打光：已实施 + 真机验收全绿）
+
+**权重（宿主 `/models`，容器→宿主已就位）**
+
+| 文件 | 大小 | 来源 | 说明 |
+| --- | --- | --- | --- |
+| `/models/iclight/iclight_sd15_fc.safetensors` | 1639MB | HF `lllyasviel/ic-light`（`gated=False`） | 前景条件版（**默认**）：光方向由 `light_dir`+`prompt` 决定 |
+| `/models/iclight/iclight_sd15_fbc.safetensors` | 1639MB | 同上 | 前景+背景条件版：给 `bg` 图则主体按该背景打光 |
+| `/models/v1-5-pruned-emaonly-fp16/` | 已有 | 宿主既存 | diffusers 目录格式 SD1.5 基座（**复用，零下载**） |
+
+**算子族 `nodes/_common/server_ops/iclight.py@607a43c54345`（2 算子）**
+
+| 算子 | 作用 | 关键实现（官方逐行等价） |
+| --- | --- | --- |
+| `iclight.load` | 装载变体 → 模型键 `iclight:<fc\|fbc>`（进 `model_manager` LRU） | `conv_in` 扩通道（zero→拷前 4→复用 bias）+ delta `origin+offset` `strict=True` + 猴子补丁 `unet.forward` |
+| `iclight.relight` | 前景（可带 `mask` 自动合成 127 灰底）+ 光方向/背景 → 重打光图 | 官方 `process()` 两阶段；**fc**：`light_dir` 造 i2i 初始图（梯度 0~255）；**fbc**：`bg` 作背景条件、低清**恒 t2i**（梯度 32~224，`none`=64 灰）；显式 generator ⇒ 逐字节可复现 |
+
+**新节点（2 个）**：`iclight-load`（id **227**，装载+预热）、`iclight`（id **228**，重打光；
+带 `compareInput` 对照控件、`light_dir`/采样器/高清开关等 18 个参数）
+
+**流水线（`pipeline/`）**
+
+| 流水线 | wf | 执行 | 链路 |
+| --- | --- | --- | --- |
+| `iclight-e2e-local`（全 local） | **150** | 690 / **691** | 抠图(BiRefNet main@1024) → fc 左光 / 右光 / 复跑 / +highres → 各自落盘 + 蒙版/输入落盘 + **对左光输出再抠图**（IoU 判据用） |
+| `iclight-e2e`（docker 跑 `iclight-load`/`iclight`） | **151** | **692** | 同上参数；`service_url` 走容器内网 `172.17.0.1:8100`，其余留 local |
+
+**验收 `nodes/_tools/verify_iclight.py`：PASSED = 17 / FAILED = 0**
+
+| 判据 | 实测 |
+| --- | --- |
+| A1 尺寸 | left/right == 输入 512×384；highres == 1.5× 且对齐 64 = 768×576 |
+| **A2 确定性** | `icl_left` 与 `icl_rep` **sha256 完全相同**（9458446f4693），且两次 e2e（exec 690/691）产物 sha 一致 |
+| **A3 光方向物理判据** | 输入 Δ=−19.7 → left **Δ=+50.2** / right **Δ=−100.6**；翻转幅度 **150.8** |
+| A4 方向由 `light_dir` 主导 | 相对输入左移 **+70.0**、右移 **+80.9**（判"相对位移"而非"输入是否均匀"） |
+| **A5 主体保留** | 对 left 输出再抠图 vs 输入蒙版 **IoU = 0.9823** |
+| A6 highres 生效 | 768×576 且与低清输出逐字节不同 |
+| **A7 执行器无关** | `icld_{input,mask,left,right,rep,hi}` 与 `icl_*` **六份全部逐字节一致** |
+
+**运维事实（真机实测）**
+- 常驻约 **4.07GB**（SD1.5 三件套 fp32）；装载 134–210s（Windows 绑定挂载读权重口径），首次之后走 LRU 复用。
+- **与 flux 常驻互斥**：flux unet pinned ≈6.47GB + IC-Light 4.07GB > 8GB ⇒ 混用需 `models.unload`（同 B2/B3 的 SD15 家族结论）。
+- fc 与 fbc 同时装载会互相淘汰（各自 4.07GB，卡只有 8GB）⇒ 一个链里只用一种变体。
+- 推理耗时：lowres 25 步 @512×384 **8–11s**；+highres 768×576 **31–33s**；fbc 同量级。
+
+**本轮新踩的 6 个坑（全部已修 + 已进纪律）**
+
+1. **模块级缓存把 LRU 淘汰变成空操作**（最严重，我自己的 bug）：族里维护了 `_BUNDLES[key] = bundle`
+   强引用 ⇒ `model_manager` 淘汰后模型**没被释放**（真机：淘汰 fc 后可用显存仍只剩 **176MB**，
+   fbc 推理 **356s**）。修复：删掉模块级缓存，唯一真相源就是 `models._pipes`（取用一律 `_cached()`）。
+   修复后同一步实测 **3049MB / 14.5s（40× 改善）**。已加本机回归断言（`_BUNDLES` 不得出现）。
+2. **`docker cp` 到「已停止」的容器写进容器层**，被 bind mount 遮蔽 ⇒ 看起来 rc=0 但容器里看不到文件
+   （浪费两轮 smoke）。纪律：**往容器送文件必须在容器运行中**，或改用"宿主目录直写 + 容器内读"。
+3. **推理镜像里 app 包目录是 `/app`**（容器名才叫 flowx-inference-server）⇒ `python3 /work/x.py` 时
+   `sys.path[0]` 是 `/work`，`from app.main import models` 直接 ModuleNotFoundError。纪律：容器内跑脚本
+   要么 `-w /app` + `python3 -c`，要么脚本里显式 `sys.path.insert(0, "/app")`。
+4. **隧道 `http.client.IncompleteRead`**: `GET /ops` 只读回一半 body ⇒ 旧 `_with_retry` 只捕
+   `RuntimeError` 所以直接失败（本轮踩两次）。已修 `flowx_client`：改捕
+   `(RuntimeError, OSError, http.client.HTTPException)`；共享件变更 ⇒ 全量重导 99 节点（ok=99 fail=0）。
+5. **`save-image` 不声明 `mask` 参数**（蒙版也是 IMAGE，按 `image` 传）⇒ 流水线 `failed to expand node`。
+   另：`node import` 会校验 `ui.entry` 存在 ⇒ 新节点**必须先 `build-widget.py` 再 import**。
+6. **判据口径：重打光不能用"逐像素/边缘相关"判主体保留**。实测 IC-Light 输出的主体区边缘相关只有
+   0.19~0.30（重打光必然改写低频光照，去低频后也只有 0.15~0.30）⇒ 这是**判据选错**，不是产物坏。
+   正确判据 = **对输出再抠一次图，与输入蒙版比 IoU**（实测 **0.9823**）——直接测"是不是同一个主体轮廓"。
+
+**洞察（用于校正 §49.6 的印象）**：B3 的 A10 曾观察到"扩散产物 local↔docker 不逐字节一致、同执行器两遍也不一致"，
+当时归因为"GPU 扩散采样非确定性"。本轮 IC-Light **显式传 `torch.Generator` + `manual_seed`** 后，
+扩散产物在同种子下 **local↔docker 六份全部逐字节一致**。结论修正：**漂移的根源是种子/初始噪声没有钉住**，
+而不是"扩散必然不可复现"；凡是能把 `generator` 钉住的算子，确定性判据仍可用逐字节口径。
+
+**发布**：`BUNDLE_VERSION 1.15.1 → 1.16.0`；镜像 `lerkobba/flowx-pixelforge-nodes:v1.16.0`（镜像内 97 目录）；
+节点 97 → **99**（iclight-load id 227 / iclight id 228）；人眼物料 `~/flowx-output/b4_iclight_overview.png`
+（①输入 ②蒙版 ③左光 ④右光 ⑤highres ⑥再抠图对照 ⑦fbc 背景 ⑧fbc 输出）。
