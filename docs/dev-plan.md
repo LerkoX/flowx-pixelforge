@@ -2059,7 +2059,7 @@ unload（同一把锁）挡死到超时——设计的核心解锁路径被自�
 | **B1**（先做，低成本见效） | G5 滤镜包 + G3 扩图 + G7 预处理器补齐 | 零 / 极少新增依赖，无 Pascal 版本风险，一次镜像重建即可覆盖 |
 | **B2**（核心价值） | G1 RMBG 抠图 → G6 面部修复 | G1 解锁电商与智能蒙版；先验证 `transformers==4.44.2` 兼容性 |
 | **B3** | G2 SAM / GroundingDINO + G4 分块超分 | **已立项：见 §四十九**（2026-10-11）。依赖评估已完成（零新增依赖、零服务端改动、不重建镜像）；G4 需实测 8GB 的接缝质量与耗时 |
-| **B4** | G8 上色 → G9 IC-Light → G10 PuLID → G11 电商模板 | 重工程，各自独立立项，遵循 §3 分派纪律 |
+| **B4** | G8 上色 → G9 IC-Light → G10 PuLID → G11 电商模板 | 重工程，各自独立立项，遵循 §3 分派纪律。**方案见 §五十**（2026-10-12 侦察完成，待拍板 D1~D8） |
 
 ### 44.4 通用依赖与风险（所有缺口共用）
 
@@ -3805,3 +3805,172 @@ numpy 1.26.4 / cv2 4.11.0 headless`）：
 
 **Release**：`BUNDLE_VERSION` **1.13.3 → 1.14.0**；节点镜像 `lerkobba/flowx-pixelforge-nodes:v1.14.0`
 （92 目录含 7 个新节点）；**94/94 节点全量重导**（节流后 ok=94 fail=0）。
+
+---
+
+## 五十、B4 立项方案：G8 老照片上色 / G9 AI 重打光 / G10 PuLID / G11 电商模板
+
+> 2026-10-12 侦察完成（网络 + detached 容器实测），**代码未动**，待拍板 §50.6 的 D1~D8。
+> 承接 §44.3 的 B4 行；B1~B3 已交付（§45/§47/§48/§49）。
+
+### 50.1 侦察结论总表
+
+| 组 | 能力 | 依赖增量 | 权重 | 显存（fp16 口径） | 风险 | 结论 |
+| --- | --- | --- | --- | --- | --- | --- |
+| **G8** | 老照片/黑白上色（DDColor） | **零**（torch+timm+einops+cv2 全有） | modelscope-L 912MB / paper-L 912MB / artistic-L 912MB / paper_tiny-T **220MB** | L@512² fp32 ≈ 2.0GB | **低** | **推荐首批** |
+| **G9** | AI 重打光（IC-Light） | **零**（diffusers 0.35.2 + peft 0.17.1 + einops 有） | `iclight_sd15_fc` 1719MB / `iclight_sd15_fbc` 1719MB | 基座 UNet 1.7GB + 光照 UNet 1.7GB + VAE/CLIP ≈ 4.5GB | **中**（diffusers 0.27→0.35 API 漂移） | 需兼容 spike |
+| **G10** | 人脸身份一致性（PuLID） | **零**（eva_clip 需 vendored） | `pulid_v1.1` 984MB + `EVA02_CLIP_L_336_psz14_s6B.pt` 856MB | SDXL fp16 ≈ 6.9GB **+ PuLID 1.0 + EVA-CLIP 0.9 = 8.8GB ✗ 超预算** | **高**（显存 + diffusers 0.25→0.35 大漂移 + 需改部署） | **建议单列 B5** |
+| **G11** | 电商模板 | **零** | —— | 复用已常驻/可驱逐 | **低**（缺 2 项能力，见 50.1.5） | **推荐第二批** |
+
+#### 50.1.1 环境实测（detached 容器 `flowx-inference-server:pascal`，2026-10-12）
+
+```
+OK   timm 0.9.16（B2 引入）/ einops 0.8.0 / cv2 4.11.0 / insightface 0.7.3
+OK   peft 0.17.1 / accelerate 0.33.0 / safetensors / kornia 0.7.4 / spandrel 0.4.2
+OK   onnx 1.23.2 / onnxruntime 1.19.2  ⚠️ providers = ['AzureExecutionProvider','CPUExecutionProvider']
+     ⇒ **无 CUDAExecutionProvider**，ONNX 路径只能跑 CPU（DDColor 512² 会退化到秒级）⇒ **放弃 ONNX 方案**
+--   ftfy / torchsde / modelscope 未装（本方案不需要）
+--   basicsr 未装（DDColor 官方仓库自带 vendored 子集，**不需要 pip 安装 basicsr**）
+```
+
+#### 50.1.2 G8 DDColor：可行性高，需移植 ≈940 行（全部 torch/timm，无第三方依赖）
+
+官方 `piddnad/DDColor`（master）**把模型代码内置**，分两套 arch：
+- `ddcolor/model.py`（**278 行**，torch-only）+ `basicsr/archs/ddcolor_arch_utils/{unet.py 208, convnext.py 206, transformer_utils.py 192, position_encoding.py 52}`
+  —— `convnext.py` 只 import `timm.layers.trunc_normal_/DropPath` ✓ 其余纯 torch
+- `ddcolor/pipeline.py`（127 行，cv2+numpy：RGB↔Lab、resize、归一化）
+- 另有 `basicsr/archs/ddcolor_arch.py`（paper/论文版 arch，未采用，仅作 fallback）
+
+权重（HF API 实测 `gated=False`，均为 `pytorch_model.bin` + `config.json`）：
+`piddnad/ddcolor_modelscope` 912MB（**默认推荐**，清洗数据版，非 ImageNet 图效果最好）、
+`piddnad/ddcolor_paper` 912MB、`piddnad/ddcolor_artistic` 912MB、`piddnad/ddcolor_paper_tiny` **220MB**（最轻）。
+`config.json`（modelscope 版）= `encoder_name convnext-l` / `decoder_name MultiScaleColorDecoder` /
+`input_size [512,512]` / `num_output_channels 2`（Lab 的 ab 通道）/ `last_norm Spectral` / `num_queries 100` /
+`num_scales 3` / `dec_layers 9` —— 与 `ddcolor/model.py::DDColor.__init__` 的签名**逐项对齐**（`num_output_channels=3` 版为 RGB 变体）。
+→ **风险点**：HF 只放权重不放代码，键名与 vendored 类的匹配需在 S1 用探针验证；
+不匹配则改用 `basicsr/archs/ddcolor_arch.py` 版（同仓库，一并移植作为 fallback）。
+
+#### 50.1.3 G9 IC-Light：可行性中，核心代码量极小，风险全在 diffusers 版本漂移
+
+- 官方 `lllyasviel/IC-Light` 仓库**:推理核心就在 `gradio_demo.py`（16.2KB）**；`briarmbg.py`（13KB，抠背景）
+  **不需要** —— fbc 变体要的"前景/背景"直接复用 **B2 的 BiRefNet 抠图**（`matting.birefnet`）或 **B3 的 SAM**。
+- 权重 `lllyasviel/ic-light`：`iclight_sd15_fc.safetensors` 1719MB（文本+前景条件）/ `iclight_sd15_fbc.safetensors` 1719MB
+  （文本+前景+背景）/ `iclight_sd15_fcon.safetensors` 1719MB；本质是**把 SD15 的 UNet 换成 8/12 输入通道的条件版**。
+- 基座：SD15 UNet + CLIP（宿主已有 `v1-5-pruned-emaonly` ✓，服务可加载 SD15 ✓）。
+- ⚠️ 官方 `requirements.txt` pin `diffusers==0.27.2` / `transformers==4.36.2`，本服务是 **diffusers 0.35.2 / transformers 4.44.2**
+  （Pascal 钉版，不可动）⇒ `UNet2DConditionModel.from_config(...)`、`StableDiffusionPipeline(..., safety_checker=None,
+  requires_safety_checker=False)`、`prompt_embeds` 拼接 image embedding 的用法**需要逐个核对**；
+  预期主要是参数签名/组件装配的小改，但**必须先用 detached 容器做兼容 spike 再定接口**。
+
+#### 50.1.4 G10 PuLID：双红灯，建议不放进 B4
+
+- 官方 `ToTheBeginning/PuLID` pin `diffusers==0.25.0` —— 与本服务差 10 个 minor；
+  `pulid/pipeline_v1_1.py`（13.6KB）是**整套 SDXL pipeline 的拷贝**，0.35.2 下几乎必然要改写；
+  `pulid/attention_processor.py`（16KB）做的是交叉注意力 K/V 注入（与 `ipadapter.py` 同机制的"移植"可行，但工作量中高）。
+- 依赖：`pulid_v1.1.safetensors` 984MB + `EVA02_CLIP_L_336_psz14_s6B.pt` 856MB（`QuanSun/EVA-CLIP` ✓ public）
+  + insightface antelopev2 ✓（B2 已装）+ SDXL base ✓（宿主已有 `sd_xl_base_1.0`）。
+- ⚠️ **显存红灯**：SDXL fp16 全部常驻 ≈ 6.9GB，加 PuLID 0.98GB + EVA-CLIP 0.86GB ≈ **8.8GB > 8GB**；
+  服务当前 `offload_mode: none`、flux 三条（6.5GB）pinned ⇒ 必须 **`enable_model_cpu_offload` + 驱逐 flux + 改部署配置**
+  ⇒ **需要重启推理服务**（用户已明确：重启前先告知）。
+- ⇒ 建议：**B4 不做**。若要，走 B5：先"**无 GPU 的代码移植 + 参数/单测**"，等拿到重启窗口再真机验收。
+
+#### 50.1.5 G11 电商模板：能力强，但盘点出 2 项缺口
+
+现成可用（B1~B3 交付）：抠图 `matting-birefnet` / 精修 `matting-refine`（去白边）/ 换底 `matting-composite` /
+扩画布 `image-pad` / 放大 `image-upscale` + `upscale-model-*` + `tiled-upscale-*` / 人脸修复 `face-restore` /
+色调 `image-curves` `image-hsl` / 裁剪 `image-crop` / 落盘 `save-image`。
+
+**缺口**：
+1. **无水印/文字叠加节点** ⇒ 建议新增 `image-watermark`（纯 PIL：文字/图片水印、九宫格定位、透明度、平铺、缩放；零 numpy）。
+2. **无批量/迭代能力** —— Studio CLI 只有 `workflow run`（无循环/批处理概念），服务端 `/graph` 是单图 DAG。
+   ⇒ 批量要么 (a) 新增 `image-batch-load` / `image-batch-save`（目录进出，节点内部循环）；要么 (b) 只出模板 + 外部脚本多次执行。
+
+### 50.2 分批与顺序（建议）
+
+| 批 | 内容 | 交付物 | 依赖前置 |
+| --- | --- | --- | --- |
+| **S1** | **G8 DDColor 上色** | 算子族 `colorize.py`（`colorize.load` / `colorize.apply`）+ 2 节点（`colorize-load` 预热 / `colorize`）+ 真机 e2e | 无（零新依赖） |
+| **S2** | **G11 电商模板** | `image-watermark` 新节点（纯 PIL）+ 3 条模板流水线（白底主图 / 场景换底 / 模特图规格化）+ 批量能力（D7 决策） | S1 无依赖，可并行 |
+| **S3** | **G9 IC-Light 重打光** | 兼容 spike（detached）→ 算子族 `iclight.py`（`iclight.load` / `iclight.apply`）+ 2 节点 + e2e | 需 S1 的 LRU 记账经验（同款 `_register`） |
+| **S4** | **G10 PuLID**（**建议延后/单列**） | 先纯代码移植 + 单测；真机验收等重启窗口 | 需改部署（offload）+ 重启服务 |
+
+### 50.3 接口设计（草案）
+
+**G8（2 节点）**
+- `colorize-load`：`model`（`modelscope`/`paper`/`artistic`/`paper_tiny`）→ 输出 `model_ref`(STRING `ddcolor:<variant>`)
+- `colorize`：`model_ref` / `image` / `size`（512 默认，须为模型训练尺寸；非 512 时先内部 resize 再回填原尺寸）
+  / `saturation`（1.0，post 色彩增强）/ `seed` → 输出 `image`(STRING) + `info`(STRING JSON：尺寸/变体/耗时)
+- 算子：`colorize.load(variant, dtype=fp32)`（走 `model_manager._register`，键 `ddcolor:<variant>`）、
+  `colorize.apply(model_ref, image_id, size, saturation)`
+
+**G9（2 节点）**
+- `iclight-load`：`variant`（`fc`/`fbc`/`fcon`）→ `model_ref`
+- `iclight-apply`：`model_ref` / `image` / `foreground_mask`(可选，fbc/fc 用) / `background`(可选) /
+  `prompt` / `light`（`left`/`right`/`top`/`bottom`/`ambient` 预设 → 官方 4 方向 prompt 模板）/
+  `steps` `cfg` `seed` `strength` → `image`
+- 算子：`iclight.load(variant)`、`iclight.apply(...)`（内部：SD15 组件 + 光照 UNet + prompt_embeds 拼接）
+
+**G11（1 节点 + 流水线）**
+- `image-watermark`：`image` / `text` / `font_size` / `opacity` / `position`（九宫格）/ `margin` / `color` / `tile`(bool) / `logo`(可选 IMAGE)
+- 模板流水线：`ecom-white-bg`（抠图→去白边→白底→1:1 扩画布→放大 2x→落盘）、
+  `ecom-scene`（抠图→去白边→背景合成→轻微色调统一→落盘）、
+  `ecom-model-spec`（人脸修复→色调→裁剪 1:1/4:5→水印→落盘）
+
+### 50.4 影响面
+
+- **依赖/镜像**：G8/G9/G11 均 **零新增 Python 依赖** ⇒ **不重建推理镜像**（沿用 `:pascal`）；
+  仅需下载权重到宿主 `/models/{colorize,iclight}`（合计 ≈ 1.1GB + 1.7GB）。
+- **服务端 `app/`**：**零改动**（沿用插件族 + `app.ops` 原语 + `model_manager._register` LRU 记账）。
+- **对象类型**：不新增（模型句柄走 STRING，键 `ddcolor:<variant>` / `iclight:<variant>`）。
+- **显存**：G8-L fp32 ≈ 2.0GB、G9 ≈ 4.5GB（含基座）⇒ 均在 8GB 内，但会与 flux trio /
+  SAM / GD 争夺 `max_resident_models: 3` 名额（⇒ 交互式使用建议先 `model-unload` 让位）。
+- **Studio 侧**：新增节点导入（94 → 97~99）；无 SDK/DB 迁移。
+- **重启**：S1~S3 **不需要**重启（插件热上传）；S4 若做则**需要**（改 offload 部署配置）。
+
+### 50.5 验收标准（落盘 + 可量化）
+
+**G8**：3 类输入（黑白人像 / 褪色老照片 / 偏黄旧照）→ 每张产 `colorized` + `side_by_side` 落盘：
+- A1 尺寸 == 输入（`size` 参数只影响内部推理分辨率）；A2 **确定性**（DDColor 无随机采样 ⇒ 同输入同参数**逐字节一致**）；
+- A3 色彩化有效性：色度饱和均值（HSV 的 S）相对灰度输入提升 ≥ 5×；**近中性像素占比**（S<0.05）≤ 输入的一半；
+- A4 肤色合理性：检出人脸的区域内 H ∈ [10°, 45°] 占比 ≥ 60%（用现有 `face-mask` 定位）；
+- A5 local 与 docker 两路径产物**逐字节一致**；A6 4 个变体 sha 互异且各自确定。
+
+**G9**：同一输入 × 4 个光照方向 → 产物落盘：
+- B1 方向可控性：亮度质心 (x,y) 沿 `left/right/top/bottom` **单调移动**（量化阈值待 spike 后定）；
+- B2 结构保持：与输入的梯度相关/SSIM ≥ 阈值（不把画面重画）；
+- B3 前景掩膜外像素改动量 ≤ 阈值；B4 确定性用**漂移口径**（扩散采样，同 §49.6 A10 校正后的口径）；
+- B5 fbc 变体：背景区域光照方向与前景一致（无拼接感，人眼物料 + 边缘能量判据）。
+
+**G10**（若做）：身份相似度用现有 `face-similarity` 节点度量 ≥ 0.6；显存峰值 < 8GB（`/health` 采样）。
+
+**G11**：3 条模板流水线 e2e 全绿 + 落盘复核：
+- C1 白底主图：背景区 `min(R,G,B) ≥ 250` 占比 ≥ 99.9%、过渡带近白像素占比 = 0（复用 §48.12 判据）；
+- C2 尺寸规格：1:1 输出 `W==H`，主体占比 ≥ 60%（包围盒）；
+- C3 水印：文字区域像素在指定位置发生变化、非水印区逐字节不变；
+- C4 场景图：合成 == alpha 混合公式（最大通道差 ≤ 1）。
+
+### 50.6 决策点（待拍板）
+
+- **D1 范围与顺序**：按 §50.2 的 S1→S2→S3，**G10 单列 B5**？（建议：是）
+- **D2 G8 变体与预热**：默认 `modelscope`(L, 912MB)，`paper_tiny`(T, 220MB) 作轻量备选；是否要 `colorize-load` 预热节点？
+  （建议：要 —— 与 `sam-load` 同理由，D 盘绑定挂载读权重慢）
+- **D3 G8 后处理**：是否给 `saturation`（默认 1.0）+ 可选 `denoise`/`colorfulness` 增强参数？（建议：只给 `saturation`，保持确定性）
+- **D4 G9 变体与掩膜来源**：默认 `fc`（文本+前景）还是 `fbc`（+背景）？前景掩膜由**内置 BiRefNet 自动出**还是要求上游提供？
+  （建议：默认 `fc`；掩膜既可上游传入，也可空 ⇒ 自动调 `matting.birefnet`）
+- **D5 G9 兼容红线**：若 diffusers 0.35.2 适配超过 **1 个工作日**或需要改动核心 pipeline 组件 ⇒ 是否允许**放弃 G9**（记录为"不做"）？
+  （建议：允许，且禁止为了它降级/替换 diffusers —— Pascal 钉版优先）
+- **D6 G10 处理方式**：延后为 B5（等重启窗口）／现在就做纯代码移植（不验收）／彻底不做？（建议：B5）
+- **D7 G11 批量**：(a) 新增 `image-batch-load`/`image-batch-save` 目录批处理节点 / (b) 只出模板 + 外部脚本循环
+  / (c) 两者都做？（建议：先 (b) 出模板验证价值，批量节点进 B5）
+- **D8 G11 水印节点**：是否做 `image-watermark`（纯 PIL，零 numpy）？（建议：做，电商白底图基本都要）
+
+### 50.7 风险与降级路径
+
+| 风险 | 触发条件 | 降级路径 |
+| --- | --- | --- |
+| G8 权重键与 vendored 类不匹配 | S1 探针 `load_state_dict` 报 missing/unexpected | 改用 `basicsr/archs/ddcolor_arch.py` 版 arch（同仓库，一并移植） |
+| G8 上色偏灰/串色 | 验收 A3/A4 不达标 | 提高 `saturation` 默认值 / 换 `artistic` 变体 / 加 `image-curves` 后处理节点串联（零代码） |
+| G9 diffusers 漂移超红线 | spike 超过 1 天或需改核心 pipeline | **放弃 G9**（按 D5），B4 只交付 G8 + G11 |
+| G9 显存不足 | spike 实测 > 8GB | 降 `steps`、fp16 强制、分块 VAE 解码（kornia/tiled VAE 已有先例） |
+| G10 显存不足 | 实测 > 8GB | `enable_model_cpu_offload` + 驱逐 flux（**需重启**）或彻底放弃 |
+| G11 批量需求强 | 用户要一次跑目录 | 提前做 D7(a) 的批量节点 |
