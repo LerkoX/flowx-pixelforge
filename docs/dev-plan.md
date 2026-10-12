@@ -4352,3 +4352,36 @@ docker 版的 mask-paint，得改成对象存储 id 而不是路径。
 **发布**：`BUNDLE_VERSION 1.15.1 → 1.16.0`；镜像 `lerkobba/flowx-pixelforge-nodes:v1.16.0`（镜像内 97 目录）；
 节点 97 → **99**（iclight-load id 227 / iclight id 228）；人眼物料 `~/flowx-output/b4_iclight_overview.png`
 （①输入 ②蒙版 ③左光 ④右光 ⑤highres ⑥再抠图对照 ⑦fbc 背景 ⑧fbc 输出）。
+
+## 五十一、B5（进行中）：工程债务与身份保持
+
+> B4（G8 上色 / G11 电商模板 / G9 重打光）已全部交付（§50.8–§50.11）。
+> 本节按用户"按顺序执行"逐项推进。
+
+### 51.1 新增 gate N：`main()` 桩冒烟（2026-10-12 已完成）
+
+**问题（两批真机事故的共同形状）**：`node mock` / Studio「运行测试」跑的是 `mock.py`，
+**跑不到 `main.py`**；而生产执行只跑 `main.py`。于是下面这类错误只能到真机才暴露：
+- B4/S2 `image-watermark`：`NameError: name 'opacity' is not defined`（参数没读进局部变量）
+- B4/S3 `iclight`：可选图像 `mask`/`bg` 传空 ⇒ `save-image` 参数展开失败
+
+**做法**：`nodes/_tools/test-main-smoke.py`（gate N，已挂进 `check-bundle.py`）对**每个节点**
+把 `flowx_client` / `image_io` / `executor_base` 换成桩，用 `flowx.json` 的参数默认值喂进去，
+真跑一遍 `main()`：
+
+| 桩要点 | 说明 |
+| --- | --- |
+| 参数取值 | 用 `parameters[].default`；空串给非空桩（否则节点"至少要给一个"的自校验会走偏）；`*_path`/`file` 给**真实临时 PNG**（load-image 要读文件） |
+| 两种输出形状 | 新节点走 `executor_base.run_op`（**已拍平**的值）；老节点直接 `submit_job`+`wait_job`（**元数据字典** `{"id"/"value"/"type"}`）⇒ 桩分别给 `StubOut` / `StubRaw`+`StubMeta` |
+| ⚠️ `dict.get()` 不触发 `__missing__` | 节点里 `result.get("outputs", {}).items()` 很常见 ⇒ 桩必须**预置** `outputs` 键，否则得到空 dict、报出**假 KeyError**（本轮踩到，7 个假 FAIL） |
+| 预装满常见输出键 | 节点会把 `outputs` 字典推导成 `{k: m.get("id")...}` ⇒ 桩先装满 ~35 个常见算子输出键，否则推导结果为空 |
+| 判定分类 | `NameError/AttributeError/TypeError/KeyError` ⇒ **FAIL**；`ValueError/RuntimeError/AssertionError`（节点自身对桩输入的校验）⇒ **SKIP** 并打印原因；缺 numpy/torch 等本机没有的库 ⇒ **SKIP** |
+| 节点目录进 `sys.path` | 真机执行时节点目录就是工作目录（`image_filters` 等靠它） |
+
+**负例自检**（`--selftest`，**5/5**）：门禁必须真的抓得住 —— `NameError` / `TypeError` /
+`AttributeError` 三条负例判 FAIL，好代码判 PASS，节点自校验判 SKIP。没有负例自检的门禁形同虚设。
+
+**现状**：99 个节点 **PASS 98 / SKIP 1 / FAIL 0**（唯一 SKIP：`inference-ensure` 直接访问真实
+服务做健康检查，不走 `run_op` 抽象）。
+
+**纪律增补**：改完任何节点 `main.py`，在真机跑之前先跑 `python3 nodes/_tools/test-main-smoke.py <节点名>`。
