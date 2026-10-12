@@ -3974,3 +3974,79 @@ OK   onnx 1.23.2 / onnxruntime 1.19.2  ⚠️ providers = ['AzureExecutionProvid
 | G9 显存不足 | spike 实测 > 8GB | 降 `steps`、fp16 强制、分块 VAE 解码（kornia/tiled VAE 已有先例） |
 | G10 显存不足 | 实测 > 8GB | `enable_model_cpu_offload` + 驱逐 flux（**需重启**）或彻底放弃 |
 | G11 批量需求强 | 用户要一次跑目录 | 提前做 D7(a) 的批量节点 |
+
+### 50.8 S1 交付记录（G8 DDColor 上色：已实施 + 真机验收全绿）
+
+**权重**（宿主 `D:\flowx-data\models\colorize\`，共 ≈2.8GB；容器内 `/models/colorize`）：
+
+| 变体 | 上游仓库 | 体积 | 参数量 | 说明 |
+| --- | --- | --- | --- | --- |
+| `modelscope` | `piddnad/ddcolor_modelscope` | 870MB | 227.9M | **默认**（清洗数据版，泛化最好） |
+| `paper` | `piddnad/ddcolor_paper` | 870MB | 227.9M | 论文版 |
+| `artistic` | `piddnad/ddcolor_artistic` | 870MB | 227.9M | 艺术风格版 |
+| `paper_tiny` | `piddnad/ddcolor_paper_tiny` | 211MB | 55.0M | 最轻量（convnext-t） |
+
+**算子族 `nodes/_common/server_ops/colorize.py`**（1316 行，含 **945 行 vendored 上游代码**）
+- 算子：`colorize.load` / `colorize.apply`，版本戳 **`@b77d44da027e`**；落盘插件名 `colorize_b77d44da027e.py` ✓
+- **零新增 Python 依赖**（torch + timm + cv2 全有）、**零服务端改动**（`app/` 一行未改）、**不重建推理镜像**
+- 上游 5 个模块（`ddcolor/model.py` + `basicsr/archs/ddcolor_arch_utils/{unet,convnext,transformer_utils,position_encoding}.py`）
+  逐行内联进 `_ddclasses()` **惰性工厂**（模块导入不 import torch ⇒ Termux 可跑纯逻辑单测，27+46 项断言）
+- 与上游的**唯二**差异：① 去掉模块级 import / `from basicsr` 交叉引用；② `astype(uint8)` 前补 `np.clip`
+  （上游对越界值会回绕；S1 探针实测该修复对真实数据**零影响**，见下）
+
+**节点**（id 219 `colorize-load` / 220 `colorize`，全自定义 UI，`compareInput: image` 做前后 AB 对比）
+
+**真机探针（GTX 1080, torch 2.3.1+cuda12.1, fp32）**
+
+| 项 | 实测 |
+| --- | --- |
+| **移植保真**（官方 `ColorizationPipeline` vs 本族内联，同权重同图） | **逐字节一致 = True / 最大通道差 0 / 0 像素差异（196608 全同）** |
+| 权重键匹配（§50.7 的风险项） | 4 个变体全 **strict** ⇒ 不需 basicsr 版 arch，风险项**关闭** |
+| 装载+build / 推理 512² / 峰值显存 | L: 12.6~13.3s / 0.23~0.46s / **3686MB**；T: 3.8s / 0.13s / 3001MB |
+| 分辨率扫描（T） | 256→0.10s/2390MB、512→0.13s/3000MB、768→0.40s/4015MB、1024→2.86s/**5433MB** |
+| 确定性 | 同进程两遍**逐字节一致** ✓（无随机采样） |
+
+**e2e（3 条流水线，串行提交）**
+
+| 流水线 | wf | 执行 | 结果 |
+| --- | --- | --- | --- |
+| `colorize-e2e-local`（4 类输入×modelscope + 人脸蒙版定位） | 139 | **670 / 671**（连跑两遍验确定性） | success |
+| `colorize-variants-e2e`（1 图×4 变体） | 140 | **672** | success |
+| `colorize-e2e`（docker 执行器，镜像 v1.15.0） | 141 | **673** | success |
+
+**验收 `nodes/_tools/verify_colorize.py`：PASSED = 26 / FAILED = 0**
+
+| 判据 | 实测 |
+| --- | --- |
+| A1 尺寸 | 上色输出 == 输入（512×384 ×3、1024×1024 ×1） |
+| **A2 确定性** | wf 139 连跑两遍，4 个前缀的产物**逐字节一致** |
+| A3 色彩化有效性 | 灰度人像 S 0.0→145.6（∞×）、近中性 100%→**0%**；真人灰图 0.0→38.1、近中性 100%→24.9%；褪色 33.0→134.4、偏黄旧照 46.4→135.3 |
+| A4 肤色合理性 | 人脸框内**色相模态 10~20°**（正是肤色）、肤色带占比 42.8%、平均 S 43.3（35776px 采样） |
+| **A5 执行器无关** | local vs docker 三张产物**逐字节一致**；A5b 两路径输入也一致 |
+| A6 变体互异 | 4 变体 sha 互异（`125e13ff…`/`6484dccd…`/`41fb1792…`/`e39f8d41…`） |
+
+**判据标定校正（诚实记录，同 §49.6 的做法）**：
+- **A3**：初版写"S 均值提升 ≥5×"对**已带色**的输入（褪色/偏黄）不可达也无意义（实测 4.1×/2.9× 已是强上色）
+  ⇒ 改为**分支判据**：灰度输入（S_in<1）用 ≥5×；已带色输入用"S_out ≥ 100 且 ≥ 2×S_in"。
+- **A4**：初版写"人脸蒙版内 H∈[10°,45°] 占比 ≥60%"——但 `face-mask` 出的是**人脸矩形框**（含头发/背景/衣物），
+  矩形框里不可能 60% 是肤色（实测峰值 10~20° 正确落在肤色带，但只占 42.8%）⇒ 改为三条按物理含义的判据：
+  ① 框内**色相模态** ∈ [5°,45°]；② 肤色带占比 ≥35%；③ 框内平均 S ≥20/255。
+
+**服务端证据**：算子 `colorize.load@b77d44da027e` / `colorize.apply@b77d44da027e`（**插件热上传，未重启服务**）；
+插件落盘 `plugins.d/colorize_b77d44da027e.py`；LRU 常驻 `ddcolor:modelscope`/`ddcolor:artistic`/`ddcolor:paper_tiny`
+（第 4 个 `paper` 被 3 槽 LRU 淘汰 ✓ 符合预期；`_register` 记账生效）。
+
+**本轮新增踩坑（4 条）**：
+1. **nodeRef 版本陷阱再犯**：`face-mask` 实际是 **1.1.0**（我按 1.0.0 写 → 执行 669 直接 `node not found`）。
+   纪律：写完流水线先跑一遍 `node list`/API 核对**每个** nodeRef 版本，别凭记忆。
+2. **A4 的人脸图要选真能检出脸的**：`b3_person.png` 在 `det_thresh=0.5` 下**检不到脸**（face.mask 报
+   "未检测到人脸"并中止整条执行）；改用 B2 G6 的 `face_in1_face_sharp` 转灰度 ✓ 检出正常。
+   ⇒ 顺带发现：**单节点失败会中止整条执行**（B4 流水线里人脸支路失败把已成功的上色结果的落盘也带走了）。
+3. **`docker cp` 后 `docker start` 不会重跑**（容器主命令是启动时快照）：必须用
+   `while [ ! -f /fetch.py ]; do sleep 2; done; python /fetch.py` 的"等文件"模式（B3 已记，这次是我自己忘）。
+4. **docker build 的 context 上传在山寨隧道下很慢**（12.1MB 花了数分钟才从 `Sending build context` 走到
+   `Step 1/100`）⇒ 别误判为卡死；`DOCKER_BUILDKIT=0` + `SKIP_PUSH=1`（远端 daemon 本地构建，Studio 直接用）✓
+
+**发布**：`BUNDLE_VERSION 1.14.0 → 1.15.0`；节点镜像 `lerkobba/flowx-pixelforge-nodes:v1.15.0`（176MB，含 2 个新目录）；
+节点导入 94 → **96**（id 219/220）；人眼物料 `~/flowx-output/b4_colorize_overview.png`（4 组输入/输出对照）
+与 `b4_colorize_variants.png`（4 变体横排）。

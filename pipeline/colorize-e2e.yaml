@@ -1,0 +1,188 @@
+Name: colorize-e2e
+Description: B4/S1 G8 DDColor 上色 e2e（docker 执行器跑推理 + 手机侧落盘）：验证执行器无关（与 local 版逐字节一致）
+Param:
+  service_url: "http://172.17.0.1:8100"
+  service_url_local: "http://4dc21d2a.r7.cpolar.cn"
+  service_token: "30e494999da13134808ee280aea6dffd"
+  gray_path: "~/flowx-input/gray_person.png"
+  faded_path: "~/flowx-input/faded.png"
+  old_path: "~/flowx-input/old_yellow.png"
+Graph: |
+  stateDiagram-v2
+  [*] --> Ensure
+  Ensure --> CL
+  Ensure --> LGray
+  LGray --> CGray
+  CL --> CGray
+  CGray --> SGray
+  LGray --> SIGray
+  SGray --> [*]
+  SIGray --> [*]
+  Ensure --> LFaded
+  LFaded --> CFaded
+  CL --> CFaded
+  CFaded --> SFaded
+  LFaded --> SIFaded
+  SFaded --> [*]
+  SIFaded --> [*]
+  Ensure --> LOld
+  LOld --> COld
+  CL --> COld
+  COld --> SOld
+  LOld --> SIOld
+  SOld --> [*]
+  SIOld --> [*]
+Nodes:
+  Ensure:
+    name: 服务健康检查
+    config:
+      nodeRef: inference-ensure@1.1.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        wait_seconds: 60
+  CL:
+    name: 装载 DDColor（modelscope）
+    config:
+      nodeRef: colorize-load@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_url_host: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        variant: "modelscope"
+        dtype: "fp32"
+        reload: "false"
+  LGray:
+    name: 加载原图
+    config:
+      nodeRef: load-image@1.3.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image_path: "{{ Param.gray_path }}"
+  CGray:
+    name: 上色 CGray
+    config:
+      nodeRef: colorize@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_url_host: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ LGray.image }}"
+        model: "{{ CL.model }}"
+        size: 512
+        saturation: 1.0
+  SGray:
+    name: 落盘-cold_gray
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ CGray.image }}"
+        filename_prefix: "cold_gray"
+        output_dir: "~/flowx-e2e-out"
+  SIGray:
+    name: 落盘-coldin_gray
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ LGray.image }}"
+        filename_prefix: "coldin_gray"
+        output_dir: "~/flowx-e2e-out"
+  LFaded:
+    name: 加载原图
+    config:
+      nodeRef: load-image@1.3.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image_path: "{{ Param.faded_path }}"
+  CFaded:
+    name: 上色 CFaded
+    config:
+      nodeRef: colorize@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_url_host: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ LFaded.image }}"
+        model: "{{ CL.model }}"
+        size: 512
+        saturation: 1.0
+  SFaded:
+    name: 落盘-cold_faded
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ CFaded.image }}"
+        filename_prefix: "cold_faded"
+        output_dir: "~/flowx-e2e-out"
+  SIFaded:
+    name: 落盘-coldin_faded
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ LFaded.image }}"
+        filename_prefix: "coldin_faded"
+        output_dir: "~/flowx-e2e-out"
+  LOld:
+    name: 加载原图
+    config:
+      nodeRef: load-image@1.3.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image_path: "{{ Param.old_path }}"
+  COld:
+    name: 上色 COld
+    config:
+      nodeRef: colorize@1.0.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_url_host: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ LOld.image }}"
+        model: "{{ CL.model }}"
+        size: 512
+        saturation: 1.0
+  SOld:
+    name: 落盘-cold_old
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ COld.image }}"
+        filename_prefix: "cold_old"
+        output_dir: "~/flowx-e2e-out"
+  SIOld:
+    name: 落盘-coldin_old
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url_local }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ LOld.image }}"
+        filename_prefix: "coldin_old"
+        output_dir: "~/flowx-e2e-out"

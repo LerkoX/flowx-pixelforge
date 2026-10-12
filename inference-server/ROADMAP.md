@@ -19,6 +19,16 @@
   fp16 SAM（Pascal fp16 吞吐 1/64）。
 
 
+
+### 阶段 10 / B4-S1：DDColor 老照片上色（2026-10-12 实施完成）
+
+- 算子族 `colorize.py`（`@b77d44da027e`）：`colorize.load`（4 变体，进 model_manager LRU，键 `ddcolor:<variant>`）
+  + `colorize.apply`（保留原图 L 通道只预测 ab，`saturation` 在 Lab 空间缩放色度）。
+- **服务端 `app/` 零改动、零新增依赖、不重建推理镜像**；上游 DDColor 实现 945 行逐行内联（惰性工厂，Termux 可测）。
+- 真机：保真对照与官方实现**逐字节一致**；L 227.9M/装载 13s/推理 512² 0.23~0.46s/峰值 3.7GB；T 55.0M/3.8s/0.13s/3.0GB。
+- 未做：上色结果的自动色彩校正（用既有 `image-curves`/`image-hsl` 串联即可）、批量处理（见 B4/S2 的 D7）。
+
+
 ## 0. 现状盘点（已对齐的部分）
 
 | ComfyUI 概念 | 本服务对应 | 状态 |
