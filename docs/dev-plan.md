@@ -4604,3 +4604,29 @@ host 侧 docker 隧道连接被拒，见 §52.4；本地以 `ast.parse` + 两个
 **连接被拒**（`ConnectionRefusedError`，`flowx-studio executor test --id 8` FAILED）⇒ 容器内验证与
 docker 路径 e2e 本轮做不了；3 个批量节点是 local-only（读写本机 FS）⇒ 不受影响，全部验收走 local ✓。
 需要时请在 Windows 上重启那条 docker 隧道。
+
+### 52.5 第 4 项实施记录（旧插件版本清理 + 产物索引）
+
+**(1) 服务端 plugins.d 版本清理**（用既有 `nodes/_tools/purge-plugin-versions.py`，判定依据是本地
+`_common/server_ops/*.py` 的版本戳 = 唯一事实源，绝不会误删当前版本）
+
+| 项 | 清理前 | 清理后 |
+| --- | --- | --- |
+| 插件文件 | 47 | **44**（删 `seg_2d93233ebf87.py`、`seg_9bb531fee5c0.py`、`tiled_9bfd696956e9.py`） |
+| 注册算子 | 113 | **104**（-9 个旧版本注册；当前 `seg@f18314e7cf62` / `tiled@91cb9a1d3d9a` 完好） |
+
+未版本化的历史文件（`cond_combine.py`/`flux_unet_load.py`/`preprocess_lineart.py`/`upscale_model_load.py`/
+`sd_*`/`video_*`/`image_*`/`face_analyze.py` 等）**按工具设计不动** —— 老 bundle 的节点还在用它们。
+
+**(2) 产物索引 `nodes/_tools/index-e2e-out.py`（只读，不搬文件）**
+
+复核脚本一律按 `<前缀>_<时间戳>.png` 取**最新一份**，所以 `~/flowx-e2e-out/` 的平铺布局**不能改**
+（搬走会让所有 verify 脚本报"缺产物"）。本工具改为生成 `INDEX.md` + 打印摘要：
+
+- 实测：**143 个前缀组 / 269 个文件 / 58.5MB**；按批次 B1 3 组、B2 38、B3 22、B4 42、B5 2、其他 36。
+- 每个前缀报 `份数 / 最新一份 / 大小 / sha256[:12] / **不同 sha 个数**` —— 最后一项就是
+  "同参数多次运行是否逐字节稳定"的直接观测（确定性判据的证据来源）。
+- 实测 13 组存在 sha 差异，逐条归因：`iid_on`/`iid_off`（InstantID 扩散采样，预期）、
+  `face_*_gfpgan`（GFPGAN 随机模型，预期）、`batch_preview`（两轮一次用序号标签一次用文件名标签，
+  参数不同）、`colin_face`/`g7_shuffle`/`matting_comp_image_`（B1/B2 期不同参数重跑，非同一请求）。
+  ⇒ 结论：**没有任何"确定性算子的同参数多次运行产物不一致"**，与各批复核结论一致。
