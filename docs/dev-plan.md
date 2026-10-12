@@ -4100,3 +4100,157 @@ OK   onnx 1.23.2 / onnxruntime 1.19.2  ⚠️ providers = ['AzureExecutionProvid
 
 **发布**：`BUNDLE_VERSION 1.15.0 → 1.15.1`；镜像 `lerkobba/flowx-pixelforge-nodes:v1.15.1`（含 image-watermark 目录）；
 节点 96 → **97**（image-watermark id 221）；人眼物料 `~/flowx-output/b4_ecom_overview.png`（①②③ 三模板 8 格对照）。
+
+### 50.10 事后修复（2026-10-12）：grounding-detect widget 产物语法非法（画布 UI 加载失败）
+
+**现象**：流水线 135（`B3/seg-text e2e local`）画布上「文本检测（框→SAM 像素级）」节点
+（`grounding-detect@1.0.0`，id 216）显示 **UI 加载失败**，其余节点正常。
+
+**根因**：`ui/widget-def.js` 第 8 行的 label 把 `' . '` 直接嵌进了单引号字符串——
+`label: '文本提示（多类用 ' . ' 分隔）'` ⇒ 拼接产物 `ui/node-widget.js` **语法非法**
+（`SyntaxError: Unexpected string`）⇒ Studio `import(bundleUrl)` 直接 reject
+（`ModuleNodeWidget` 回退 script 标签同样失败），画布渲染警示条。
+**产物字节非法，但没有任何门槛拦住它**：
+
+1. `ui/node-widget.js` 是 `build-widget.py` 纯文本拼接（base + widget-def），
+   gate G 只比对"产物是否最新"，不校验语法；
+2. gate L（`test-widget-ui.mjs` 第 6 节）用
+   `try { bundleSpec(d) } catch { return false }` **静默跳过**解析失败的节点 ⇒
+   坏 bundle 不进测试清单，门槛照旧全绿（当时 94/95，坏的那个被打包成"不存在"）；
+3. Studio 侧 `validateUIPackage` 只校验 entry 路径/单文件/大小/apiVersion（JS 语法
+   校验需要内置 JS 引擎，不做）⇒ import 静默通过。
+
+**修复**：
+- `nodes/grounding-detect/ui/widget-def.js`：label 改用双引号
+  `label: "文本提示（多类用 ' . ' 分隔）"`；`build-widget.py grounding-detect` 重建产物
+- `nodes/_tools/test-widget-ui.mjs`：解析失败的 bundle **报 FAIL 并打印原因**，不再静默
+  过滤（"产物字节合法 ≠ 点得动" 的下一层：**字节非法连挂载都到不了**）
+- 重新 `node import --overwrite`（id 216 保持）⇒ 画布 8 个节点全部正常渲染，
+  「文本提示（多类用 ' . ' 分隔）」输入框、▶ 预览、3 个滑杆均可见，控制台零报错
+
+**纪律**：手写 `widget-def.js` 的 label/note 里含单引号时，字符串一律用双引号包；
+改完必跑 `python3 nodes/check-bundle.py`（gate G/L 现在会拦住这一类）。
+
+### 50.11 笔画外置存储（C1）+ 上传放行策略配置化（2026-10-12）
+
+**问题**：`mask-paint` 的笔画矢量一直内联在参数里。workflow 113 的 `MaskPaint.strokes_json`
+= **104,259 字节**（6 笔 **7476 点**，13.9 字节/点）——因为编辑器在 `pointermove` 里
+**每帧 push 一个点**（`_common/widget-base.js`，只做 0.1px 取整，无去重/抽稀）。
+代价是三份副本：① workflow YAML（108,823 字节）② **每次执行**的运行时快照（
+`runtime_yaml`：641=130KB、629/607≈115KB，wf 113 七个快照合计 479KB）
+③ 画布打开时下发的 widget props / SSE。
+
+**方案（C1：复用 Studio 的本地媒体端点，参数只留短路径）**
+
+1. **flowx-studio：上传接口放开限制 + 落点可配**（`~/.flowx-studio/config.yaml`）
+   ```yaml
+   media:
+     roots: [~/flowx-output, ~/flowx-input, ...]
+     upload_dir: ~/flowx-input/uploads   # 留空 = 自动（值同此行）
+   ```
+   - **不限扩展名、不限大小**（中途曾按图片/视频白名单 + 32/512/8MB 上限做过一版
+     `UploadPolicy`，按用户要求**已删除**）：`internal/handler` 里的 `uploadImageExts`/
+     `uploadVideoExts`/`uploadMax*Bytes`/`UploadPolicy` 全部移除，落盘改 `writeFile`
+     单遍流式（无上限）；`kind` 降级为由 MIME 推导的提示字段
+   - 保留的两条安全措施：`subdir` 不得越出上传根目录、文件名一律消毒
+   - **落点可配**：`media.upload_dir`（支持 `~`，env `FLOWX_STUDIO_MEDIA_UPLOAD_DIR`）；
+     未配置时沿用旧行为（`flowx-input` 根下的 `uploads/`）；显式配置的目录**自动纳入
+     可读白名单**（否则刚上传的文件自己都预览不了）
+   - 踩坑（第二次踩同一个）：viper 的 `AutomaticEnv` 会把「**设置成空串**的环境变量」
+     当成显式设置，把配置文件里的值静默盖成空 ⇒ 单值键也要走
+     `configFileString()`（取父级 map，绕开叶子键的环境变量）
+   - 文档：`docs/04-api.md` §4.8.3/§4.8.4；单测 `internal/config/config_test.go`
+     + `TestMediaHandlerUploadAnyExt` / `TestMediaHandlerUploadConfiguredDir` / `TestWriteFile`
+
+2. **节点包：`mask-paint@1.4.0`（新增外置存储，旧写法全兼容）**
+   - `flowx.json` 新增 `strokes_ref`（本地 JSON 路径）；`strokes_json` 保留为「内联（旧）」
+   - `main.py`：`parse_strokes` 按首字符分流（`{` = 内联 JSON，否则 = 文件路径，读不到
+     只告警不抛错）+ `resolve_strokes(ref, inline)`（ref 优先）
+   - `widget-base.js` 的 `paint` spec 新增 `strokesRefKey` / `strokesSubdir`：
+     保存时 `POST /api/v1/media/upload?subdir=strokes` 拿回路径写进 ref 并**清空内联**；
+     读取走 `/media/file`（异步）。**读不回来就禁用编辑**（❌ 提示），绝不用空笔画覆盖原内容
+   - **顺手抽稀（5.5x）**：保存前 RDP（`simplifyStrokes`，ε 按笔刷直径 0.75~1.5px 自适应）
+     + 去重 + 取整。实测 641 的 6 笔 7476 点：104KB → ε=1px **18.8KB**
+   - gate K 扩展：`paint.strokesRefKey` 与 `kind:'file'` 同样要求 `supportedTypes: [local]`
+     （文件落在 Studio 机器，容器里读不到）；gate L 新增第 7 节（抽稀/外置读取/读失败只读/
+     保存写回 ref 并清空内联），mock 也带上 `strokes_ref`
+
+3. **存量治理（wf 113 已迁移）**：笔画**原样**落盘为
+   `~/flowx-input/uploads/strokes/flux-virtual-tryon-maskpaint.strokes.json`（不做抽稀——
+   不动用户既有蒙版几何），参数改成该路径 + `nodeRef: mask-paint@1.4.0`：
+   **workflow YAML 108,823 → 4,646 字节（23x）**，之后每次执行的快照同样只带短路径。
+   验证：节点侧 `resolve_strokes` 读该文件 → `coverage=0.5211`，与执行 641 记录的
+   `MaskPaint.coverage=0.5211` **完全一致**；画布上节点显示「6 笔 · 768×1280」，控制台零报错。
+   （历史快照不重写——那是执行记录，不是定义。）
+
+**遗留**：外置路径是**本机绝对路径**，节点必须是 local-only（gate K 已守）；若将来要做
+docker 版的 mask-paint，得改成对象存储 id 而不是路径。
+
+## 五十一、修：FLUX 三个 loader 同步 `/op` 异步化（2026-10-12，exec 686 事故根治）
+
+### 51.1 事故（exec 686，wf113 `flux-virtual-tryon-multi-ref`）
+
+第 2 层并发扇出（Ensure → UnetLoad / ClipLoad / VaeLoad / MaskPaint / LoadRef1）里
+两个加载节点双双读超时，层屏障 + fail-fast ⇒ Encode/ReduxApply1/MaskRefine/Save/Unload
+全部未调度，整跑 failed（2648s）：
+
+| 节点 | 失败文本 | 耗时 |
+| --- | --- | --- |
+| UnetLoad `flux-unet-load@1.1.0` | `POST https://4dc21d2a.r7.cpolar.cn/op failed: TimeoutError: The read operation timed out`（`timeout=1800`） | 2608s |
+| VaeLoad `flux-vae-load@1.1.0` | 同上（`timeout=600`） | 1408s |
+
+**根因链**：这两个（外加 `flux-dual-clip-load@1.1.0`，冷加载实测 ~7 分钟）是 FLUX 族里
+**仅剩的同步 `/op` 调用**——`flux-clip-encode@2.0.0`/`flux-sampler@2.0.0`/
+`flux-mask-refine@1.0.0`/`flux-detail-refine@2.0.0` 早已改 `/jobs`+轮询（§八.1 同因）。
+服务端冷加载模型是**分钟级零字节静默**请求，cpolar 免费隧道按规定掐断这类流式连接
+（§1686 记「流式连接 40s-数分钟被切」）；再加上 `engine.EXEC_LOCK` GPU 串行 + job FIFO，
+同层并发的 VAE 请求必然排在冷加载 UNet 之后，客户端超时先生效。对照：exec 641 走 LAN
+时这两个节点 422s / 9.5s 全绿，算子和权重无问题——差异只在通道。
+
+### 51.2 修复（节点包 3 个，1.1.0 → 1.2.0）
+
+| 节点 | 改动 |
+| --- | --- |
+| `flux-unet-load@1.2.0` | `call_op(...timeout=1800)` → `submit_job` + `wait_job`；新增 `job_timeout`(1800)/`poll_interval`(5)；节点 `timeout` 1800 → 2100 |
+| `flux-vae-load@1.2.0` | 同上（`job_timeout` 默认 1800，给"排在冷加载 UNet 之后"留足队首时间）；`timeout` 600 → 2100 |
+| `flux-dual-clip-load@1.2.0` | 同上（同类风险，冷加载 ~7 分钟）；`timeout` 600 → 2100 |
+| `flux-redux-apply@1.1.0` | 同上（实测 138~141s 静默：冷路径装载 SigLIP+Redux 适配器）；`job_timeout` 900 → 1800、新增 `poll_interval`(5)、`timeout` 960 → 2100 |
+
+服务端零改动（`/jobs` 走同一 `engine.run_op`，载荷 `{"name","inputs"}` 通用）。
+`flowx_client.py` 不动（共享件，`submit_job`/`wait_job` 既有）。widget 三处加
+`job_timeout`/`poll_interval`（advanced 折叠区）+ `build-widget.py` 重建。
+
+**存量流水线同步升级 nodeRef**（版本锁定的流水线不会自动吃到新节点）：96 / 101 / 103 /
+104 / 113 共 5 条 × 3 个 loader `@1.1.0` → `@1.2.0`，另 104 / 113 的 `flux-redux-apply`
+`@1.0.1` → `@1.1.0`，复扫残留 0。同时把 wf113 的 `Param.service_url` 从 `https://` 改回
+`http://4dc21d2a.r7.cpolar.cn`（与其余流水线一致，少一层 TLS；隧道地址本身两者都指向
+`localhost:8100`）。
+
+### 51.3 验证
+
+- **stub e2e（真机 GPU 离线时的替身）**：临时工作流指向本机 stub 服务（`/ops` 视为核心内置、
+  `/jobs` 前 2 次 pending 后 done），Studio 真跑 → **exec 687 全绿**：3 次 `POST /jobs`
+  （载荷正确：`transformer`/`name`/`t5` + `dtype`）、**0 次同步 `/op`**、
+  `X-FlowX-Lease: 687` 租约头透传到 job、三个节点输出正确进 metadata。
+  临时工作流与 stub 已删。
+- **门禁**：`check-bundle.py`（含 gate J/L/M）通过；`sync-flowx-json.py` 无镜像清单漂移。
+
+### 51.4 遗留
+
+- **镜像 tag 未动**：BUNDLE_VERSION 仍 1.15.1、未重建 `flowx-pixelforge-nodes` 镜像
+  ⇒ **docker 执行器**跑这三个节点仍是旧代码（FLUX 流水线实际都用 local 执行器；要上
+  docker 需 bump BUNDLE_VERSION + 重建镜像 + `sync-flowx-json.py`）。
+- **剩余同步节点**（同类隐患，实测耗时短、暂未动）：`flux-vae-encode/decode`（秒级）、
+  `flux-empty-latent`（60s）。**判据**：任何可能分钟级不出字节的算子一律 `/jobs`，
+  不要靠调大 timeout（隧道掐的是连接不是超时值）。
+- **真机复跑前置（2026-10-12 16:xx 探测未通过）**：手机侧走 flowx 真跑
+  `inference-ensure@1.1.0` 探活 → `GET http://4dc21d2a.r7.cpolar.cn/health failed:
+  TimeoutError: timed out`（30s 重试后失败）。分层结论：① 本机 DNS 被 **fake-ip 劫持**
+  （`4dc21d2a.r7.cpolar.cn → 198.18.0.6`、`5.tcp.cpolar.top → 198.18.0.8`，连 `baidu.com`
+  都是 `198.18.0.4`）⇒ 域名请求实际走本地代理（§七 记过的 fake-ip 坑，这次是 HTTP 侧）；
+  ② 绕开域名直连真实 IP（cpolar 边缘 `47.86.36.92:80/443`、docker 隧道 `8.162.7.178:12869`）
+  TCP 可连上但**零字节返回** ⇒ 云端入口在、Windows 侧 cpolar 客户端或 `localhost:8100`
+  的推理服务未应答。**复跑前先在 GPU 主机确认 cpolar 客户端在线 + `curl
+  localhost:8100/health` 通**，再从 Studio 整跑 wf113。
+- exec 686 是失败历史记录，**不重写快照**（含 `@1.1.0` 物化节点）；要复跑就整跑 wf113，
+  并把 `service_url` 指向当时可用的地址（LAN 优先）。
