@@ -29,6 +29,16 @@
 - 未做：上色结果的自动色彩校正（用既有 `image-curves`/`image-hsl` 串联即可）、批量处理（见 B4/S2 的 D7）。
 
 
+
+### 阶段 10 / B4-S2：电商模板 + 水印节点（2026-10-12 实施完成）
+
+- 新节点 `image-watermark`（纯节点侧 PIL）：九宫格定位/不透明度/描边/旋转/平铺/Logo；输出水印 `box` 供复核。
+- 3 条模板流水线：白底主图（1:1）/ 场景换底 / 模特图规格化（GFPGAN + RealESRGAN 4x）。
+- 复核 `_tools/verify_ecom.py` **12/12**；关键事实：`matting-composite` 的 `feather=8` ≈ 24px 过渡带；
+  水印"非水印区逐字节不变"可证。
+- 未做（按 D7）：目录批量节点（`image-batch-load/save`）⇒ B5 候选；中文水印需外部 TTF 路径。
+
+
 ## 0. 现状盘点（已对齐的部分）
 
 | ComfyUI 概念 | 本服务对应 | 状态 |

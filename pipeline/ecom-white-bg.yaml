@@ -1,0 +1,166 @@
+Name: ecom-white-bg
+Description: B4/S2 G11 电商模板①：白底主图 —— 抠图(BiRefNet main+去白边) → 白底合成 → 1:1 扩画布 → 水印 → 落盘
+Param:
+  service_url: "http://4dc21d2a.r7.cpolar.cn"
+  service_url_host: "http://4dc21d2a.r7.cpolar.cn"
+  service_token: "30e494999da13134808ee280aea6dffd"
+  image_path: "~/flowx-input/b3_person.png"
+Graph: |
+  stateDiagram-v2
+  [*] --> Ensure
+  Ensure --> LoadImage
+  LoadImage --> Matte
+  LoadImage --> Compose
+  Matte --> Compose
+  Compose --> Pad
+  Compose --> SaveComposite
+  Pad --> WM
+  WM --> SaveMain
+  Pad --> SaveSquare
+  Matte --> SaveMask
+  LoadImage --> SaveInput
+  SaveMain --> [*]
+  SaveSquare --> [*]
+  SaveComposite --> [*]
+  SaveMask --> [*]
+  SaveInput --> [*]
+Nodes:
+  Ensure:
+    name: Ensure
+    config:
+      nodeRef: inference-ensure@1.1.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        wait_seconds: 60
+        service_token: "{{ Param.service_token }}"
+  LoadImage:
+    name: LoadImage
+    config:
+      nodeRef: load-image@1.3.0
+      executor: local
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        image_path: "{{ Param.image_path }}"
+        service_token: "{{ Param.service_token }}"
+  Matte:
+    name: Matte
+    config:
+      nodeRef: matting-birefnet@1.0.0
+      executor: local
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        image: "{{ LoadImage.image }}"
+        variant: "main"
+        resolution: 1024
+        refine: true
+        refine_radius: 90
+        alpha_gamma: 1
+        invert: false
+        service_token: "{{ Param.service_token }}"
+  Compose:
+    name: Compose
+    config:
+      nodeRef: matting-composite@1.0.0
+      executor: local
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        image: "{{ LoadImage.image }}"
+        mask: "{{ Matte.mask }}"
+        bg_mode: "color"
+        bg_color: "#FFFFFF"
+        feather: 1
+        service_token: "{{ Param.service_token }}"
+  Pad:
+    name: Pad
+    config:
+      nodeRef: image-pad@1.0.0
+      executor: local
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        image: "{{ Compose.image }}"
+        left: 0
+        right: 0
+        top: 64
+        bottom: 64
+        fill: "white"
+        feather: 0
+        service_token: "{{ Param.service_token }}"
+  WM:
+    name: WM
+    config:
+      nodeRef: image-watermark@1.0.0
+      executor: local
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        image: "{{ Pad.image }}"
+        text: "FLOWX SAMPLE"
+        logo: ""
+        position: "bottom-right"
+        margin: 24
+        opacity: 0.6
+        font_size: 0
+        font_path: ""
+        color: "#FFFFFF"
+        stroke_width: 2
+        stroke_color: "#000000"
+        logo_scale: 0.0
+        tile: "false"
+        angle: 0
+        tile_gap: 0
+        service_token: "{{ Param.service_token }}"
+  SaveMain:
+    name: SaveMain
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        image: "{{ WM.image }}"
+        filename_prefix: "ecom_white_main"
+        output_dir: "~/flowx-e2e-out"
+        service_token: "{{ Param.service_token }}"
+  SaveSquare:
+    name: SaveSquare
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        image: "{{ Pad.image }}"
+        filename_prefix: "ecom_white_square"
+        output_dir: "~/flowx-e2e-out"
+        service_token: "{{ Param.service_token }}"
+  SaveComposite:
+    name: SaveComposite
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        image: "{{ Compose.image }}"
+        filename_prefix: "ecom_white_composite"
+        output_dir: "~/flowx-e2e-out"
+        service_token: "{{ Param.service_token }}"
+  SaveMask:
+    name: SaveMask
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        image: "{{ Matte.mask }}"
+        filename_prefix: "ecom_white_mask"
+        output_dir: "~/flowx-e2e-out"
+        service_token: "{{ Param.service_token }}"
+  SaveInput:
+    name: SaveInput
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Ensure.service_url }}"
+        image: "{{ LoadImage.image }}"
+        filename_prefix: "ecom_white_input"
+        output_dir: "~/flowx-e2e-out"
+        service_token: "{{ Param.service_token }}"

@@ -4050,3 +4050,53 @@ OK   onnx 1.23.2 / onnxruntime 1.19.2  ⚠️ providers = ['AzureExecutionProvid
 **发布**：`BUNDLE_VERSION 1.14.0 → 1.15.0`；节点镜像 `lerkobba/flowx-pixelforge-nodes:v1.15.0`（176MB，含 2 个新目录）；
 节点导入 94 → **96**（id 219/220）；人眼物料 `~/flowx-output/b4_colorize_overview.png`（4 组输入/输出对照）
 与 `b4_colorize_variants.png`（4 变体横排）。
+
+### 50.9 S2 交付记录（G11 电商模板：已实施 + 真机验收全绿）
+
+**新节点 `image-watermark`（id 221，纯节点侧 PIL，零 numpy）**
+- 参数：`text`/`logo`（二选一；logo 优先）+ `position`（九宫格）+ `margin` + `opacity`
+  + `font_size`（0=自动 短边/18）+ `font_path` + `color` + `stroke_width`/`stroke_color`
+  + `logo_scale`（0=自动）+ `tile`/`angle`/`tile_gap`（斜铺防盗图）
+- 输出：`image` + `width`/`height` + **`box`(x,y,w,h)** + `box_w`/`box_h`/`item_w`/`item_h`
+  ⇒ `box` 就是"非水印区逐字节不变"这条判据的锚点
+- 本机单测 `test_main.py` **42 项断言**（含**第 6 节 main() 桩冒烟**，见下）
+- 已知限制：容器/手机默认字体只含 ASCII ⇒ **中文水印必须给 `font_path` 指向含 CJK 的 TTF**
+
+**3 条电商模板流水线**（全部 local 执行器；`~/flowx-e2e-out` 落盘）
+
+| 模板 | wf | 执行 | 链路 |
+| --- | --- | --- | --- |
+| `ecom-white-bg`（白底主图） | 142 | **676 / 682** | 抠图(BiRefNet main@1024 + 去白边) → 白底合成(feather=1) → 1:1 扩画布(white) → 水印 → 落盘 |
+| `ecom-scene`（场景换底） | 143 | **677 / 683** | 抠图(lite + 去白边) → 背景图合成(feather=8) → HSL(sat 1.05,light +2) → 水印 → 落盘 |
+| `ecom-model-spec`（模特图规格化） | 144 | **681** | 人脸修复(GFPGAN) ‖ 裁 512² 中心 → RealESRGAN 4x → 水印 → 落盘 |
+
+**验收 `nodes/_tools/verify_ecom.py`：PASSED = 12 / FAILED = 0**
+
+| 判据 | 实测 |
+| --- | --- |
+| C1 白底纯度 | 把主体外扩 2px 后的背景区（129021px）**100.000% 纯白** |
+| C2 尺寸规格 | 输出 512×512 正方形；主体宽/高填充 0.73/0.63；主体面积占比 0.29 |
+| **C3 水印只改水印区** | 加印前后 diff bbox=(278,458,483,484)（右下、margin 24）；**区外改动 0 px（逐字节）** |
+| C4 场景合成 | 主体核心（腐蚀 24px，19607px）与输入**最大差 0**；背景替换率 **99.9%**；过渡带 3201px |
+| C4' 主体核心（腐蚀 16px，29324px） | 最大差 3（≤4）✓ |
+
+**判据标定校正（诚实记录，同 §49.6/§50.8 的做法）**
+- **C1**：初版把 `mask<128` 全当背景要求 ≥99.9% 纯白 → 实测 97.534% ✗。原因是 **0<mask<128 是合成羽化的自然过渡带**，
+  不该要求纯白 ⇒ 改为把主体向外扩 2px、只判"远离轮廓的背景" ⇒ **100.000%** ✓（与 B2 §48.12 去白边专项同一方法论）。
+- **C4**：初版用未羽化的 `Matte.mask` 当 alpha，要求主体区（mask≥250）差 ≤1 → 实测 41% 像素超 1、最大 167 ✗。
+  实测发现 **`matting-composite` 的 `feather=8` 在节点内部是 ≈24px 宽的过渡带**（腐蚀 16px 后最大差 3、腐蚀 24px 后 **0**）
+  ⇒ 改为"腐蚀 `feather+8` 的核心 ≤4、腐蚀 24px 核心 = 0"，并把"feather=8 ⇒ ≈24px 过渡带"记为**运维事实**。
+
+**本轮新增踩坑（3 条，全部已修 + 已进纪律）**
+1. **`node mock` 跑的是 mock.py，跑不到 main.py** ⇒ `image-watermark/main.py` 的 `NameError: opacity`
+   一路逃到真机（wf 142 首次执行失败）✗。已在该节点的本地单测里加 **第 6 节：main() 桩冒烟**
+   （桩掉 `flowx_client`/`image_io` 的网络与 emit，真跑一遍 `main()`）⇒ 未定义名字/参数名写错/漏传都会在本机暴露。
+   **建议**：把这个桩冒烟推广成门禁（对 `files` 含 `image_io.py` 的纯 PIL 节点统一执行），列入 B5 候选。
+2. **GFPGAN 吃的是"检测后对齐的人脸块"，不是整图** ⇒ 我先按 512² 中心裁剪再喂 `face-restore`，
+   结果它在这个裁剪图上"未检测到人脸"（`det_thresh` 0.3/0.5 都不行）；而同一张裁剪图给 `face-mask@1.1.0`
+   在 0.3 下**能**检出 ⇒ 两个算子的检测实现/阈值语义不同。正解：人脸修复走**整图**，裁剪只服务放大分支。
+3. **tunnel 单次 `POST /jobs` 偶发 `RemoteDisconnected`**（cpolar 免费隧道）⇒ 直接重跑同一条流水线即成功
+   （节点本身有瞬态重试，但 `POST /jobs` 这一跳没有）⇒ 真机 e2e 失败先看是不是隧道抖动，再怀疑代码。
+
+**发布**：`BUNDLE_VERSION 1.15.0 → 1.15.1`；镜像 `lerkobba/flowx-pixelforge-nodes:v1.15.1`（含 image-watermark 目录）；
+节点 96 → **97**（image-watermark id 221）；人眼物料 `~/flowx-output/b4_ecom_overview.png`（①②③ 三模板 8 格对照）。
