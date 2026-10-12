@@ -4385,3 +4385,41 @@ docker 版的 mask-paint，得改成对象存储 id 而不是路径。
 服务做健康检查，不走 `run_op` 抽象）。
 
 **纪律增补**：改完任何节点 `main.py`，在真机跑之前先跑 `python3 nodes/_tools/test-main-smoke.py <节点名>`。
+
+### 51.2 G10 PuLID 立项方案（待拍板；侦察已完成，代码未动）
+
+**侦察结论（2026-10-12，detached 容器 + HF API 实测；服务未重启）**
+
+| 项 | 结果 |
+| --- | --- |
+| 依赖 | `insightface 0.7.3` ✓ / `onnxruntime 1.19.2`（**CPU EP**，人脸检测+ID 嵌入够用）/ `transformers 4.44.2` / `diffusers 0.35.2` / `einops` / `accelerate` / `peft` / `torchvision` ✓；缺 `eva_clip`、`open_clip`、`facexlib` ⇒ 前两者可按 DDColor 先例**源码内联进算子族** ⇒ **零新增 pip、不需要重建镜像、不需要重启** |
+| 权重（公开 `gated=False`） | `guozinan/PuLID`：`pulid_v1.1.safetensors` **938MB**（SDXL，推荐）/ `pulid_v1.bin` 1509MB / `pulid_flux_v0.9.1.safetensors` **1089MB**（FLUX）；`QuanSun/EVA-CLIP`（EVA02-CLIP-L-14-336，PuLID 的 ID 编码器） |
+| 已有资产 | `antelopev2` ✓（B2 已就位）/ `sd_xl_base_1.0.safetensors` ✓ / `instantid-controlnet` ✓ |
+| **能力重叠（关键）** | **InstantID 已交付且真机验收通过（§二十八，2026-09-24）**，节点 `instantid-apply`/`instantid-face-analyze`、算子 `instantid.apply`；另有 `face.similarity` 算子可**直接量化身份相似度**（验收判据现成） |
+
+**三个选项**
+
+| 选项 | 内容 | 重启？ | 价值 / 风险 |
+| --- | --- | --- | --- |
+| **A. PuLID-SDXL** | `pulid_v1.1`(938MB) + EVA-CLIP（fp16+autocast 存储，Pascal 纪律）+ SDXL base；CA attention processor 注入（**照 InstantID 先例**，架构已在该库验证过） | **不需要** | 与 InstantID **能力重叠** ⇒ 价值仅在"更轻"（≈1GB vs InstantID CN 2.5GB+）与"不硬抄脸"（InstantID 属刚性强约束）；纯增量收益有限 |
+| **B. PuLID-FLUX** | `pulid_flux_v0.9.1`(1089MB) + flux 家族 | **大概率需要** | 画质档位更高且**与 InstantID 不重叠**；但 flux unet **pinned 6.47GB** + EVA-CLIP 2.2GB + adapter 在 8GB 卡上**不能共存**，且 pin 在进程内不可回收（须验证 `models.unload` 能否卸 pinned 项，否则要改部署 `MAX_RESIDENT_MODELS`/offload ⇒ 重启） |
+| **C. 不做 PuLID** | 把预算用于给已交付的 InstantID/face 家族补**真机量化验收 + 人眼物料**（用 `face.similarity` 出 ID 相似度数字），并出 `weight`/`cn_strength` 调参扫描 | 不需要 | 边际收益可能高于新增一个同能力算子；也补上 §二十八 只有"验收全绿"定性结论、缺量化数字的缺口 |
+
+**建议**：**先做 C 的量化基线（约 1 小时，零权重、零重启）** —— 拿到 InstantID 的 ID 相似度数字
+（含"无 ID 约束"基线对照）后，再决定 A（要更轻的替代）还是 B（要 FLUX 档位）。
+理由：PuLID 与 InstantID 属同类能力（insightface 人脸嵌入 + SDXL 适配器 + CA 注入），
+在没量化对比前直接开工，很可能做出一个"更轻但更弱/更弱但更贵"的重复算子。
+
+**决策点（待拍板）**
+- D1 选 A / B / C（建议先 C 出数字）
+- D2 若选 A：`pulid_v1.1`（SDXL）为准；EVA-CLIP 用 fp16 存储 + autocast（Pascal 非张量 fp16 吞吐 1/64）
+- D3 若选 A/B：ID 嵌入按参考图**缓存成句柄**（`pulid_id:<hash>`，几 KB）⇒ 生成阶段只驻留适配器
+- D4 若选 B：是否接受"改部署配置 + 重启服务"（当前 pin 策略下 flux 与 PuLID 不能共存于 8GB）
+
+**验收清单（任一选项通用口径，实测标定）**
+- A1 ID 相似度：生成图人脸 vs 参考脸 `face.similarity` cosine，且与"同 seed 无 ID 约束"基线对比（**主判据**）
+- A2 确定性：同 seed + 同 ID 嵌入 ⇒ 逐字节一致（显式 generator，同 IC-Light 口径）
+- A3 缓存命中：第二次同参考图调用复用 ID 句柄（耗时对比）
+- A4 与 InstantID 横评：同参考脸 / 同 seed / 同提示词，两个方法的相似度 + 人眼物料并排
+- A5 执行器无关：local vs docker 产物逐字节一致
+- A6 记账：LRU 可见、可 `model-unload`、淘汰后显存回收（IC-Light 那次的强引用教训）
