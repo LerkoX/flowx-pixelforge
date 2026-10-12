@@ -4468,3 +4468,74 @@ docker 版的 mask-paint，得改成对象存储 id 而不是路径。
   就会撞上隧道空闲超时 ⇒ 长任务链里要避免把老节点和重任务放同一层（或先热模型）。
 - **隧道下"冷加载"是最大风险**：42 分钟的单次加载比任何算子都慢 ⇒ 跑重链前先确认模型已在
   `/models` 常驻（缓存命中后同一配置从失败变成功）。
+
+## 五十二、B5/第 3 项：服务端插件记账修复 + G11 批量节点（方案先行）
+
+> 决策已入档：**§51.2 D1 = C（不做 PuLID，G10 关闭）**。理由见 §51.3：现有 InstantID 身份
+> 相似度已达 0.7457（同人档上限区间），PuLID 属同类机制、SDXL 链在本部署冷加载 42 分钟，
+> 性价比不支持。**重新开启的条件**：出现"必须 FLUX 档位的画质 + 身份保持"的真实需求，
+> 或 InstantID 调参扫描后仍不满足。
+
+### 52.1 Part A：服务端插件归属簿（`plugin_ops`）的 3 个可证缺陷
+
+读完 `inference-server/app/{plugins.py,main.py}` 后的结论（都不是"感觉"）：
+
+| # | 缺陷 | 复现路径 | 后果 |
+| --- | --- | --- | --- |
+| **A1 幽灵归属** | `plugin_ops` 只在**上传**与**启动扫描**时写入；文件被**手工删除**（B1 清理遗留插件时就是这么干的）后条目仍在 | 删掉 `plugins.d/xxx.py`（不重启）→ 上传一个声明同名算子的新文件 | **假 409**："owned by xxx.py"（文件已不存在）；且 `DELETE /admin/plugins/xxx.py` 返回 404 ⇒ 幽灵条目无法清理 |
+| **A2 陈旧算子泄漏** | **同文件名重传**只做 `plugin_ops[n] = ...` 覆盖，从不摘除"上次声明、这次不再声明"的算子 | 把某族的算子改名后重传 | 旧算子名**永久留在 `registry._ops`**（重启才自愈）；`DELETE` 该文件也不会摘它（归属簿里已无该名） |
+| **A3 回滚不完整** | 409/400 回滚只恢复 `registry._ops` 与文件；`plugin_ops` 与 `sys.modules["flowx_plugin_x"]` 不回滚 | 冲突上传后立刻查 `/admin/plugins` | 归属簿与 `sys.modules` 残留半程状态（现网暂未出事故，但审计口径不清） |
+
+**修法（纯函数下沉 + 端点调用，便于单测）**
+1. `plugins.detect_conflicts(..., plugins_dir)`: 归属为**另一文件**时，先判断该文件是否**真的在盘上**；
+   不在盘上 ⇒ 不算冲突（视为幽灵），返回 `stale: [op...]` 供上层清理并**告警**。
+2. 新增 `plugins.reconcile(claiming_file, claimed, registry, plugin_ops, before_ops)`：
+   算出该文件上一次声明但这次未声明的算子 ⇒ 从 `registry._ops` 摘除 + 从归属簿删除 + 日志；
+   随后更新本次声明的归属。**改完必须回滚一致**（冲突路径下不产生副作用）。
+3. 回滚路径补 `sys.modules.pop(mod_name)`（`plugins.py` 里暴露 `plugin_module_name(filename)`）。
+4. `list_plugins` 标注 `missing_file: true`（幽灵条目可视化，运维一眼可见）。
+
+**测试**：新增 `inference-server/tests/test_plugin_registry.py`（纯逻辑、无需 GPU/torch，
+与既有 `tests/test_{engine,jobs,lease}.py` 同风格，`python3 tests/test_plugin_registry.py` 直跑）：
+幽灵归属不算冲突 / 陈旧算子被摘除 / 冲突路径零副作用 / `DELETE` 后归属簿干净 / 同文件幂等重传无副作用。
+
+**部署策略（重要）：本轮只入库代码 + 测试，不强制重启服务**（用户红线）。服务今天已自然重启过，
+下次自然重启即生效；`/ops` 的 operator 归属自检（main.py §389 已有 `plugin_ops.get` 用途）不受影响。
+
+### 52.2 Part B：G11 批量节点（Studio 无循环，所以"批量"落在 I/O 与拼图上）
+
+**约束**：Studio **没有循环/批处理概念**（只有 `workflow run`），所以"批量处理 N 张图"不能在流水线里
+循环同一条链。D7 已定"模板流水线 + 外部脚本循环"（`wfrun.py` 那种）。因此本轮补的是真正缺的三块：
+
+| 节点 | 作用 | 关键参数 / 输出 |
+| --- | --- | --- |
+| **`image-batch-load`** | 目录 → N 个对象 ID（供多输出算子/拼图/对比消费） | `dir` / `pattern`(`*.png` 支持多组用 `;` 分隔) / `sort`(name\|mtime\|size) / `limit` / `offset` / `recursive` → 输出 `images`(STRING JSON 数组) / `count` / `names`(JSON) |
+| **`image-batch-save`** | N 个对象 ID → N 个文件 | `images`(JSON) / `output_dir` / `filename_prefix` / `start_index` / `zero_pad`(默认 3) → 输出 `count` / `paths`(JSON) / `filenames`(JSON) |
+| **`image-montage`** | N 张图 → 一张拼图（联系表/对比图；也是"无循环"下把 N 张图合成一张再进单图链的唯一路子） | `images`(JSON) / `cols` / `cell_w` / `cell_h` / `pad` / `label`(`none\|index\|name`) / `bg` → 输出 `image` / `width` / `height` / `grid`(JSON `[cols,rows]`) |
+
+三者都是**纯节点侧 PIL/标准库**（零 numpy、零 GPU），且只能 `local` 执行器（读写本机文件系统）
+⇒ `supportedTypes: ["local"]`（与既有 `save-image`/`load-image` 同类）。
+
+**接口约定**：`images` 端口是 **STRING + JSON 数组**（Studio 节点输出端口只有 string/integer/float
+⇒ 沿用 B3 `seg.sam_auto` 的 `mask_ids` 先例，对象 ID 列表走 JSON 字符串）。JSON 负载统一 `@` 信封前缀
+（`_dumps`/`_loads`）以免 Studio 把"像 JSON 的字符串"自动反序列化成 map（B3 真机踩过）。
+
+**模板流水线（2 条）**
+- `batch-montage-preview.yaml`：`image-batch-load`(目录) → `image-montage`(带序号标签) → `save-image`
+  ⇒ 一眼看完一个目录（也是人工验收物料生成器）
+- `batch-save-masks.yaml`：`sam-auto-segment`(多蒙版) → `image-batch-save` ⇒ 16 个蒙版落 16 个文件
+  （把"多输出算子"的产物真正存下来，现在只能取 `selected` 一张）
+
+**验收 A1–A6（真机，落盘式）**
+- A1 `image-batch-load`：N 个文件的 `count`/`names`/ID 数量一致；`pattern` 多组与 `limit/offset` 边界正确
+- A2 `image-batch-save`：落盘文件名符合 `<prefix>_<序号 zero_pad>.png`；**逐字节**等于源对象（同一编码口径）
+- A3 `image-montage`：输出尺寸 == `cols×cell_w + (cols+1)×pad` 公式；格子内图像与源逐字节一致（无缩放时）
+- A4 闭环：`load → montage → save` 与"直接 save"产物在无标签/无缩放时不失真（最大通道差 0）
+- A5 本机门禁：gate N 桩冒烟通过（3 个新节点）+ gate M 参数一致 + `check-bundle`（节点数 99 → 102）
+- A6 人眼物料：一张真实目录的拼图联系表进 `~/flowx-output/`，手机可看
+
+**决策点**
+- D1 Part A 修法认可否（幽灵不算冲突 + 陈旧算子摘除 + 回滚补 `sys.modules`）——**不重启**，下次自然重启生效
+- D2 批量节点是否按"3 个（load/save/montage）"为完整范围（建议是；单独的 `image-batch-*` 不解决循环问题）
+- D3 `image-montage` 标签是否要支持中文（需 `font_path`；默认 ASCII 序号，同 `image-watermark` 限制）
+- D4 是否顺带把 `batch-*` 两条模板流水线也纳入本轮 e2e（建议是，成本低且产出人眼物料）
