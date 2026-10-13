@@ -3,6 +3,7 @@
 接口：
 - 系统：/health、/images/{id}（PNG 下载 / thumb 缩略图）、/videos/{id}（mp4 下载）、
   /gc（清对象仓库+缓存）、/model/unload（显式卸载常驻模型，等价 model.unload 算子）
+  /model/policy（读/写显存淘汰策略旋钮，运维节点 vram-ops 用）
 - 能力运行时（同步）：/ops（列出算子）、/op（单算子）、/graph（整图执行，带缓存）
 - 能力运行时（异步）：POST /jobs 提交 → GET /jobs/{id} 轮询状态/进度 →
   POST /interrupt 取消；视频等分钟级任务走此通道（同步 HTTP 会超时）
@@ -21,7 +22,7 @@ from fastapi.responses import FileResponse, Response
 from PIL import Image
 from pydantic import BaseModel, Field
 
-from . import engine, lease, ops, plugins, preview, sniff
+from . import engine, lease, ops, plugins, policy, preview, sniff
 from . import model_manager as _mm
 from .jobs import JobManager
 from .model_manager import OFFLOAD_MODE, QUANTIZATION, ModelManager
@@ -378,6 +379,56 @@ def get_video(video_id: str):
 class UnloadReq(BaseModel):
     """target 空 = 全部（便于 curl -X POST .../model/unload -d '{}'）。"""
     target: str = ""
+
+
+@app.get("/model/policy", dependencies=[Depends(auth)])
+def model_policy_get():
+    """读显存/淘汰策略旋钮（可写项 + 只读观测项）。
+
+    定位：单流水线串行时的策略实验工具（dev-plan §P1）。并发执行下动旋钮会互相干扰。
+    """
+    _attach_policy()
+    snap = policy.snapshot()
+    snap["lease_ttl_seconds"] = lease.LEASE_TTL
+    snap["lease_wait_timeout_seconds"] = lease.LEASE_WAIT_TIMEOUT
+    snap["offload_mode"] = OFFLOAD_MODE
+    snap["quantization"] = QUANTIZATION
+    return snap
+
+
+class PolicyReq(BaseModel):
+    """可写旋钮（只传要改的字段）；其它字段视为非法。"""
+    max_resident_models: int | None = None
+    vram_reserve_mb: int | None = None
+
+
+@app.post("/model/policy", dependencies=[Depends(auth)])
+def model_policy_set(req: PolicyReq):
+    """写策略旋钮（写后立即生效：淘汰逻辑每次调用都读模块级常量）。
+
+    body {"vram_reserve_mb": 768} / {"max_resident_models": 3}；
+    越界或不可写键 ⇒ 400。参考 GET /model/policy 的当前值。
+    """
+    _attach_policy()
+    patch = {k: v for k, v in (req.model_dump().items() if hasattr(req, "model_dump")
+                               else req.dict().items()) if v is not None}
+    if not patch:
+        raise HTTPException(status_code=400, detail="policy: 需至少给一个可写字段"
+                            "（max_resident_models / vram_reserve_mb）")
+    try:
+        return policy.update(patch)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+def _attach_policy():
+    """把 model_manager 的模块级旋钮注入 policy（每次调用幂等重挂，防测试替换后失效）。"""
+    policy.attach(
+        readers={"max_resident_models": lambda: _mm.MAX_RESIDENT,
+                 "vram_reserve_mb": lambda: _mm.VRAM_RESERVE_MB},
+        writers={"max_resident_models": lambda v: setattr(_mm, "MAX_RESIDENT", v),
+                 "vram_reserve_mb": lambda v: setattr(_mm, "VRAM_RESERVE_MB", v)},
+    )
 
 
 @app.post("/model/unload", dependencies=[Depends(auth)])

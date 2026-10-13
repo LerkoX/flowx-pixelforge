@@ -5503,3 +5503,97 @@ Q4 GGUF 逐层反量化开销。**优化候选**（待拍板）：`guide_size` 7
   （`flux.vae_load` + `POST /images`），要么用 `load-image` 节点现传。
 - **Studio 限流 100 req/min**：重导要节流（`reimport-nodes.py` 已内置 1.25s）；
   重导后立刻翻页核对也会 429，核对脚本要带退避。
+
+## 六十、P1 批次（用户"全都做"）：取消兜底 / 字体 / 巡检 / 运维节点 / 模板 / 扫参（2026-10-13）
+
+### 60.1 Studio 取消口径修复（取消后执行状态被覆盖回 `failed`）
+
+§58.8 报的问题落地修：`internal/service/workflow.go` 的 `execution_complete` 事件处理器
+在写库前**尊重 `CancelExecution` 先行落库的 `cancelled`**（与 `runWorkflowAsync` 收尾同一口径）。
+
+- 回归测试 `internal/service/workflow_cancel_status_test.go`：①取消后事件报 FAILED ⇒ 状态仍
+  `cancelled`；②没取消过的执行事件报 FAILED ⇒ 仍落 `failed`（守卫不得吞真失败）。
+- **负例自检**：临时移除守卫 ⇒ 测试以 `got "failed", want "cancelled"` 失败 ✓（证明测试真的抓得住）。
+- 真机：重启 Studio 后 3 次取消实验，执行状态全部稳定 `cancelled`（此前 5~35s 内被改回 failed）。
+- 部署：`make build` 同源重建 → 备份旧 `~/.local/bin/flowx-studio` → `server stop/start`
+  （实测 stop 报"5s 内未退出"但进程确实退了；重启后 API/Web 正常）。
+
+### 60.2 取消远程任务：**从"看运气"到"确定性"**（新发现的真缺陷）
+
+做 60.1 的真机复验时发现：**取消时远程 job 只有约 2/3 的概率被取消**（3 次实验 1/0/1）。
+隔离测试（不经 Studio，直接给节点发 SIGTERM）**总是成功** ⇒ 说明节点侧的 `_register_inflight`
+信号处理没问题，是 Studio 场景下的竞态：执行器杀进程树与节点内"收到信号→POST /interrupt"
+抢时间窗，输了就留**孤儿 GPU 任务**。
+
+Studio 本有兜底（`interruptRemoteJobs`：取消时向仍在运行的节点转发 `POST /interrupt`），但它
+需要 **node→(base, job_id)** 的映射，而该映射来自节点 stdout 的 `FLOWX_PREVIEW` 标记——
+7 个"提交 job 但不上报帧"的节点（4 个 loader + 3 个 vae/latent）**从来没报过**，于是兜底永远是
+空转（Studio 日志会写"未上报任务标识，跳过定向中断"）。
+
+**修**：7 个节点在 `submit_job` 之后立刻上报 job 标记
+（`emit_preview(f"{pbase}/preview/{jid}", 0.0, tok, base=pbase, job_id=jid)`）。
+链接上下游：`pbase` 用 `host_base(url)`（docker 场景取 `service_url_host`），因此**门禁 I 立刻
+要求这 7 个节点补声明 `service_url_host`**（否则 docker 下 Studio 拿到的 base 是容器内地址，
+转发不出去）——门禁按设计工作，7 个节点补齐参数 + env 映射 + widget 字段。
+
+**验收**（同一套取消实验，3 次）：`interrupt = 2/2/1`，**每次 ≥1**（不再有 0）；执行状态
+`cancelled`。出现 2 是因为"节点自己取消成功"与"Studio 兜底转发"都发生了 —— 同一 job_id
+的 `/interrupt` 幂等，无害（这一条也写进节点注释）。
+
+### 60.3 字体可复现（文本渲染节点的 A7 逐字节判据成立）
+
+`image-watermark` 此前 local/docker 产物不同（手机有 CJK 字体、容器没有 ⇒ 回退 Pillow 位图字体）。
+现随节点包内置 `fonts/DroidSansChinese.ttf`（8.1MB，含 CJK）并**首选**它，`font_path` 仍可覆盖；
+`Dockerfile` 增加该目录的 COPY（`*.py` 解析规则不受影响，镜像内目录数仍 102）。
+
+**验收（逐字节）**：同一输入图 + 同一文字（含中文 `FLOWX 样张 2026 watermark`），
+local 执行器（exec 737）与 docker 执行器（exec 738）产物
+**sha256 相同**（`151b5f492760ab70`，239081B）。
+
+### 60.4 节点快照巡检 `--check`
+
+`nodes/_tools/reimport-nodes.py --check`：只比对不导入，逐节点名取 Studio **最新版**与仓库比
+**版本 / 镜像 tag / 执行器声明**三项；有漂移列清单并返回 1（例行的"改完必跑"清单成员）。
+负例自检：改坏 `image-shadow` 的版本与 image tag ⇒ 巡检报 2 处漂移、退出码 1；还原 ⇒ 0。
+
+### 60.5 `vram-ops` 运维节点（+ 服务端策略端点）
+
+- 节点 `vram-ops@1.0.0`（local+docker）：`status` / `leases` / `unload` / `interrupt` /
+  `policy_get` / `policy_set`，扁平输出（`ok/action/detail/resident_count/lease_count/
+  vram_free_mb/policy`，值不带 `#`/围栏）。
+- 共享件 `flowx_client`：`get_json/post_json/post_bytes` 新增可选 `headers=`（显式头覆盖自动头），
+  用于以**指定租约视角**清理别人留下的常驻条目（§58.9 的痛点）。
+- 服务端（`inference-server/`）：新增 `app/policy.py`（**不 import torch** 的策略逻辑，本机可单测）
+  + `GET/POST /model/policy` 薄封装（可写 `max_resident_models`/`vram_reserve_mb`，其余只读观测）。
+  `tests/test_policy.py` 13 项全绿（越界/只读键/非整数/读取失败降级…）。
+- **⚠️ 未部署**：`/model/policy` 需重新部署推理服务才生效（不可擅自重启）；节点对 404 给出
+  明确人话报错（"代码已就绪，需重新部署；其余动作不受影响"）。
+- 验收：节点自测 20 项全绿（本机 HTTP 桩，断言请求形状/头/输出）；真机直跑 `status`/`leases`
+  通过；Studio 内 local 执行器 **exec 742 success**（status 显示 3 个常驻 + vram_free 1883MB，
+  leases 显示 exec 739 的租约 —— 正好是排查"冷加载被租约挡住"的第一现场）。
+
+### 60.6 错峰加载原语：审计结论 = 已固化，无需新代码
+
+对 6 个编码器类节点做审计（是否有"产物落对象仓后释放编码器"的能力）：
+
+| 节点 | release 能力 | 结论 |
+| --- | --- | --- |
+| `flux-clip-encode` | `release_t5`（默认 1：编码后释放 T5） | **参考实现** |
+| `sd3-clip-encode` | 无 | 该节点 `prompt_3=None` ⇒ **T5 根本不装载**（零填充），CLIP-L/G 仅 ~1.5GB ⇒ 无压力 |
+| `clip-text-encode` / `ipadapter-load` / `clip-vision-load` / `instantid-face-analyze` | 无 | 组件均 <2GB，非瓶颈 |
+
+⇒ 原语的价值场景（≥2GB 编码器）**只有 FLUX**，已实现；后续新编码器节点的规范：
+「先出产物（COND/image）→ 再释放编码器 → 下游只消费产物」，实现基准见
+`_common/server_ops/flux.py` 的 `release_t5`。本条**沉淀为规范 + 审计表**，不新增代码。
+
+### 60.7 gate P：flowx.json **结构**校验（手写节点的第一道拦网）
+
+本轮手写 `vram-ops` 时连续被导入 API 打回两次：
+
+1. `cannot unmarshal string into Go struct field NodePackage.mock`（`mock`/`ui` 必须是对象）
+2. `invalid flowx.json: language is required`
+
+**两次都不该等到导入才发现** ⇒ 新增 gate P：校验 18 个硬要求字段（含 `language`/`displayName`/
+`files`/`ui` 结构）、`entry`/`mock.entry`/`ui.entry` 指向真实文件、`parameters[].name` 唯一；
+`extract`/`timeout`/`env`/`mock` 缺失时给**告警**（存量 `mask-paint`/`flux-mask-refine` 就是缺省，
+其 `timeout` 缺省等价"无上限"，不宜乱加）。负例：把 `mock` 改回字符串 ⇒ gate P 报错、退出码 1。
