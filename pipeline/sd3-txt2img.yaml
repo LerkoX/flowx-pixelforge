@@ -36,7 +36,7 @@ Nodes:
   EncodePos:
     name: 正向提示词
     config:
-      nodeRef: sd3-clip-encode@1.0.0
+      nodeRef: sd3-clip-encode@1.1.0
       params:
         service_url: "{{ Ensure.service_url }}"
         service_token: "{{ Param.service_token }}"
@@ -45,7 +45,7 @@ Nodes:
   EncodeNeg:
     name: 反向提示词
     config:
-      nodeRef: sd3-clip-encode@1.0.0
+      nodeRef: sd3-clip-encode@1.1.0
       params:
         service_url: "{{ Ensure.service_url }}"
         service_token: "{{ Param.service_token }}"
@@ -54,7 +54,7 @@ Nodes:
   EmptyLatent:
     name: 空Latent
     config:
-      nodeRef: sd3-empty-latent@1.0.0
+      nodeRef: sd3-empty-latent@1.1.0
       params:
         service_url: "{{ Ensure.service_url }}"
         service_token: "{{ Param.service_token }}"
@@ -79,7 +79,7 @@ Nodes:
   SD3Decode:
     name: VAE解码
     config:
-      nodeRef: sd3-vae-decode@1.0.0
+      nodeRef: sd3-vae-decode@1.1.0
       params:
         service_url: "{{ Ensure.service_url }}"
         service_token: "{{ Param.service_token }}"

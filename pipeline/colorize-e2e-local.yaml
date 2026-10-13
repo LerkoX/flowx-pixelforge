@@ -68,7 +68,7 @@ Nodes:
   LGray:
     name: 加载原图
     config:
-      nodeRef: load-image@1.3.0
+      nodeRef: load-image@1.4.0
       executor: local
       params:
         service_url: "{{ Ensure.service_url }}"
@@ -111,7 +111,7 @@ Nodes:
   LFaded:
     name: 加载原图
     config:
-      nodeRef: load-image@1.3.0
+      nodeRef: load-image@1.4.0
       executor: local
       params:
         service_url: "{{ Ensure.service_url }}"
@@ -154,7 +154,7 @@ Nodes:
   LOld:
     name: 加载原图
     config:
-      nodeRef: load-image@1.3.0
+      nodeRef: load-image@1.4.0
       executor: local
       params:
         service_url: "{{ Ensure.service_url }}"
@@ -197,7 +197,7 @@ Nodes:
   LFace:
     name: 加载原图
     config:
-      nodeRef: load-image@1.3.0
+      nodeRef: load-image@1.4.0
       executor: local
       params:
         service_url: "{{ Ensure.service_url }}"
@@ -240,7 +240,7 @@ Nodes:
   LFaceM:
     name: 加载原图
     config:
-      nodeRef: load-image@1.3.0
+      nodeRef: load-image@1.4.0
       executor: local
       params:
         service_url: "{{ Ensure.service_url }}"

@@ -119,7 +119,6 @@ Nodes:
       executor: docker
       params:
         service_url: '{{ Param.service_url }}'
-        service_url_host: '{{ Param.service_url_host }}'
         service_token: '{{ Param.service_token }}'
         clip: '{{ ClipLoad.clip }}'
         text: '{{ Param.prompt }}'

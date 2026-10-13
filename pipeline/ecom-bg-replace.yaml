@@ -85,7 +85,7 @@ Nodes:
   WM:
     name: 水印
     config:
-      nodeRef: image-watermark@1.0.0
+      nodeRef: image-watermark@1.1.0
       executor: docker
       params:
         service_url: "{{ Param.service_url_internal }}"

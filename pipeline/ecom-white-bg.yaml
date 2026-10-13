@@ -37,7 +37,7 @@ Nodes:
   LoadImage:
     name: LoadImage
     config:
-      nodeRef: load-image@1.3.0
+      nodeRef: load-image@1.4.0
       executor: local
       params:
         service_url: "{{ Ensure.service_url }}"
@@ -89,7 +89,7 @@ Nodes:
   WM:
     name: WM
     config:
-      nodeRef: image-watermark@1.0.0
+      nodeRef: image-watermark@1.1.0
       executor: local
       params:
         service_url: "{{ Ensure.service_url }}"

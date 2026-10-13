@@ -88,7 +88,7 @@ Nodes:
   LoadRef:
     name: LoadRef
     config:
-      nodeRef: load-image@1.3.0
+      nodeRef: load-image@1.4.0
       executor: local
       params:
         service_url: "{{ Param.service_url }}"
@@ -111,7 +111,7 @@ Nodes:
   EncPos:
     name: EncPos
     config:
-      nodeRef: clip-text-encode@1.2.0
+      nodeRef: clip-text-encode@1.3.0
       executor: local
       params:
         service_url: "{{ Param.service_url }}"
@@ -121,7 +121,7 @@ Nodes:
   EncNeg:
     name: EncNeg
     config:
-      nodeRef: clip-text-encode@1.2.0
+      nodeRef: clip-text-encode@1.3.0
       executor: local
       params:
         service_url: "{{ Param.service_url }}"
@@ -131,7 +131,7 @@ Nodes:
   EmptyLatent:
     name: EmptyLatent
     config:
-      nodeRef: empty-latent@1.1.0
+      nodeRef: empty-latent@1.2.0
       executor: local
       params:
         service_url: "{{ Param.service_url }}"
@@ -177,7 +177,7 @@ Nodes:
   DecodeON:
     name: DecodeON
     config:
-      nodeRef: vae-decode@1.1.0
+      nodeRef: vae-decode@1.2.0
       executor: local
       params:
         service_url: "{{ Param.service_url }}"
@@ -233,7 +233,7 @@ Nodes:
   DecodeOFF:
     name: DecodeOFF
     config:
-      nodeRef: vae-decode@1.1.0
+      nodeRef: vae-decode@1.2.0
       executor: local
       params:
         service_url: "{{ Param.service_url }}"

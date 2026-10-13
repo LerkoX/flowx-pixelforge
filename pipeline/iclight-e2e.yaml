@@ -63,7 +63,7 @@ Nodes:
   L:
     name: L
     config:
-      nodeRef: load-image@1.3.0
+      nodeRef: load-image@1.4.0
       executor: local
       params:
         service_url: "{{ Ensure.service_url }}"

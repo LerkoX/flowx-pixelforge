@@ -51,7 +51,7 @@ Nodes:
   EncodePos:
     name: 正向提示词
     config:
-      nodeRef: clip-text-encode@1.2.0
+      nodeRef: clip-text-encode@1.3.0
       params:
         service_url: "{{ Ensure.service_url }}"
         service_token: "{{ Param.service_token }}"
@@ -60,7 +60,7 @@ Nodes:
   EncodeNeg:
     name: 反向提示词
     config:
-      nodeRef: clip-text-encode@1.2.0
+      nodeRef: clip-text-encode@1.3.0
       params:
         service_url: "{{ Ensure.service_url }}"
         service_token: "{{ Param.service_token }}"
@@ -83,7 +83,7 @@ Nodes:
   VAEEncode:
     name: VAE编码
     config:
-      nodeRef: vae-encode@1.1.0
+      nodeRef: vae-encode@1.2.0
       params:
         service_url: "{{ Ensure.service_url }}"
         service_token: "{{ Param.service_token }}"
@@ -119,7 +119,7 @@ Nodes:
   VAEDecode:
     name: VAE解码
     config:
-      nodeRef: vae-decode@1.1.0
+      nodeRef: vae-decode@1.2.0
       params:
         service_url: "{{ Ensure.service_url }}"
         service_token: "{{ Param.service_token }}"

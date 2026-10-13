@@ -5667,3 +5667,47 @@ emit_preview(f"{pbase}/preview/{jid}", 0.0, tok, base=pbase, job_id=jid)  # 取�
 **④ 取消语义的完整验证**（本轮第三次）：取消 exec 739 ⇒ 审计表留下
 `cancel_remote_job exec=739 node=MaskRefine job=0aebfe5c…`，远程 job 在**下一个步边界**
 （8284s）转入 `cancelled` —— 证明"长任务也能被定向中断"，且**步边界响应**是设计而非缺陷。
+
+## 六十一、P1 收尾批次②：InstantID 扫参 / 流水线校验 / 模型换装模板（2026-10-13）
+
+### 61.1 InstantID 受控调参扫描（exec 745，生成器 `gen-instantid-sweep.py`）
+
+2×2 网格（weight × cn_strength，其余全同：SDXL base / 同一参考脸 / seed 20260926 / 同一提示词 /
+同一 latent），逐点落盘 + `face-similarity` 对"生成图 vs 参考脸"自动打分：
+
+| weight | cn_strength | 身份相似度 | 产物结构（ASCII 抽检 + 边缘方差） |
+| --- | --- | --- | --- |
+| 0.5 | 0.3 | **未检测到人脸** | 无脸结构、噪声感强（边缘方差 5699） |
+| 0.5 | 0.8 | **0.6897** | 五官结构清晰（1644） |
+| 0.8 | 0.3 | **未检测到人脸** | 无脸结构（4239） |
+| 0.8 | 0.8 | **0.6822** | 五官结构清晰（1640） |
+
+**结论（可直接用的档位）**：
+1. **`cn_strength` 是"脸能不能立住"的关键**：0.3 两档都崩到检测不出人脸，0.8 两档都稳；
+2. `weight` 在 0.5~0.8 之间对身份相似度影响很小（0.6897 vs 0.6822，差异在噪声级）⇒
+   取 **cn_strength ≥ 0.8 + weight 0.5**（省去 0.8 档带来的姿态/构图刚性）即可；
+3. "打分节点失败"本身是有用信号：`未检测到人脸` = 该档位不可用，不需要人眼看。
+
+**口径说明**：整跑判 failed 是因为 2 个 `Score*` 节点 fail-fast 拖垮了执行（4 张图已全部落盘）。
+扫描类工作流的正确姿势是**打分失败不致命**（把 score 设为可选/加容错），已记入待办。
+
+### 61.2 流水线本地校验器 + 历史 nodeRef 漂移清理
+
+新增 `nodes/_tools/check-pipeline.py`（并接为 **gate Q**）：校验 `pipeline/*.yaml` 里
+每个节点的 `nodeRef` 版本存在、`params` 键都在节点声明里、`executor` 与 supportedTypes 相容。
+起因：模板给 `flux-clip-encode` 传了它**未声明**的 `service_url_host`，Studio 引擎在**展开阶段**
+硬失败（`config.params references undeclared parameter`）——一条 GPU 流水线跑到一半才炸。
+
+校验器一上线就扫出**仓库自己 76 处历史 nodeRef 漂移**（`load-image@1.2.0/1.3.0`、
+`clip-text-encode@1.2.0`、`empty-latent@1.1.0`、`vae-decode@1.1.0`、`image-watermark@1.0.0`…），
+已用**带前缀边界的正则** `(?<![\w.\-])name@ver` 批量升到当前版本；复核
+**48 个流水线 / 572 个节点实例：0 处不一致**。
+
+（§60.11 的教训在这里闭环：同一件事的"正确做法"现在既写进了工具、也进了门禁。）
+
+### 61.3 门禁与清单更新
+
+- `check-bundle.py` 现含 **A~Q**（新增 P：flowx.json 结构；Q：pipeline 校验）；
+- `nodes/_tools/` 新增：`check-pipeline.py`、`check-workflow-noderefs.py`（Studio 侧 nodeRef
+  校验/修复）、`gen-instantid-sweep.py`、`stub-inference.py`、`reimport-nodes.py --check`；
+- `nodes/README.md` 的"改完必跑"清单加入 pipeline 校验与 nodeRef 校验。

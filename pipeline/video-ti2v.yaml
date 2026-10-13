@@ -34,7 +34,7 @@ Nodes:
   LoadImage:
     name: 加载首帧（可选）
     config:
-      nodeRef: load-image@1.2.0
+      nodeRef: load-image@1.4.0
       executor: local
       params:
         service_url: "{{ Ensure.service_url }}"
