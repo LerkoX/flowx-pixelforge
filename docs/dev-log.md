@@ -5268,3 +5268,168 @@ Dockerfile COPY + 镜像 tag）。旧口径「纯图像节点只跑本地」**�
 **遗留的口径问题**：Studio 不清理旧版本条目（同节点多版本并存是 F1 钉版的设计），
 所以"节点列表里一堆 local-only"里混着历史版本——**巡检要按"每个名字的最新版"比**，
 `reimport-nodes.py` 就是干这个的（后续可加 `--check` 只比对不导入，列入 P1）。
+
+## 五十八、P0-1：三个同步算子异步化（`flux-vae-encode/decode` + `flux-empty-latent`，2026-10-13）
+
+### 58.1 为什么（沿用 §51.4 的判据：隧道掐的是"不出字节的连接"，不是超时值）
+
+先实测三算子走 `/jobs` 的可行性（服务端零改动，立即 done）：
+
+| 算子 | 计算耗时 | 排队场景 |
+| --- | --- | --- |
+| `flux.empty_latent` | **0.2s** | 在 GPU 串行队列（`engine.EXEC_LOCK` + FIFO）里可能排在冷加载/采样之后 |
+| `flux.vae_encode` | 1.3~1.7s | 同上 |
+| `flux.vae_decode` | 1.3s | 同上 |
+| （队首代价，对照）`flux.vae_load` 冷 | 8.9s | 冷加载 UNet 实测 **681~739s** |
+
+⇒ 计算都是秒级，**风险全在排队期零字节**。同步 `/op` 在排队期挂一条空闲 HTTP 长连接，
+隧道（cpolar）会掐断这类流式连接（exec 686 同因）；改成 `/jobs` + 短轮询后：
+① 隧道抖动可容忍（`wait_job` 连续 12 次/300s 才放弃）；② **可取消**（`submit_job` 登记
+in-flight，节点收到 SIGTERM 时定向 `POST /interrupt`，不留孤儿 GPU 任务）。
+
+### 58.2 改动（9 处，服务端零改动）
+
+| # | 对象 | 改动 |
+| --- | --- | --- |
+| 1-3 | 三节点 `main.py` | `call_op` → `submit_job` + `wait_job`（照 `flux-unet-load@1.2.0` 范式），docstring 写清"为什么任务式" |
+| 4-6 | 三节点 `flowx.json` | 1.0.0 → **1.1.0**；node `timeout` encode/decode 1900→2100、empty-latent 120→**2100**；新增 `poll_interval`（5/5/2），empty-latent 另加 `job_timeout` |
+| 7-9 | 三节点 `ui/widget-def.js` | `poll_interval`（+empty-latent 的 `job_timeout`）进 advanced 折叠区；`build-widget.py` 重建 |
+| 10 | Studio wf96/101/103/104 | nodeRef `@1.0.0` → `@1.1.0`（版本钉定，不升吃不到）；复核残留 0 |
+| 11 | 镜像 | `BUNDLE_VERSION` 1.17.0 → **1.18.0** + 远端重建 + `sync-flowx-json.py`（99 个 flowx.json） |
+
+输出端口/参数语义不变（只加参数）⇒ 流水线兼容。
+
+### 58.3 验收 ①：stub e2e（确定性、不烧 GPU）
+
+新增 `nodes/_tools/stub-inference.py`（离线桩：`/ops` 视为核心内置 ⇒ 不传插件；
+`/jobs` 前 N 次 pending 后 done；记录每次提交载荷与**同步 `/op` 次数**，`/_report` 供断言）。
+临时工作流（3 节点，`service_url=http://127.0.0.1:8199`）→ **exec 720 success**：
+
+- **同步 `/op` 调用 = 0 次**（这是本次改造的核心断言）
+- `POST /jobs` × 3，载荷正确：
+  `flux.vae_encode {vae,image}` / `flux.empty_latent {width,height,batch_size}` /
+  `flux.vae_decode {vae, latent}`（且 `latent` 已解析为上游 `EmptyLatent` 的输出对象 id ⇒ 数据流贯通）
+- 轮询 6 次（`--pending 1`）⇒ 真正走了轮询路径而非"一次就 done"
+- 节点日志：`job=stub-N submitted` + `-> latent=... (1.0s)` 成对出现
+
+### 58.4 验收 ②：docker 执行器真机链（真 GPU + 真镜像）
+
+临时工作流（3 节点 `executor: docker`，`service_url=http://172.17.0.1:8100`，
+encode → decode 真往返）→ **exec 722 success**：三个节点全部 `job=... submitted`，
+`image → latent(3.0s) → image(3.0s)`，`empty_latent 256×256 2.0s`。
+
+**过程中抓到的两个真问题（都值得记）**：
+
+1. **镜像快照顺序陷阱**：第一次跑（exec 721）容器里跑的是**旧代码**（traceback 指向
+   `call_op`）。原因：我在 bump `BUNDLE_VERSION` **之前**重导了节点 ⇒ Studio 快照里的
+   `image` 还是 `v1.17.0`。**正确顺序：改节点 → bump BUNDLE_VERSION → sync-flowx-json →
+   重建镜像 → 再重导节点**（否则 docker 执行器拉旧 tag）。
+2. **算子契约正确拒绝脏输入**：我把 `flux.empty_latent`（`samples=None`，噪声由采样器生成）
+   直接接到 `flux.vae_decode`，服务端回了
+   `flux.vae_decode: latent 需为 flux.sample/flux.vae_encode 的输出（含 samples）`——
+   报错清晰、定位准确，是我测试图搭错，不是缺陷。
+
+### 58.5 验收 ③：真机 wf96 链路 —— 抓到**默认值定太小**的真缺陷
+
+真机跑 wf96（`flux-txt2img`，冷启动）→ **exec 724 failed**，失败点 `EmptyLatent`：
+
+| 证据 | 值 |
+| --- | --- |
+| `flux.empty_latent` job 状态 | **cancelled**，`created_at` 起算 **602s** 被杀 |
+| 同时刻 `flux-unet-load` job | running（冷加载 GGUF，实测 **681.7s**） |
+| 节点日志 | `[flux-empty-latent] job=... submitted` → 无完成行 → failed |
+
+**根因**：`flux-empty-latent` 的 `job_timeout` 默认只有 **600s**（历史按"0.2s 算子"拍的），
+而它在 FIFO 队列里排在**冷加载 UNet（实测 681~739s）之后** ⇒ 被自己的超时掐掉
+（`wait_job` 超时会尽力 `interrupt` 自己那个排队中的 job ⇒ 不留孤儿，但节点判失败）。
+
+**修**：`job_timeout` 600 → **1800**（与 encode/decode 及 loader 族对齐）、node `timeout`
+900 → **2100**。重导后复跑（见 58.6）。这正是"真机验收才算完成"的价值：stub/docker 都绿，
+只有真机冷加载排队才暴露这个量级错配。
+
+### 58.6 复跑验证（真实排队场景）
+
+临时 512 变体（`p0-1-flux-txt2img-512-real-e2e`，省 GPU 时间；wf96 本体不改）：
+
+| 证据 | 值 |
+| --- | --- |
+| `flux.empty_latent` job | **排队 682s、计算 0.0s → done**（节点日志 `512x512 → latent (683.5s)`） |
+| 对照 | 同样的排队时长：600s 默认值下必然失败（exec 724 实测 602s 被杀） |
+
+⇒ "0.2s 的算子排队 11 分钟仍成功" —— 这正是异步化要解决、且同步 `/op` 时代不可能活下来的场景
+（682s 零字节的连接必被隧道掐断）。
+
+**修好后重跑（exec 726，临时 512 变体 wf96，全链路 success，总 1259s）**：
+
+| 节点 | 耗时 | 备注 |
+| --- | --- | --- |
+| Ensure | 0.1s | 健康检查 + 租约建立 |
+| EmptyLatent（新异步） | **0.2s** | 本轮抢到队首；上轮同样的节点排队 602s 被杀 |
+| VaeLoad / ClipLoad / UnetLoad | 424.6 / 423.7 / **426.4s** | 冷加载，三个 job FIFO 排队 |
+| Encode（T5-XXL） | 239.6s | 惰性装载 T5 后编码 |
+| Sample | 545.6s | 4 步 @512，逐步预览帧 |
+| Decode（新异步） | **5.2s** | `latent → image` |
+| Unload | — | 收尾释放常驻（`unloaded=flux-vae,flux-unet,flux-clip`） |
+
+**内容正确性判据（不靠"状态全绿"）**：
+
+1. **逐字节**：本地落盘 `~/flowx-output/flux_studio_20261013_161840.png` 与从服务端
+   `GET /images/a594d458189f411db21a9c7c2a3c2adc` 取回的同一对象
+   **sha256 相同、388704B、像素级最大差 0** ⇒ 落盘内容就是服务端解码产物；
+2. **不是纯色/噪声**：512×512 RGB，通道均值 `[135.7,116.4,91.1]`（暖调，匹配"暖阳光"提示词）、
+   标准差 `[73.8,69.4,57.5]`、64×64 抽样唯一色 **3807** 种、边缘强度方差 **2383**；
+3. **结构合理**：8×8 亮度矩阵 + ASCII 缩略图呈现"上亮（窗/墙）—中部成块物体—底部暗带（台面/地面）"，
+   有明确构图而非随机噪声；
+4. 采样器末步预览帧经 Studio `/preview-frame` 中转可取回（256×144，200 OK）⇒ 画布预览链路通。
+
+### 58.7 验收 ④：取消验证（异步化唯一新增能力，确定性做法）
+
+用桩把 job 卡在 running（`--pending 999`）+ 临时工作流单节点（`poll_interval=2`）→ 启动
+exec 723 → 8s 后 `POST /api/v1/executions/723/cancel`：
+
+| 证据 | 值 |
+| --- | --- |
+| 取消前 | 提交 1 个 job、轮询 4 次、桩收到 interrupt **0** 次 |
+| 取消后 | 桩收到 `/interrupt` **恰好 1 次**，body `{"job_id":"stub-1"}` 与提交的 job **精确对应** |
+| 节点行 | `cancelled` |
+
+⇒ 节点被终止时**定向取消远程任务**，不留孤儿 GPU 任务（同步 `/op` 时代做不到：连接断了远端照算）。
+
+### 58.8 抓到的 Studio 侧问题（待拍板）
+
+**执行级状态被覆盖回 `failed`**：取消后 `CancelExecution` 已落库 `cancelled`（节点行也
+`cancelled`），但 `execution_complete` 事件处理器把 dag 报的 `FAILED` 直接写库 ⇒ 执行行终态
+变 `failed`（用户看到红灯，误以为流水线崩了）。`runWorkflow`/`runWorkflowAsync` 收尾路径
+**已有**同样的守卫（`SELECT status ... == "cancelled" ⇒ finalStatus = "cancelled"`），只有事件
+处理路径漏了。修法（约 6 行 + 1 个回归测试）：
+
+```go
+case "execution_complete":
+    status := strings.ToLower(evt.Status)
+    if status == "" { status = "success" }
+    // 尊重 CancelExecution 先行落库的 cancelled（与 runWorkflowAsync 收尾同口径）：
+    // 取消时节点以 143/SIGTERM 退出，dag 会报 FAILED，不能覆盖用户显式取消的终态
+    var dbStatus string
+    if err := s.db.Get(&dbStatus, "SELECT status FROM executions WHERE id = ?", evt.ExecutionID); err == nil && dbStatus == "cancelled" {
+        status = "cancelled"
+    }
+```
+
+### 58.9 运维陷阱：失败的执行会留 30 分钟"模型租约"，挡住后续冷加载
+
+复跑时 `flux.unet_load` 冷加载失败：
+
+```
+加载等待超时（300s）：显存被其它执行租约持有的模型占满，并发执行排队未轮到。
+占用租约：['721','722','724']
+```
+
+- `GET /leases` 可观测：`lease_ttl_seconds=1800`、`lease_wait_timeout_seconds=300`。
+  租约空闲 **30 分钟**才自动释放；租约持有的常驻条目**不会被驱逐**，于是
+  `UNet(≈6.8GB) + VAE(0.38GB) + reserve(1GB) > 8GB` ⇒ 冷加载等 300s 后失败。
+- `POST /model/unload` **会跳过其它活跃租约持有的条目**（要带 `X-FlowX-Lease: <lease>` 头
+  才能清自己的）；本轮实测：带 725 头清掉了 T5，VAE 因被 724/725 同时持有而清不掉 ⇒
+  只能等 TTL 过期。
+- **教训**：真机验收前后的测试执行要收尾干净（流水线末尾放 `model-unload` 节点——失败路径
+  到不了收尾就被留租约）；连续跑多条 GPU 流水线之间要查 `/leases`，否则下一次冷加载会
+  被上一次的残留租约拖死 300s。
