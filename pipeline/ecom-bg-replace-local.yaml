@@ -46,20 +46,22 @@ Nodes:
   LoadProduct:
     name: 载入商品图
     config:
-      nodeRef: load-image@1.3.0
+      nodeRef: load-image@1.4.0
       executor: local
       params:
         service_url: "{{ Param.service_url }}"
         image_path: "{{ Param.product_path }}"
+        service_url_host: "{{ Param.service_url_host }}"
         service_token: "{{ Param.service_token }}"
   LoadScene:
     name: 载入场景图
     config:
-      nodeRef: load-image@1.3.0
+      nodeRef: load-image@1.4.0
       executor: local
       params:
         service_url: "{{ Param.service_url }}"
         image_path: "{{ Param.bg_path }}"
+        service_url_host: "{{ Param.service_url_host }}"
         service_token: "{{ Param.service_token }}"
   Shadow:
     name: 环境投影

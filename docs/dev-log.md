@@ -5198,3 +5198,73 @@ Dockerfile COPY + 镜像 tag）。旧口径「纯图像节点只跑本地」**�
 
 **P0-2 关闭**：FLUX 三个 loader 的异步化代码随 v1.17.0 进镜像 + 清单已同步 + docker 执行器
 实测可跑（本轮 wf157 的 Shadow/WM 即 docker 路径；loader 自身由既有 FLUX 链覆盖）。
+
+## 五十七、用户反馈三连：加载节点没上传/预览 · exec 709「像糊了」· local-only 合理性（2026-10-13）
+
+### 57.1 为什么流水线里的「加载图像」没有上传按钮、也看不到图
+
+**两个各自独立的真因**（都不是"忘了做"）：
+
+| # | 现象 | 真因 | 修法 |
+| --- | --- | --- | --- |
+| 1 | 节点上没有「📁 选择文件」按钮 | `widget-base.js` 的 `fileControl` 只要见到**绑定值**（`{{ … }}`）就整块退化成只读的 `wiredControl`。而模板里 `image_path: "{{ Param.product_path }}"` 正是绑定值 ⇒ 上传按钮 + 本地预览**一起消失** | 绑定值分两类（props 里的 `paramSources.kind`）：`node`（绑上游节点输出）**保持只读**；`workflow`（绑流水线参数）**仍给上传入口**，并显示「↳ 来自流水线参数 product_path（上传或直接填写将解除绑定）」；上传成功后该参数由绑定改为直填字面量（画布只提供 `onParamsChange` 改节点参数，没有改 Param 的钩子） |
+| 2 | 执行完画布看不到加载的图 | `load-image` 的 `main.py` **没有上报结果预览帧**（`emit_result_preview`），画布拿不到图 | `load-image@1.3.0 → 1.4.0`：上传后上报结果预览帧（Studio 经 `/preview-frame` 中转）+ 输出 `width`/`height` + 新增 `service_url_host`（docker/远端场景下 `service_url` 是容器内地址，预览必须走 Studio 可达地址） |
+
+验收：
+- 门禁 L 改口径并**加断言**（`test-widget-ui.mjs`）：绑上游输出 ⇒ 无上传入口；绑流水线参数 ⇒ 有上传入口 + 提示参数名 + 按参数当前值出预览 + 上传能写回；回放态仍禁用。`node nodes/_tools/test-widget-ui.mjs` 全绿（load-image / mask-paint 两个 file 节点各 3 条新断言）。
+- 真机：模板升到 `load-image@1.4.0` + 补 `service_url_host` ⇒ **exec 719 success**，
+  `GET /api/v1/executions/719/nodes/LoadProduct/preview-frame` ⇒ **200**（画布能显示加载的图）。
+
+### 57.2 exec 709「遮罩区像直接糊了」——实测：**不是模糊，是生成细节上限**
+
+素材：人像 `flux-hanfu-beauty_*.png`(768×1280) + 参考衣 `pink_dress_*.png`(512×768)，
+蒙版覆盖 **52.1%**（mask-paint 6 笔，硬边）。
+
+| 指标（蒙版白区内采样 128051 点） | 值 |
+| --- | --- |
+| 产物 vs 原图 平均绝对差 | **51.60 / 通道**（内容确实换掉了，不是"没动"） |
+| 产物 vs 「原图高斯模糊 6」平均绝对差 | **49.29 / 通道**（若只做了模糊应 ≈0） |
+| 清晰度（Laplacian std）原图 | 47.14 |
+| 清晰度 产物 | **17.28** |
+| 清晰度 「原图 + 高斯模糊 3」（真模糊的标尺） | **1.71** |
+| 清晰度 参考衣服整图 | 11.52 |
+
+结论：**不是"把涂抹区模糊了"**——真模糊只有 1.7 的量级，产物 17.3；且色相确实转向参考裙
+（蒙版区均色 (161,133,130) 暖粉，原图 (155,159,176) 冷蓝）。但产物**比原图软 ~2.7×**，成因：
+
+1. **生成细节上限**：CatVTON 在 768×1024 fp32 上 50 步生成，细节水平就是 17 量级，
+   连参考衣服自身也只有 11.5（512×768 的原图被放大到画布用）；
+2. **尺寸路径已排除**：`_resize_crop` 把人像居中裁到 3:4（768×1024）再 1:1 送模型，
+   `_fit_back` 缩回同尺寸 ⇒ **无额外重采样**（我先怀疑的"多一次上采样"不成立，读码后否掉）；
+3. **mask_blur=9** 让边界过渡带变宽 ⇒ 人眼最容易觉得"糊"的是边界；
+4. VAE 编解码 + fp32/chunk attention 的固有损失。
+
+**可选改进（待拍板，不动现有默认）**：① `mask_blur` 9→3~4；② 换装区接一次
+`detail-refine`（低 denoise 局部重绘）或 `image-sharpen` 收回细节；③ 提高工作画布分辨率
+（时间线性涨：实测 5.4s/步）。
+
+### 57.3 「很多节点 local-only」——审计结论：只有 6 个名字是合理的，其余是**快照过期**
+
+**规则**（§56.6，用户拍板）：只有**读写本机文件**的节点才允许 `local` only。全仓结论：
+
+| 类别 | 节点 | 说明 |
+| --- | --- | --- |
+| 真·local-only（6） | `load-image` / `save-image` / `save-video` / `mask-paint` / `image-batch-load` / `image-batch-save` | 读本机图/写本机文件/读本机目录/落笔画文件；已纳入 `check-bundle` 的 `LOCAL_ONLY` 强制 |
+| 本轮已转 docker（3） | `image-montage` / `catvton-load` / `catvton-tryon` | 不碰本机文件；**此前 Studio 里显示 local 是因为没重导**（见下） |
+| 非本仓 | `pi-vibe-coding` | 另一个包的节点 |
+
+**但有更严重的问题被这次审计抓出来：Studio 存的是导入快照，29 个节点落在旧版本**：
+
+- Studio 节点表 **139 个条目**（同节点多版本并存：`load-image@1.1.0/1.2.0/1.3.0`、
+  `mask-paint@1.0.0~1.4.0`…）⇒ 画布里的"本地-only"印象一部分来自**旧版本条目**；
+- **版本落后仓库的多达 29 个**（`checkpoint-loader@1.2.0 vs 1.3.0`、`flux-unet-load@1.1.0 vs 1.2.0`、
+  `ksampler@1.4.0 vs 1.5.0`…）——**真机跑的一直是旧代码**（这正是纪律 5 说的"导入时快照"）。
+- 本次 `_common/widget-base.js` 改动后按纪律**全量重导 105 个节点**：
+  新增 `nodes/_tools/reimport-nodes.py`（节流 1.25s ≈48/分钟，避开 Studio 100 req/min 限流；
+  实测 105 个 / 131s / 0 失败）。
+- 重导后核对：**Studio 最新版 vs 仓库版本 0 不一致、执行器声明 0 不一致**；
+  `catvton-load/tryon`、`image-montage` 在 Studio 里已是 `[local, docker]`。
+
+**遗留的口径问题**：Studio 不清理旧版本条目（同节点多版本并存是 F1 钉版的设计），
+所以"节点列表里一堆 local-only"里混着历史版本——**巡检要按"每个名字的最新版"比**，
+`reimport-nodes.py` 就是干这个的（后续可加 `--check` 只比对不导入，列入 P1）。
