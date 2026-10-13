@@ -8,7 +8,7 @@
 | 想看什么 | 去哪 |
 |---|---|
 | **接下来做什么 / 已关闭什么 / 为什么等候** | 本文件 |
-| 历史逐轮交付记录（立项方案、实施细节、验收数据、踩坑复盘） | [`dev-log.md`](dev-log.md)（§9 ~ §59） |
+| 历史逐轮交付记录（立项方案、实施细节、验收数据、踩坑复盘） | [`dev-log.md`](dev-log.md)（§9 ~ §61） |
 | 推理服务技术路线与扩展方法论（M2~M10、插件优先、不做清单） | `inference-server/ROADMAP.md` |
 | 部署与运维（环境变量、镜像重建、常用操作、排障） | `inference-server/DEPLOY.md` |
 
@@ -103,30 +103,36 @@
    不重写 686 快照，**exec 727 success（11057s）**；三个加载节点 450.5/456.0/460.9s 全绿
    （事故时是 2608s/1408s 的 `read operation timed out`），"read timeout" 日志 0 行；
    产物逐字节比对服务端对象一致，蒙版区外零改动，清晰度 1995（对照 CatVTON 路线 1173）。
-3. **Studio 取消口径修复（新，待拍板）** —— 取消后 `execution_complete` 事件把执行行状态从
+3. ~~**Studio 取消口径修复**~~ ✅（§60.1：事件路径尊重 cancelled + 回归测试 + 真机 3 次复验） —— 取消后 `execution_complete` 事件把执行行状态从
    `cancelled` 覆盖回 `failed`（`runWorkflowAsync` 收尾路径已有守卫，事件路径漏了）。修法约 6 行 +
    1 个回归测试，见 dev-log §58.8。
-4. **模型租约运维（新）** —— 失败/中断的执行会留下 30 分钟"模型租约"（`GET /leases` 可查），
+4. ~~**模型租约运维**~~ ✅（§60.5：`vram-ops` 节点 + 显式租约头；§60.2：取消兜底改确定性） —— 失败/中断的执行会留下 30 分钟"模型租约"（`GET /leases` 可查），
    租约持有的常驻条目不被驱逐 ⇒ 后续冷加载等 300s 后失败（本轮实测 `UNet+VAE+reserve > 8GB`）。
    需要：跑完必查 `/leases`；或让"失败路径也能释放租约"。见 dev-log §58.9。
 
 ### P1：值得做，需先出方案
-5. **节点快照巡检 `--check` 模式** —— Studio 跑的是导入时快照，本轮审计发现 **29 个节点版本落后仓库**
-   （真机跑旧代码）。`nodes/_tools/reimport-nodes.py` 已能节流全量重导；再加一个"只比对不导入"的
-   巡检模式（每个名字取 Studio 最新版 vs 仓库），纳入例行的"改完必跑门禁"清单。
-6. **`flux-mask-refine` 性能（新，待拍板）** —— 单节点实测 **10224s（2.84h）**：`guide_size=768`
-   + 768×1280 画布使 attention token² 约为 512² 的 10 倍，首步含上卡/构建/autotune ~32min、
-   此后 ~10min/步。候选：`guide_size` 768→512（约 1/4 时间）、padding 0.3→0.15、
-   或复用已有 tiled 族原语做分块重绘。见 dev-log §59.3。
-7. **换装结果细节补偿** —— exec 709 实测：产物清晰度 17.3 vs 原图 47.1（真模糊只有 1.7 量级，
-   所以不是"糊了"，是生成细节上限）。可选改进：`mask_blur` 9→3~4 / 换装区接 `detail-refine` 或
-   `image-sharpen` / 提高工作画布分辨率（5.4s/步 线性涨）。**待拍板**。
-8. **文本渲染节点的字体可复现** —— `image-watermark` 等文本节点在 local/docker 下产物不同
-   （Android NotoSansCJK vs 容器无字体 ⇒ 回退 Pillow 位图字体），A7 逐字节判据对它们不成立。
-   做法：镜像内置固定字体 + 节点优先取它 + `font_path` 仍可覆盖（§56.8 实测）。
-9. **错峰加载原语沉淀** —— 编码器产物落对象仓后立刻释放编码器，形成可复用的节点范式。
-10. **显存策略运维节点** —— 读写服务端淘汰策略配置（当前无该端点，需先加）；定位是单流水线串行时的策略实验工具。
-11. **InstantID 调参扫描** —— 权重 × 结构强度的受控扫描（模型热后每点约 6 分钟），用于给出推荐档位。
+5. ~~**节点快照巡检 `--check`**~~ ✅（2026-10-13，见 dev-log §60.4）：`reimport-nodes.py --check`
+   只比对不导入（版本/镜像 tag/执行器声明），负例自检通过；已纳入"改完必跑"清单。
+6. **`flux-mask-refine` 瓶颈定位（改口径）** —— §59.3 的"attention ∝ token² ⇒ 调小 guide_size
+   省时间"已被真机 A/B **证伪**（§60.8：512 每步反而更慢）。需**服务端 per-step 计时打点**
+   （反量化 / forward / callback 分别计时，一次运行分辨）。首疑 Q4 GGUF 逐层反量化（Pascal
+   无 int4，每步反量化 ~6.8GB 权重，与分辨率无关 —— 正好解释"缩小工作区没收益"）。
+7. **换装/重绘细节与质量补偿** —— FLUX 蒙版重绘路线（exec 727）实测清晰度保留 **84%**
+   （对照 CatVTON 路线 49%）⇒ 走 FLUX 路线已基本解决"换装发软"。剩余：CatVTON 路线
+   `mask_blur` 9→3~4（**待拍板**）；重绘区接一次 `detail-refine` 的超分式补偿（可选）。
+8. ~~**文本渲染节点的字体可复现**~~ ✅（§60.3）：image-watermark 内置 DroidSansChinese.ttf，
+   local/docker 产物**逐字节一致**（exec 737/738，sha `151b5f492760ab70`）。
+9. ~~**错峰加载原语沉淀**~~ ✅（§60.6）：审计 6 个编码器节点 ⇒ 唯一 ≥2GB 路径是 FLUX
+   （已有 `release_t5`）；SD3 的 T5 零填充不使用、其余 <2GB。《先出产物 → 再释放编码器 →
+   下游只消费产物》沉淀为规范 + 实现基准（`_common/server_ops/flux.py`）。
+10. ~~**显存策略运维节点**~~ ✅（§60.5）：`vram-ops@1.0.0`（status/leases/unload/interrupt/
+   policy_get/policy_set）+ 服务端 `app/policy.py` + `GET/POST /model/policy`（代码就绪，
+   **待部署推理服务**）；共享件支持显式租约头（清理别人留下的常驻）。
+11. **InstantID 调参扫描（跑批中）** —— 生成器 `nodes/_tools/gen-instantid-sweep.py`
+   （weight × cn_strength 网格 + 逐点 face-similarity 自动打分；默认 2×2 快档），
+   真机跑 exec 743 进行中，报告待落 dev-log §61。
+12. **`ecom-model-swap` 模板** —— `pipeline/ecom-model-swap.yaml`（docker）+ `-local.yaml`，
+   13 节点 Param 驱动（模特图/参考衣/笔画/提示词/seed/guide_size）；结构验收 exec 见 §61。
 
 ### P2 / 大改：独立立项评估
 8. **张量级搬移（大模型线前置）** —— 加载节点支持"显存驻留上限，超出流式供给"，含磁盘流式兜底；

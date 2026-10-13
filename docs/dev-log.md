@@ -5597,3 +5597,30 @@ local 执行器（exec 737）与 docker 执行器（exec 738）产物
 `files`/`ui` 结构）、`entry`/`mock.entry`/`ui.entry` 指向真实文件、`parameters[].name` 唯一；
 `extract`/`timeout`/`env`/`mock` 缺失时给**告警**（存量 `mask-paint`/`flux-mask-refine` 就是缺省，
 其 `timeout` 缺省等价"无上限"，不宜乱加）。负例：把 `mock` 改回字符串 ⇒ gate P 报错、退出码 1。
+
+### 60.8 `flux-mask-refine` 提速 A/B：**证伪**（`guide_size` 不是时间杠杆）
+
+§59.3 的假设是"attention ∝ token² ⇒ `guide_size` 768→512 约省 3/4 时间"。真机受控 A/B
+（同一人像/蒙版/参考衣/seed/步数，只改 `guide_size`）：
+
+| | 工作区（op 日志实测） | 第 1 步 | 之后每步 | 总耗时 |
+| --- | --- | --- | --- | --- |
+| exec 727（`guide_size=768`） | `crop (0,0,768,1280) -> 768x1280` = 983k px | ~32 min | ~10 min | **10224s** |
+| exec 739（`guide_size=512`） | 同 crop → 512×853（**面积 0.44×**，attention 理论 0.19×） | **53 min** | **17~25 min** | 取消（见下） |
+
+**结论：512 不但没变快，每步反而更慢** ⇒ 单步耗时**不由工作区/attention 主导**。
+`guide_size` 参数的真实语义也在此澄清：它是**短边**目标（`scale = guide_size / min(crop)`），
+不是"长边"。
+
+**为什么取消而不是等它跑完**：第 3 步时（job 7041s）每步耗时已明显超越 768 基线，
+假设已被证伪，继续烧 ~1.5h GPU 没有新信息；取消同时**顺带验证了 60.2 的取消兜底**——
+审计表留下 `cancel_remote_job exec=739 node=MaskRefine job=0aebfe5c…`，
+执行状态 `cancelled`（远程 op 在**下一个步边界**才响应 `check_cancelled()`，故 job 短暂仍显示
+running —— 这是设计而非缺陷）。
+
+**下一步定位（P1，需服务端 profiling）**：候选按可能性排序
+① **Q4 GGUF 权重逐层反量化**（Pascal 无 int4；每步把 ~6.8GB 权重反量化一遍，与分辨率无关
+——正好解释"缩小工作区没收益"）；② 宿主内存压力/换页（12GB 盒子同时驻 T5 4.9GB + UNet 6.8GB，
+两次跑之间我还在同机重建过镜像 ⇒ 本轮 A/B **受宿主状态混淆**，不是干净对照）；
+③ 每步设备搬运（offload 钩子）。判据建议：在 op 内加 `per-step` 计时打点（反量化 / forward /
+callback 各一段），一次运行即可分辨。
