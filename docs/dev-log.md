@@ -5433,3 +5433,49 @@ case "execution_complete":
 - **教训**：真机验收前后的测试执行要收尾干净（流水线末尾放 `model-unload` 节点——失败路径
   到不了收尾就被留租约）；连续跑多条 GPU 流水线之间要查 `/leases`，否则下一次冷加载会
   被上一次的残留租约拖死 300s。
+
+## 五十九、P0-2 关闭：exec 686 事故复跑（wf113 整跑 success，2026-10-13）
+
+### 59.1 复跑（exec 727，`flux-virtual-tryon-multi-ref`，不改 YAML、不重写 686 历史快照）
+
+前置：隧道通道探测通过（`/health` ok / cuda true / GTX 1080）；输入文件三件齐备
+（模特图 1.36MB、笔画 JSON 104KB、参考裙 384KB）。
+
+| 节点 | exec 686（事故） | exec 727（本次） |
+| --- | --- | --- |
+| UnetLoad | `POST /op failed: read operation timed out`（`timeout=1800`，**2608s**） | **450.5s done**（`/jobs`） |
+| VaeLoad | `read operation timed out`（`timeout=600`，**1408s**） | **456.0s done** |
+| ClipLoad | 未调度（层屏障 fail-fast） | **460.9s done** |
+| 其余 10 个节点 | 全部未调度 | 全部 success（Encode 251s / ReduxApply 80s / MaskRefine 10224s / Save / Unload） |
+| 整跑 | **failed 2648s** | **success 11057s（3.07h）** |
+| "read timeout" 日志行数 | 2 | **0** |
+
+⇒ 事故根因（同步 `/op` 在分钟级冷加载期间零字节 ⇒ 隧道掐连接）已消除：三个加载节点都走
+`/jobs` 提交 + 轮询，同一条链路、同一批节点，整跑成功。
+
+### 59.2 内容正确性判据（不靠状态全绿）
+
+1. **逐字节**：本地 `~/flowx-output/virtual_tryon_20261013_192649.png` 与从服务端
+   `GET /images/34801d3dad754ecda58c920163e02b50` 取回的对象
+   **sha256 相同、1341050B、像素最大差 0**；
+2. **尺寸自洽**：768×1280，与模特原图同尺寸（局部重绘贴回，无缩放漂移）；
+3. **改动是局部的**：全图平均差 `[15.9,16.9,15.6]/通道`——ASCII 对照显示头部/背景/双手区域
+   **逐格一致**，只有躯干服装区不同 ⇒ 蒙版区外零改动；
+4. **清晰度对比**（边缘方差，越高越锐）：原图 **2376.6** → 本产物 **1995.2**（保留 84%）；
+   对照本轮之前 CatVTON 路线产物 `catvton_tryon_*.png` **1172.6**（仅 49%）——
+   与 §57.2 的"709 偏软"结论一致，且说明 **FLUX 蒙版重绘路线的细节保留明显更好**。
+
+### 59.3 新发现：`flux-mask-refine` 单节点 2.84 小时（性能项，列入 P1）
+
+`MaskRefine` job 实测 `10224s`（7 步，`steps=8 denoise=0.8`，`guide_size=768`，768×1280 画布）。
+按步计：首步 ~32min（含 UNet 上卡 + 管线构建 + cudnn 首次 autotune），此后约 10min/步。
+成因：attention 复杂度 ∝ token²（768×1280 裁剪后 token 数是 512² 的 ~10 倍）+ GTX 1080 上
+Q4 GGUF 逐层反量化开销。**优化候选**（待拍板）：`guide_size` 768→512（token² ⇒ 约 1/4 时间）、
+缩小 crop padding（0.3→0.15）、换更小的 `steps`、或把 mask refine 拆成"分块重绘"（已有 tiled 族原语）。
+
+### 59.4 收尾
+
+- 执行 `Unload` 节点正常：`unloaded=flux-unet,flux-vae,flux-clip`，`/health` 常驻为空、vram_free 7119MB
+  （租约行 727 仍存在但**不持有任何常驻**，30 分钟 TTL 后自动消失）。
+- 临时工作流（`p0-1-flux-txt2img-512-real-e2e` / stub 取消验证用）已删；桩与临时 YAML 均不在仓库
+  （桩工具本体 `nodes/_tools/stub-inference.py` 已入库）。
