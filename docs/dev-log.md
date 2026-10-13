@@ -5052,3 +5052,114 @@ ui/widget-def.js}` + `build-widget.py` 重建 `ui/node-widget.js` + 共享件副
   属"下一次改协议时的坑"）。
 - **D5（可选，独立小项）**：新增门禁"跑所有节点自带 `test_main.py`"（30 个节点，纯 PIL 可本机跑；
   目前这些单测只在手工流程里跑，没有任何门禁保证它们不腐烂）。
+
+## 五十六、P0-1 实施：`image-shadow` 环境投影节点（2026-10-13，真实电商素材 e2e）
+
+> 方案见 §55；本节是实施与验收数据。**用户口径补充**（本节成文前提）：
+> 「不需要保存文件、或不是只有本地能做到的节点，都必须支持 docker」——执行器纪律见 §56.6。
+
+### 56.1 交付物
+
+| 类型 | 文件 |
+| --- | --- |
+| 节点 | `nodes/image-shadow/{main.py, mock.py, test_main.py, flowx.json, ui/widget-def.js, ui/node-widget.js}`（+ 共享件副本 `flowx_client.py` / `image_io.py`） |
+| 流水线 | `pipeline/ecom-bg-replace.yaml`（docker 执行器）/ `ecom-bg-replace-local.yaml`（local 变体，供 A7 执行器无关性对照） |
+| 复核脚本 | `nodes/_tools/verify_shadow.py`（`--e2e` 模式复核落盘产物） |
+| 素材 | `~/flowx-input/ecom/`（`fetch_samples.py` 抓取 + `SOURCES.txt` 记来源） |
+| 镜像 | `BUNDLE_VERSION` 1.16.0 → **1.17.0**（含 image-shadow + 3 个转 docker 的节点）；`sync-flowx-json.py` 已同步 99 个 flowx.json |
+
+**算法**（纯 PIL、零 numpy、无随机源）：落地线锚定压扁(`squash`) → 位移(`distance`/`angle`)
+→ 高斯(`blur`) → 颜色化 + alpha×`opacity`（远端 `fade`）→ 合成（`background` 给定 ⇒ RGB 底图上
+合成；否则输出 RGBA）。`canvas=expand` 外扩到「主体 ∪ 投影」，`keep` 保持原尺寸。
+
+### 56.2 真实电商样例图（不再只用本地图）
+
+| 来源 | 内容 | 数量 |
+| --- | --- | --- |
+| FakeStoreAPI `products[].image` | 真实 SKU 商品图（**PNG + 透明背景**，天然可当蒙版） | 8 |
+| DummyJSON `products[].images[0]` | 真实 SKU 商品图（webp + alpha，1000×1000） | 7 |
+| picsum.photos（固定 seed，Unsplash 图源） | 场景/背景图 1600×1200 | 3 |
+| Pexels（固定 photo id） | 模特/服装人像 1200×1700+ | 4 |
+
+商品与场景合计 22 张，`SOURCES.txt` 逐行记「文件 / 图像信息 / 用途 / 来源 URL」。
+
+### 56.3 验收数据
+
+| 判据 | 结果 |
+| --- | --- |
+| N1 本机单测 `test_main.py` | **PASSED 39 / FAILED 0**（含几何/压扁/blur 单调/峰值 alpha/画布模式/确定性/补边/emit 值合法性/桩冒烟） |
+| N3~N5,N7 真实图复核 `verify_shadow.py` | **PASSED 20 / FAILED 0**（真实商品+场景：质心偏移 3 组、压扁 3 档、blur 单调 4 档、峰值 alpha 3 档、框外逐字节 0 改动、expand 主体像素 0 改动、物料 3 张） |
+| N2 确定性 | 同参两跑逐字节一致（真实图上验证） |
+| e2e（Studio，wf156 local 变体） | **exec 716 → exec 717 success**（716 抓出白条 bug，见 §56.5；717 为修复后复跑） |
+| e2e 产物复核 `verify_shadow.py --e2e` | **PASSED 5 / FAILED 0**（尺寸自洽 / 主体全不透明像素逐字节==商品原图 / 商品下方整体变暗 40329px vs 0px / 链路物料） |
+| 门禁 | `check-bundle`（gate J/K/L/M/N/O + 同步校验）退出码 0；gate N 105 节点 PASS 104 / SKIP 1；gate O 105 节点 FAIL 0 |
+
+**exec 717 各节点耗时**（真实素材，local 执行器，隧道 `https://1bba08c4.r7.cpolar.cn`）：
+
+| 节点 | ms | 说明 |
+| --- | --- | --- |
+| Ensure | 2316 | /health 探活 |
+| LoadScene | 2890 | 上传场景 137KB |
+| LoadProduct | 4635 | 上传商品 273KB ⇒ **隧道有效吞吐 ≈60KB/s** |
+| **Shadow** | **14952** | 节点内 `elapsed_ms=12870`：其中纯 PIL 计算 ≈1.3s，其余是下载两张图 + 上传 338KB 结果 |
+| SaveShadow / WM / SaveMain | 4676 / 8401 / 3963 | 下载 + 落盘 / 水印 + 预览 / 下载 + 落盘 |
+
+**观察**：图像链的耗时**几乎全是隧道 IO**（60KB/s 量级），PIL 计算只占零头——这与 §53 的
+「编排/IO 占大头」结论同源。要提速就得走 docker 执行器（容器内 `172.17.0.1` 直连，不经隧道）。
+
+### 56.4 平台陷阱（本轮最有价值的发现）：codec-block 提取器会把值里的 `#` 当注释删掉
+
+- **现象**：exec 714 里 image-shadow 节点 `success`，但下游全部 `binding validation failed:
+  上游节点 Shadow 未输出字段 image`；Studio 日志：`Warning: Failed to parse YAML code block:
+  yaml: line 6: found unexpected end of stream`。
+- **根因链**：`flowx/dag/extractor.go` 的 `removeComments` 用 `\s*#.*$` 无差别删「行尾注释」，
+  **不区分引号**。本节点 `info` 里带了 `"color": "#101014"` ⇒ 该行从 `#` 起被截断 ⇒
+  YAML 块解析失败 ⇒ `continue` ⇒ **该节点所有输出丢失**（不是只丢 `info` 一个字段）。
+- **踩坑代价**：exec 714/715 两次整跑 failed（第二次是我改了 `#` 但忘了**重导节点包**，
+  Studio 跑的是导入时的快照 ⇒ 纪律 5 再次生效）。
+- **修法（已落地）**：
+  1. 节点输出的值一律不带 `#`：`info.color` 改用 `"r,g,b"`（`parse_color` 两种都认）；
+  2. **gate N 扩展**：`main()` 桩冒烟的 emit 值若含 `#` 或 ` ``` ` ⇒ FAIL（含 2 条负例自检，
+     自检 7/7）；全仓 105 节点跑下来 0 假阳性；
+  3. 单测里固化同一条断言（`emit 值不含 # 与 ``` `）。
+- **建议的引擎侧根治**（**未做，待拍板**）：`removeComments` 改成「只在引号外删注释」。
+  代价：flowx-studio 依赖的是**已发布版本** `github.com/LerkoX/flowx v0.3.0`（非本地 replace）
+  ⇒ 要发新版本 + 改 go.mod + 重建 Studio 二进制。**在此之前，"节点输出值不得含 `#`" 是硬纪律。**
+
+### 56.5 e2e 抓出的真 bug：expand + background 会留白条
+
+- **现象**：exec 716 产物 `534×699`，左侧 **58px 纯白条**（对比 E3 判据 29260 更暗 vs 25038 更亮，
+  判据当场失效——先怀疑判据口径，改用「按 (ox,oy) 偏移取底图像素」后仍不过，才确认是产物问题）。
+- **根因**：`canvas=expand` 把画布撑大后，底图仍按原尺寸贴在主体位置，**盖不满的部分留白**。
+- **修法**：新增 `paste_clamped()`——未覆盖区域用底图**边缘像素延展**（同 `image-pad` 的 `fill=edge`，
+  确定性、无重采样）；四个角用对应角像素铺满。新增 2 条单测（无纯白补边 / 底边取背景边缘色）。
+- **复跑**：exec 717 → 5/5，E3 变成 **40329 更暗 / 0 更亮**。
+- **判据自省记录**：这次是「产物坏」而不是「判据错」，但排查顺序值得保留——
+  **先按偏移修正判据口径，确认仍不过，才判定产物坏**（避免把 bug 归因于判据后放过）。
+
+### 56.6 执行器纪律（用户 2026-10-13 拍板）与存量审计
+
+**规则**：节点**只有需要读/写本机文件、或只有本机能做**时才允许 `local` only；其余一律要支持
+`docker`（`supportedTypes: [local, docker]` + `preferredType: docker` + `bundled: true` +
+Dockerfile COPY + 镜像 tag）。旧口径「纯图像节点只跑本地」**作废**。
+
+存量审计（9 个 local-only 节点）：
+
+| 节点 | 处置 |
+| --- | --- |
+| `image-montage` | **改为 docker**（不碰本机文件，纯图像） |
+| `catvton-load` / `catvton-tryon` | **改为 docker**（只经服务端算子，无本机 IO） |
+| `load-image` / `save-image` / `save-video` / `mask-paint` | 保持 local（读/写本机文件） |
+| `image-batch-load` / `image-batch-save` | 保持 local（读本机目录 / 写本机文件），并**新纳入 `check-bundle` 的 LOCAL_ONLY** 强制（gate E 会拦下误声明 docker） |
+
+审计后：**105 节点包 / 镜像内 101 目录 / docker 可用 99 / local-only 6**，`check-bundle` 退出码 0。
+
+### 56.7 遗留（阻塞项，需外部条件）
+
+1. **镜像 v1.17.0 未重建**：`docker 隧道 tcp://5.tcp.cpolar.top:12952` 全程不可达
+   （TCP 层无响应；同批 `https://1bba08c4.r7.cpolar.cn` 推理服务正常 200）⇒
+   `nodes/build-image.sh`（远端 daemon 构建，`SKIP_PUSH=1`）与 **docker 执行器 e2e 待隧通后补**。
+   该次重建顺带关闭 **P0-2**（FLUX 三个 loader 的异步化代码随 1.17.0 进镜像）。
+2. **`ecom-bg-replace.yaml`（docker 变体）未跑**：本地变体已验证；docker 变体等镜像重建 +
+   docker 隧道（容器内用 `http://172.17.0.1:8100`）。
+3. **引擎侧 `removeComments` 引号感知修复**：见 §56.4（需发 flowx 新版本 + 重建 Studio）。

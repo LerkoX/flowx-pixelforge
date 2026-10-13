@@ -1,0 +1,119 @@
+Name: ecom-bg-replace-local
+Description: >-
+  G11 电商模板④（local 变体，用于 A7 执行器无关性对照）：白底商品换背景 + 环境投影——
+  载入商品图(透明底 PNG)与场景图 → **环境投影**（位移/压扁/高斯/透明度/远端淡出，
+  一次性合成到底图）→ 1:1 扩画布(电商主图规格) → 水印 → 落盘。
+  商品图带 alpha 时不需要抠图节点；不带 alpha 时在 LoadProduct 后接 matting-birefnet。
+  要出 1:1 主图规格：在 Shadow 后串一个 image-pad 节点（left/right/top/bottom 给
+  该 SKU 的具体像素值——image-pad 拒绝全 0 扩边，故不设默认步骤）。
+  **执行器纪律**：只有"读本机文件/写本机文件"的节点（load-image / save-image）用 local，
+  其余图像节点走 docker（旧规则"纯图像节点只跑本地"已作废）。
+Param:
+  service_url: "https://1bba08c4.r7.cpolar.cn"           # local 节点用（Studio 可达）
+  service_url_internal: "http://172.17.0.1:8100"          # docker 节点用（容器视角的宿主机）
+  service_url_host: "https://1bba08c4.r7.cpolar.cn"       # 画布预览帧中转
+  service_token: "30e494999da13134808ee280aea6dffd"
+  product_path: "~/flowx-input/ecom/prod_fakestore_01_men-s-clothing.png"
+  bg_path: "~/flowx-input/ecom/bg_scene_1.jpg"
+  distance: 48
+  angle: 90
+  blur: 26
+  opacity: 0.5
+  squash: 0.45
+  fade: 0.2
+Graph: |
+  stateDiagram-v2
+  [*] --> Ensure
+  Ensure --> LoadProduct
+  Ensure --> LoadScene
+  LoadProduct --> Shadow
+  LoadScene --> Shadow
+  Shadow --> WM
+  WM --> SaveMain
+  Shadow --> SaveShadow
+  SaveMain --> [*]
+  SaveShadow --> [*]
+Nodes:
+  Ensure:
+    name: 服务健康检查
+    config:
+      nodeRef: inference-ensure@1.1.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        wait_seconds: 60
+        service_token: "{{ Param.service_token }}"
+  LoadProduct:
+    name: 载入商品图
+    config:
+      nodeRef: load-image@1.3.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        image_path: "{{ Param.product_path }}"
+        service_token: "{{ Param.service_token }}"
+  LoadScene:
+    name: 载入场景图
+    config:
+      nodeRef: load-image@1.3.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        image_path: "{{ Param.bg_path }}"
+        service_token: "{{ Param.service_token }}"
+  Shadow:
+    name: 环境投影
+    config:
+      nodeRef: image-shadow@1.0.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_url_host: "{{ Param.service_url_host }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ LoadProduct.image }}"
+        background: "{{ LoadScene.image }}"
+        distance: "{{ Param.distance }}"
+        angle: "{{ Param.angle }}"
+        blur: "{{ Param.blur }}"
+        opacity: "{{ Param.opacity }}"
+        squash: "{{ Param.squash }}"
+        fade: "{{ Param.fade }}"
+        color: "#101014"
+        canvas: expand
+  WM:
+    name: 水印
+    config:
+      nodeRef: image-watermark@1.0.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_url_host: "{{ Param.service_url_host }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ Shadow.image }}"
+        text: "FLOWX SAMPLE"
+        position: bottom-right
+        margin: 24
+        opacity: 0.55
+        color: "#FFFFFF"
+  SaveMain:
+    name: 保存主图
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        image: "{{ WM.image }}"
+        filename_prefix: ecom_bg_replace_main
+        output_dir: "~/flowx-e2e-out"
+        service_token: "{{ Param.service_token }}"
+  SaveShadow:
+    name: 保存投影图
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        image: "{{ Shadow.image }}"
+        filename_prefix: ecom_bg_replace_shadow
+        output_dir: "~/flowx-e2e-out"
+        service_token: "{{ Param.service_token }}"
