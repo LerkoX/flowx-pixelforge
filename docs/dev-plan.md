@@ -134,6 +134,10 @@
 12. **`ecom-model-swap` 模板** —— `pipeline/ecom-model-swap.yaml`（docker）+ `-local.yaml`，
    13 节点 Param 驱动（模特图/参考衣/笔画/提示词/seed/guide_size）；结构验收 exec 见 §61。
 
+13. **版本升级的 nodeRef 安全替换**（新）—— 已沉淀 `_tools/check-workflow-noderefs.py`
+   （校验每个 name@version 真实存在，`--check` 只报不改）。后续所有批量升级脚本一律
+   带前缀边界正则或事后校验（§60.11 实测误伤 4 处）。
+
 ### P2 / 大改：独立立项评估
 8. **张量级搬移（大模型线前置）** —— 加载节点支持"显存驻留上限，超出流式供给"，含磁盘流式兜底；
    核心机制未立项，方案先行。

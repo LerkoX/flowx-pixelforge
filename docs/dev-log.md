@@ -5624,3 +5624,46 @@ running —— 这是设计而非缺陷）。
 两次跑之间我还在同机重建过镜像 ⇒ 本轮 A/B **受宿主状态混淆**，不是干净对照）；
 ③ 每步设备搬运（offload 钩子）。判据建议：在 op 内加 `per-step` 计时打点（反量化 / forward /
 callback 各一段），一次运行即可分辨。
+
+### 60.11 扫参跑暴露的第二批同步算子 + `executor_base` 一处修全族
+
+准备 InstantID 扫参（wf172）时把它排在仍在跑的 `flux-mask-refine`（2.8h）之后——
+结果**立刻打回两个"排队脆弱"节点**（与 §58.5 同根因）：
+
+| 节点 | 症状 | 根因 |
+| --- | --- | --- |
+| `empty-latent`（SD） | `POST .../op failed: TimeoutError: timed out` | **仍是同步 `/op`**（60s），排队期零字节 |
+| `ipadapter-load` | `job ... timeout after 600s (interrupted)` | 任务式，但 `timeout=600` 按"算子自身耗时"拍的 |
+
+⇒ P0-1 的"剩余同步算子"审计**不全**：当时只看了 FLUX 族。这次做全仓审计：
+
+**① 10 个节点从同步 `/op` 转任务式**（clip-text-encode / detail-refine / empty-latent /
+image-upscale / sd3-clip-encode / sd3-empty-latent / sd3-vae-decode / sd3-vae-encode /
+vae-decode / vae-encode）：`submit_job` + job 标记 + `wait_job(job_timeout, poll_interval)`；
+版本各 +1 minor；node `timeout` 抬到 `job_timeout+300`；门禁 I 随即要求这 10 个节点补
+`service_url_host`（已补 param+env+widget）。**同步 `call_op` 至此清零**（`grep -l call_op` 0 命中）。
+
+**② 46 个走 `executor_base.run_op` 的节点，在共享助手里一处修全族**：
+
+```python
+timeout = param("job_timeout", max(int(timeout or 0), 1800), int)   # 排队预算下限
+pbase = host_base(url)                                              # Studio 可达地址
+jid = submit_job(...)
+emit_preview(f"{pbase}/preview/{jid}", 0.0, tok, base=pbase, job_id=jid)  # 取消兜底标记
+```
+
+（gate I 的判据本就含 `executor_base` ⇒ 这 46 个节点早就声明了 `service_url_host`，
+无需扫一遍；`stdout` 标记由 Studio 拦截，不落日志。）
+
+**③ 顺手抓到的第二个坑：nodeRef 版本升级的"子串陷阱"。** 我用
+`yaml.replace("detail-refine@2.0.0", "detail-refine@1.3.0")` 这类替换升级版本号，
+结果**误伤同后缀的兄弟节点**：`flux-detail-refine@2.0.0` → `flux-detail-refine@1.3.0`（wf101 两处）、
+`sd3-vae-decode@1.2.0`（wf60/64）。正确做法（已沉淀为工具）：
+`nodes/_tools/check-workflow-noderefs.py`——以 Studio 节点表为准校验每个 `name@version`
+是否真实存在，`--check` 只报不改；本次修回 4 处，复核 0 处非法。
+**教训**：版本升级要么用带前缀边界的正则 `(?<![\w-])name@ver`，要么改完按节点表校验一遍
+（长名字先处理更稳）。
+
+**④ 取消语义的完整验证**（本轮第三次）：取消 exec 739 ⇒ 审计表留下
+`cancel_remote_job exec=739 node=MaskRefine job=0aebfe5c…`，远程 job 在**下一个步边界**
+（8284s）转入 `cancelled` —— 证明"长任务也能被定向中断"，且**步边界响应**是设计而非缺陷。
