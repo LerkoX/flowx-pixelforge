@@ -4951,3 +4951,104 @@ MAX_RESIDENT_MODELS=3 / OFFLOAD_MODE=none / PORT=8100 / OBJECT_TTL_SECONDS=14400
   `python3 nodes/_tools/check-op-signatures.py`（或直接跑 `check-bundle.py`）。
 - 新增算子族的**注册调用必须挂在函数上**（装饰器位置或 `(…)(fn)`）——本门禁会以 E? 报出来，
   不再依赖真机 `unknown op` 才发现。
+
+## 五十五、P0-1：`image-shadow` 环境投影节点（G11 补齐）——立项方案（2026-10-13，待确认）
+
+> 既定 G11 规格（§44.6.1 / §2050）原文：`image-shadow` **环境投影（位移+高斯+透明度）**，
+> UI「阴影方向/距离/模糊/透明度滑杆 + 实时合成预览」；链路 = 抠图 → 背景模板合成 →
+> **环境阴影** → 可选 Flux 细节重绘；两条模板流水线 `ecom-bg-replace` / `ecom-model-swap`。
+> 本节只补"怎么做 + 怎么验"，不改需求。
+
+### 55.1 现状核查（动手前取证）
+
+| 项 | 事实 |
+| --- | --- |
+| 全仓是否已有投影/阴影实现 | **零**（`grep -rn "shadow\|阴影\|投影" nodes/*/flowx.json nodes/*/main.py` 只命中 redux/video 的无关命中） |
+| G11 其余部分 | 已交付：`matting-birefnet`（抠图）+ `matting-refine`（去白边）+ `image-composite`（合成）+ `image-pad` + `image-watermark` + 三条电商模板（`ecom-white-bg` / `ecom-scene` / `ecom-model-spec`） |
+| 同类节点形态 | 纯图像节点是**客户端 PIL**（无 `server_op.py`）：`image-blur` / `image-pad` / `image-composite` / `image-watermark` / `image-curves` … |
+| 电商模板执行器 | 三条模板**全部 `executor: local`** |
+| 共享件 | `image_io.py` 在 22 个节点包里**逐字节相同**（单一 md5），但**不在** sync-common 的同步/校验范围内 |
+| 节点自带单测 | 30 个节点有 `test_main.py`；**check-bundle 不跑它们**（目前只在手工流程里跑） |
+
+### 55.2 设计
+
+**形态**：纯客户端 PIL 节点（**零 numpy、零新增依赖、无服务端算子**），与 `image-watermark` 同族。
+
+**输入 / 参数 / 输出**
+
+| 端口 | 说明 |
+| --- | --- |
+| `image` | 商品/主体图（有 alpha 时可用它推蒙版） |
+| `mask`（可选） | 主体蒙版（灰度，语义同 `matting-*`/`mask-*`：255=主体）；缺省从 `image` 的 alpha 推 |
+| `background`（可选） | 底图；**给了就直接合成输出 RGB**，不给则输出**带 alpha 的 RGBA**（供下游 `image-composite` 用） |
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `distance` | 24 | 投影位移距离（px） |
+| `angle` | 90 | 投影方向（度，顺时针；0=+x，90=正下方）——即规格里的"阴影方向/距离滑杆" |
+| `blur` | 24 | 高斯模糊半径（px） |
+| `opacity` | 0.45 | 投影不透明度 0~1 |
+| `squash` | 0.55 | 沿垂直方向压扁（0.1~1），锚在**落地线**（主体包围盒底边）⇒ 产生"贴地"透视 |
+| `fade` | 0.0 | 远端淡出 0~1（0=均匀影） |
+| `color` | `#000000` | 投影颜色 |
+| `canvas` | `expand` | `expand`=外扩画布容纳投影；`keep`=保持原尺寸（投影越界裁掉） |
+
+| 输出 | 说明 |
+| --- | --- |
+| `image` / `width` / `height` | 结果对象与尺寸 |
+| `shadow_box` | 投影区域 `x,y,w,h`（**判据可用件**：用于"非投影区逐字节不变"断言，同 `image-watermark` 的 `box` 思路） |
+| `coverage` | 投影覆盖占比 0~1（数值判据） |
+| `info` | 参数回显 + 峰值 alpha + 耗时（JSON） |
+
+**算法（确定性、零随机）**：蒙版 → 按 (`distance`,`angle`) 位移 → 以落地线为锚垂直压扁
+(`squash`) → 高斯 (`blur`) → 颜色化 + alpha×`opacity`（远端按 `fade` 衰减）→
+有 `background` 则 alpha 合成，否则输出 RGBA。纯整数/浮点运算，**同参必逐字节可复现**（无随机源）。
+
+**执行器：`local` only**（先例：`image-montage`）。理由：① 电商模板三条全用 local；
+② 避免牵动 `BUNDLE_VERSION`/镜像重建（P0-2 的 docker 核验还没做，不把两件事缠在一起）；
+③ 纯 PIL 节点本机就能单测，无需镜像。
+若将来要 docker：加 `Dockerfile` COPY + bump BUNDLE_VERSION + `sync-flowx-json.py` + 重建镜像
+（一次提交的事，届时按纪律落）。
+
+**文件清单**：`nodes/image-shadow/{main.py, mock.py, test_main.py, flowx.json,
+ui/widget-def.js}` + `build-widget.py` 重建 `ui/node-widget.js` + 共享件副本
+`flowx_client.py` / `image_io.py`（照 22 个副本的既有内容）。
+
+**编排产出**：`pipeline/ecom-bg-replace.yaml`（白底商品换背景：抠图 → 背景模板 → **投影** →
+合成 → 可选细节重绘 → 落盘）、`pipeline/ecom-model-swap.yaml`（模特换装：模特图 + 服装参考 →
+`catvton-tryon` → 抠图 → 场景合成 → **投影** → 落盘）。
+
+### 55.3 验收判据（先定口径，再动手）
+
+| # | 判据 | 口径 |
+| --- | --- | --- |
+| N1 | 本机单测 | `nodes/image-shadow/test_main.py`（纯 PIL、零 numpy，不需要 GPU）覆盖几何/透明度/模糊数值 |
+| N2 | 逐字节确定性 | 同参两跑 sha256 相同 |
+| N3 | **非投影区逐字节不变** | 用 `shadow_box` 裁掉投影区后与输入逐字节比 ⇒ 主体像素零改动 |
+| N4 | 几何物理判据 | 投影质心偏移 ≈ `(distance·cosθ, distance·sinθ)`（±2px）；压扁后投影高 ≈ 原高×`squash`；`blur` 增大 ⇒ 投影覆盖面积**单调增** |
+| N5 | 透明度 | 透明画布模式下投影最深处 alpha ≈ `opacity`（±2/255） |
+| N6 | 画布模式 | `keep` ⇒ 尺寸不变（越界裁掉）；`expand` ⇒ 尺寸 = 原图 + 外扩，且原图区域逐字节不变 |
+| N7 | 人眼物料 | 参数扫描联系表（原图 / 投影 / 合成 / 四档）入库 `~/flowx-view/` |
+| N8 | 门禁 | `check-bundle.py` 全绿（gate M 参数一致性 / N 桩冒烟 / O 算子契约 / widget 重建校验 / 共享件同步） |
+
+### 55.4 顺序与工时
+
+| 阶段 | 内容 | 依赖 |
+| --- | --- | --- |
+| 1（本机） | 节点 + 单测 + widget 重建 + 门禁 ≈ 0.5 天 | 无 GPU |
+| 2（本机） | 两条模板流水线 YAML ≈ 0.5 天 | 无 GPU |
+| 3（真机） | 真机 e2e + 物料 ≈ 0.5 天 | **通道**：GPU 主机 cpolar 在线 + 当次隧道地址；Studio 在线（节点导入有频率限流，新增节点必须先重建控件产物再导入） |
+
+合计 ≈ **1.5 天**（不含通道等待）。
+
+### 55.5 待确认（不拍不动）
+
+- **D1 参数集**：按上表 8 个参数（含 `squash`/`fade`/`color`/`canvas`/`background`），
+  还是先做规格里的最小 4 个（`distance`/`angle`/`blur`/`opacity`）？**建议**：按上表一次做全
+  （落地感全靠 `squash`，只做 4 个参数出来的影子"贴纸感"很重）。
+- **D2 执行器**：`local` only（建议）还是 `docker`+`bundled`（需 bump `BUNDLE_VERSION` + 重建镜像）。
+- **D3 模板流水线**：两条一起交付（建议）还是先只做 `ecom-bg-replace`。
+- **D4（可选）**：把 `image_io.py` 纳入共享件一致性校验（22 份当前逐字节一致，但无同步机制，
+  属"下一次改协议时的坑"）。
+- **D5（可选，独立小项）**：新增门禁"跑所有节点自带 `test_main.py`"（30 个节点，纯 PIL 可本机跑；
+  目前这些单测只在手工流程里跑，没有任何门禁保证它们不腐烂）。
