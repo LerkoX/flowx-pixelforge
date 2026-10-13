@@ -4718,3 +4718,105 @@ MAX_RESIDENT_MODELS=3 / OFFLOAD_MODE=none / PORT=8100 / OBJECT_TTL_SECONDS=14400
 
 **运维注记（回滚用）**：回滚 = `docker rm -f flowx-inference-server` 后用同一串参数
 （见上方 env/挂载清单）`docker run` 镜像 `flowx-inference-server:pascal-prePartA`。
+
+## 五十三、G11 实时化：A 路线（流式链路 + 延迟埋点）立项方案（2026-10-13，待确认）
+
+> **决策前置**（用户 2026-10-13 拍板）：**B 路线（关键帧生成 + 帧间 warp 传播）不做**——
+> 明确不做，理由与重开条件见 dev-plan 第四节。本轮只做 **A（流式链路改造 + 延迟预算埋点）**。
+> C（换卡 + TensorRT/FP8 生成式实时）仍待拍板，不在本方案范围。
+
+### 53.1 目标与非目标
+
+**目标**：把 exec 709 里每帧 **35.8s 的编排与 IO 浪费归零**，并落一份可复现的**延迟预算数据**
+（不含推理）——即"实时"这件事里唯一属于本机软件栈、且现在就能拿的部分。
+
+| 口径 | 定义 |
+| --- | --- |
+| **软件开销（主判据）** | 每帧"非推理"阶段耗时之和：网络 RTT + 帧编解码 + 会话查表 + 对象/帧传递 + 状态写入。**不含**模型加载、VAE 编解码、denoise |
+| 预热开销 | 会话建立（pin 管道 + 预计算）单独统计，**不进**每帧口径 |
+| 推理开销 | 每帧 VAE/denoise，单独统计，本方案**不设指标**（Pascal 上是地板，见 §53.2） |
+
+**非目标**（防止方案膨胀）：
+- 不改算子族算法（CatVTON 路径逐行复用，A7 口径产物必须逐字节可比）
+- 不做 WebSocket 双向推流的产品化 / 不做前端 App / 不做多路并发（单 worker 语义不变）
+- 不为每帧推理加速做任何工作（那是 C 路线的前提，需换卡）
+
+### 53.2 现状核查（动手前的取证，2026-10-13）
+
+| 项 | 事实 | 出处 |
+| --- | --- | --- |
+| 每帧编排浪费 | MaskPaint 15.0s / Save 9.6s / LoadCloth 6.3s / VtonLoad 2.7s / Ensure 2.2s = **35.8s**（总 303s 的 12%） | exec 709 节点耗时 |
+| 推理地板 | 50 步 × 5.4s = **307s/帧**（Pascal fp32、chunk=1024；峰值显存 10.66GB > 物理 8GB，WDDM 溢出走 PCIe） | §52 vton 族注记 + exec 709 |
+| 服务端流式能力 | **零**：`app/main.py` 21 个端点里没有任何 WebSocket / StreamingResponse / SSE；帧一律经对象仓或 base64 | `grep` 全 app/ 无命中 |
+| 依赖 | `uvicorn[standard]` 已装 ⇒ `websockets` 可用，**无需新增 pip** | `requirements-pascal.txt` |
+| 限流 | 不在推理服务，在 **Studio**：`RateLimitMiddleware(100, 50)`（每 IP 100 请求/分钟，突发 50）。帧流客户端**直连推理服务**即不适用 | `flowx-studio/cmd/flowx-studio/main.go:240` |
+| 执行语义 | `engine.EXEC_LOCK` + JobManager 单 worker FIFO；对象仓内存态 + TTL；租约 pin 已有 | `app/engine.py` / `app/jobs.py` |
+| 会话可复用件 | `vton.catvton_load`（LRU 键，可 pin）/ `vton.catvton_tryon`（`_tryon_pinned`，内部 `_compute_vae_encodings`） | `nodes/_common/server_ops/vton.py@34ddd651f970` |
+| 插件机制边界 | `/admin/plugins` 只能注册**算子**，注册不了 HTTP 路由 ⇒ 新增端点必须改 `app/main.py` = **重建镜像 + 重启** | `app/plugins.py` |
+
+### 53.3 两阶段设计（A1 零重启 → A2 需许可）
+
+**A1：会话算子（插件实现，零重启、不碰 `app/main.py`）**
+
+新建算子族 `vtstream`（独立族，不同职责；族版本化纪律照 F1：改内容换 `OP_VERSION`，新旧并存）：
+
+| 算子 | 输入 | 输出 | 作用 |
+| --- | --- | --- | --- |
+| `vtstream.open` | `vton`(键) / `cloth`(ID) / `mask`(ID) / `steps` / `guidance` / `width` / `height` / `mask_blur` / `repaint` / `ttl_s` | `session`(字符串键) | pin 管道；**预计算**衣服 VAE latent、蒙版 resize+blur+coverage（MaskPaint/LoadCloth 的等价物，只做一次） |
+| `vtstream.frame` | `session` / `person`(ID) / `seed` | `image`(ID) | 帧路径：只做 person VAE 编码 + denoise + 贴回（复用 `_tryon_pinned` 的算法体） |
+| `vtstream.budget` | `session` | `info` | 每阶段 p50/p95 埋点数据 |
+| `vtstream.close` | `session` | `info` | 释放 pin、回收缓存 |
+
+配套：`nodes/_tools/stream-bench.py` 驱动脚本（多帧循环 + 计时 + 出报告与物料）。
+
+**A1 拿到的**：Ensure / VtonLoad / LoadCloth / MaskPaint / 节点编排 / Studio 层屏障**全部归零**；
+帧传仍走「`POST /images` 上传 → `/op` → `GET /images/{id}` 下载」3 次往返（对象仓 ID 语义不变）。
+**A1 的实测数字决定 A2 是否必要**——不能靠推理猜。
+
+**A2：二进制帧端点（改 `app/main.py`，需重建镜像 + 重启；需用户许可）**
+
+| 端点 | 语义 |
+| --- | --- |
+| `POST /session` | 开会话（等价 `vtstream.open`），返回 `session_id` + 预热耗时 |
+| `POST /session/{sid}/frame` | body = 原始帧字节（JPEG/NV12），返回 `image/jpeg` + `X-FlowX-Budget` 头（各阶段 ms）；**不落盘、不进对象仓、不 base64** |
+| `GET /session/{sid}/budget` | 累计埋点（count / p50 / p95 / 各阶段） |
+| `DELETE /session/{sid}` | 释放（幂等） |
+
+- 新文件 `app/session.py`（会话注册表：TTL、pin、预算统计），`main.py` 只挂 4 个端点
+- `/session/{sid}/ws`（WebSocket）**列为可选后置项**：cpolar TCP 隧道对长连接/upgrade 行为未验证，
+  不把它放进首版验收路径（先单帧 HTTP，隧道友好、可测可回退）
+- 回滚标签照 Part A 先例：`:pascal-preA2`（原镜像）/`:pascal-A2`
+
+### 53.4 埋点与验收判据
+
+| # | 判据 | 口径 |
+| --- | --- | --- |
+| M1 | **软件开销 p50 < 100ms、p95 < 250ms** | 每帧非推理阶段之和（A2 收口；A1 只出基线，不设目标） |
+| M2 | 常驻命中 | 帧循环期间 `/models` 中 vton 常驻、**零 reload**（会话建立后不再出现 `catvton_load` 耗时） |
+| M3 | 帧路径零落盘 | 循环 N 帧后 `~/flowx-output` 无新增、对象仓条目不随帧数增长（对照 exec 709 的 Save 9.6s） |
+| M4 | 等价性 | 同 seed / 同参：session 产物 vs exec 709 路径产物**逐字节一致**（A7 口径，判据不合就说明改错了） |
+| M5 | 物料 | 多帧联系表（人眼可看）+ `session-budget.json` 入库，挂进 `~/flowx-view/` |
+| M6 | 活体边界（纪律 6） | 会话过期 / 服务重启 / 重复 close 的报错可读；close 后 pin 释放、TTL 到期自动回收；**负例自检**（摘掉 TTL 回收该判据必失败） |
+
+### 53.5 风险与前置
+
+1. **重启许可**：A2 必须重建镜像 + 重启推理服务（对象仓清空、打断当前常驻的 `vton.catvton_*`）；
+   **A1 不需要重启**，可先做。
+2. **通道**：10-12 16:xx 探测未通过（fake-ip 劫持 + Windows 侧零字节应答）⇒ 真机验收前先在 GPU 主机
+   确认 cpolar 客户端在线 + `curl localhost:8100/health` 通，并确认当前隧道地址（禁止写死）。
+3. **显存**：CatVTON fp32 常驻 ≈6.2GB（8GB 物理卡）；会话期间与其它大模型互斥，沿用现有 LRU/淘汰语义，
+   不新开旁路。
+4. **串行**：会话帧仍走 `EXEC_LOCK`，不引入并行（并发决策见 dev-plan 第四节，换卡前不重开）。
+5. **限流**：客户端直连推理服务；经 Studio 代理会被 100/min 掐（实时帧流需要 ≥1500/min）。
+6. **授权**：CatVTON 权重是 **CC BY-NC-SA 4.0（禁商用）**——A 路线只解"延迟"，
+   **不解决商用授权**；产品化前必须换授权模型或自训（待拍板项，与延迟同等重要）。
+
+### 53.6 工时与顺序
+
+1. **A1**：`vtstream` 族 4 算子 + 驱动脚本 + 单测/门禁（gate N 桩冒烟必须覆盖新节点，若有）≈ **1 天**
+2. **A1 真机**：探通道 → 跑多帧 + 出埋点与物料 → 得到"编排归零"后的真实软件开销 ≈ 半天
+3. **数据决定 A2**：若单帧 HTTP 的 3 次往返已把软件开销压到目标区间，A2 可降级为"仅补埋点端点"
+4. **A2**（需许可）：端点 + 活体验证 + 报告 ≈ **2 天**
+
+**待用户拍板**：① A2 的重建+重启许可；② 换卡（C 路线 1 工作日的 TRT FP8 spike）是否给条件；
+③ CatVTON 商用授权路线（换模型 / 自训 / 仅内部使用）。
