@@ -5163,3 +5163,38 @@ Dockerfile COPY + 镜像 tag）。旧口径「纯图像节点只跑本地」**�
 2. **`ecom-bg-replace.yaml`（docker 变体）未跑**：本地变体已验证；docker 变体等镜像重建 +
    docker 隧道（容器内用 `http://172.17.0.1:8100`）。
 3. **引擎侧 `removeComments` 引号感知修复**：见 §56.4（需发 flowx 新版本 + 重建 Studio）。
+
+### 56.8 镜像 v1.17.0 重建 + docker 执行器 e2e（2026-10-13，**P0-2 一并关闭**）
+
+**docker 隧道连不上的真因（不是隧道断）**：Termux 上 **Go 的纯解析器解析不了
+`5.tcp.cpolar.top`**（`getent hosts` 亦空；系统解析器只给透明代理的 fake-IP `198.18.x.x`）
+⇒ docker CLI/Studio 报 `Cannot connect to the Docker daemon`，而 `curl http://域名:12952/_ping`
+返回 200（curl 走系统解析）。**修法：走真实 IP**（DoH 查得 `8.162.7.178`）：
+
+| 动作 | 命令/结果 |
+| --- | --- |
+| CLI 验证 | `docker -H tcp://8.162.7.178:12952 version` ⇒ client 28.1.1 / **server 27.3.1** |
+| Studio 执行器 | `PUT /api/v1/executors/8`（`docker-cpolar`）`config.host` 改为真实 IP；`POST …/8/test` ⇒ `ok, serverVersion 27.3.1, latencyMs 143` |
+| 镜像重建 | `cd nodes && SKIP_PUSH=1 DOCKER_HOST=tcp://8.162.7.178:12952 bash build-image.sh` ⇒ **成功**（7 步含 4 个新 COPY + Pillow 安装；基础层命中缓存，上下文 31MB 走隧道） |
+| 镜像核验 | `docker run --rm --entrypoint sh …v1.17.0 -c 'ls -d /opt/flowx-nodes/image-shadow; grep -c "submit_job\|/jobs" …/flux-{unet,vae}-load/main.py'` ⇒ 新节点在镜像里、**三个 loader 是 `/jobs` 异步版** |
+
+- ⚠️ 构建脚本必须用 `bash build-image.sh`（`set -o pipefail`，`sh` 会报 Illegal option）。
+- 运维清单已写进 `inference-server/DEPLOY.md`（新增「远程 Docker 执行器」一节）。
+
+**docker 执行器 e2e**：建 `wf 157 ecom-bg-replace`（Shadow/WM=docker，load/save=local，docker 节点用
+`http://172.17.0.1:8100`）⇒ **exec 718 success**。
+
+**A7 执行器无关性对照（local exec 717 vs docker exec 718，同素材同参数）**：
+
+| 产物 | local (exec 717) | docker (exec 718) | 结论 |
+| --- | --- | --- | --- |
+| `ecom_bg_replace_shadow_*.png` | `cc29b7260cdf963b`（340416B） | `cc29b7260cdf963b`（340416B） | ✅ **逐字节一致**（image-shadow 执行器无关） |
+| `ecom_bg_replace_main_*.png`（含水印） | `b9bb93ea9aa64111`（344922B） | `b1c7ae07cec335c8`（344682B） | ❌ 不同 —— **字体差异**：local `font=/system/fonts/NotoSansCJK-Regular.ttc`，容器 `font=(default)` |
+
+**判据口径补充（重要）**：**文本渲染节点的 A7 逐字节判据不成立**——字形取决于运行环境
+可用字体（Android 有 NotoSansCJK，Linux 容器候选路径全空 ⇒ 回退 Pillow 内置位图字体）。
+要么在流水线里 pin `font_path`，要么给镜像内置固定字体（**列入 P1，未做**）。
+本轮 e2e 5/5 的产物复核仍全绿（它是与**输入**比，不比跨执行器）。
+
+**P0-2 关闭**：FLUX 三个 loader 的异步化代码随 v1.17.0 进镜像 + 清单已同步 + docker 执行器
+实测可跑（本轮 wf157 的 Shadow/WM 即 docker 路径；loader 自身由既有 FLUX 链覆盖）。

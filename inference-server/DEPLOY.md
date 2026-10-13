@@ -151,6 +151,44 @@ ports:
 
 ---
 
+## 远程 Docker 执行器（Termux 侧踩坑，2026-10-13 实测）
+
+节点镜像 `lerkobba/flowx-pixelforge-nodes` 在**远端 daemon**（Windows/Docker Desktop）上构建，
+Studio 与 CLI 都要连 `cpolar` 的 dockerApi 隧道。两个坑：
+
+1. **域名解析不了（真因）**：Termux 上 Go 的纯解析器解析不了 `5.tcp.cpolar.top`
+   （`getent hosts` 也是空；系统解析器只给透明代理的 fake-IP `198.18.x.x`）。
+   用域名连 docker 会报 `Cannot connect to the Docker daemon`，而 `curl http://域名:端口/_ping`
+   却是 200（curl 走系统解析）。**修法：用真实 IP**：
+
+   ```sh
+   # 真实 IP（fake-IP 会变，CPOLAR 隧道换端口时用 DoH 重查）
+   curl -s "https://dns.alidns.com/resolve?name=5.tcp.cpolar.top&type=A"
+   # -> 8.162.7.178
+   docker -H tcp://8.162.7.178:12952 version          # ✅
+   ```
+
+   Studio 侧：`/api/v1/executors` 里 `docker-cpolar` 的 `config.host` 也必须是真实 IP
+   （`PUT /api/v1/executors/8`），改完 `POST /api/v1/executors/8/test` 应返回
+   `serverVersion 27.3.1`。执行器 id 7（`docker-remote-211b`）的备注就是这条老经验。
+
+2. **镜像构建**：`cd nodes && SKIP_PUSH=1 DOCKER_HOST=tcp://<真实IP>:<端口> bash build-image.sh`
+   （必须 `bash`；脚本用了 `set -o pipefail`，`sh` 会报 Illegal option）。
+   `SKIP_PUSH=1` = 远端 daemon 本地构建即可，无需推仓库。
+   上下文只传节点代码（`.dockerignore` 挡掉 `ui/`/`mock.py`/`_tools/`），31MB ⇒ 隧道下几分钟。
+   构建完核验镜像内容：
+
+   ```sh
+   docker -H tcp://<真实IP>:<端口> run --rm --entrypoint sh \
+     lerkobba/flowx-pixelforge-nodes:vX.Y.Z -c \
+     'ls -d /opt/flowx-nodes/image-shadow && grep -c submit_job /opt/flowx-nodes/flux-unet-load/main.py'
+   ```
+
+3. **换隧道端口时的清单**（cpolar 每次重建都会变）：执行器 `config.host`、各 pipeline YAML 的
+   `service_url` / `service_url_internal` / `service_url_host`、容器内可达地址是
+   `http://172.17.0.1:8100`（docker 节点用）。
+
+
 ## 5. 常用运维操作
 
 ```bash
