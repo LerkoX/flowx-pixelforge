@@ -1,8 +1,8 @@
 Name: batch-montage-preview
 Description: B5/52.2 G11 批量①：目录 → 批量加载 → 联系表拼图（序号标签）→ 落盘
 Param:
-  service_url: "http://4dc21d2a.r7.cpolar.cn"
-  service_url_host: "http://4dc21d2a.r7.cpolar.cn"
+  service_url: "http://1bba08c4.r7.cpolar.cn"
+  service_url_host: "http://1bba08c4.r7.cpolar.cn"
   service_token: "30e494999da13134808ee280aea6dffd"
   corpus_dir: "~/flowx-input"
 Graph: |

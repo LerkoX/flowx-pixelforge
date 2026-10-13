@@ -1,8 +1,8 @@
 Name: seg-auto-e2e-local
 Description: B3/G2 SAM 自动分割 e2e（全 local）：加载图 → 装载 SAM → 自动分割（点阵+去重+keep 挑选）→ 落盘网格图/选中并集/彩色叠加
 Param:
-  service_url: "http://4dc21d2a.r7.cpolar.cn"
-  service_url_host: "http://4dc21d2a.r7.cpolar.cn"
+  service_url: "http://1bba08c4.r7.cpolar.cn"
+  service_url_host: "http://1bba08c4.r7.cpolar.cn"
   service_token: "30e494999da13134808ee280aea6dffd"
   image_path: "~/flowx-input/b3_person.png"
 Graph: |

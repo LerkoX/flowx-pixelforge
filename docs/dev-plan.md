@@ -4630,3 +4630,41 @@ docker 路径 e2e 本轮做不了；3 个批量节点是 local-only（读写本�
   `face_*_gfpgan`（GFPGAN 随机模型，预期）、`batch_preview`（两轮一次用序号标签一次用文件名标签，
   参数不同）、`colin_face`/`g7_shuffle`/`matting_comp_image_`（B1/B2 期不同参数重跑，非同一请求）。
   ⇒ 结论：**没有任何"确定性算子的同参数多次运行产物不一致"**，与各批复核结论一致。
+
+### 52.6 隧道重建后的补跑记录（2026-10-13）
+
+**新地址（旧地址作废）**
+- 推理服务隧道：`http://1bba08c4.r7.cpolar.cn`（旧 `4dc21d2a.r7.cpolar.cn`；服务本机仍 `localhost:8100`）
+- docker 隧道：`tcp://198.18.0.144:12952`（域名 `5.tcp.cpolar.top:12952`；**端口 12869 → 12952**；
+  域名解析经本机代理得到 `198.18.0.x` 虚拟地址，实测 145ms 比走域名 897ms 快 ⇒ 用解析后的 IP）
+- Studio executor `id=8` 已更新为新地址，`flowx-studio executor test --id 8` **Connection OK**（docker 27.3.1）
+- 仓库侧同步：`pipeline/*.yaml` 里 17 个含旧地址的文件全量替换；11 条流水线（139–144、150–154）
+  `workflow update` 推送（ok=11 fail=0）
+
+**补跑结果**
+
+| 补跑项 | 结果 |
+| --- | --- |
+| `wf 150`（IC-Light local，新隧道） | exec **710** success |
+| `wf 151`（IC-Light docker，新 docker 地址） | exec **711** success |
+| `verify_iclight.py` | **PASSED 17 / FAILED 0**，A7 六份产物 local↔docker **逐字节一致** |
+| `wf 153 / 154`（批量，新隧道） | exec **712 / 713** success；`verify_batch.py` **10/10** |
+
+**重要发现（比补跑本身更值钱）**：IC-Light 各产物 sha 与**上一轮（旧隧道、服务重启前）完全相同**
+（`icl_left=9458446f4693`、`icl_hi=1d4800ab6d58` …）⇒ 本算子不仅"同会话内可复现"，
+**跨服务重启、跨隧道重建也逐字节稳定**（显式 `torch.Generator` + fp32 确定性路径的功劳）。
+这是目前全库最强的一条确定性证据；以后引入扩散类算子建议都按此口径设判据。
+
+**两处需要修正的判断（诚实记录）**
+1. **Part A 的部署条件写错了**：运行中的服务仍是**旧代码**（`GET /admin/plugins` 里没有 `missing_file`
+   键 = 新代码特征）⇒ "下次自然重启即生效"**不成立**：容器重启用的是**旧镜像**，
+   Part A 要生效必须**重建推理镜像 + 重启服务**。按红线本轮不动（且服务上有并行工作的
+   `catvton:mix` 常驻模型与 `vton_*` 插件，重启会打断），改记为"待用户许可后再重建+重启"。
+2. **容器内验证未做成**：`docker cp` 往**带 bind mount 的运行中容器**写文件，这次同样出现
+   "写进容器层、被挂载遮蔽"（容器内看不到、宿主目录里却有）——与 §50.11 记录的"停止容器"版本
+   是同一陷阱的不同触发面。容器内验证属锦上添花（Part A 已由 15/15 纯逻辑单测 + `ast.parse` 兜底），
+   本轮不再纠缠；**docker 路径 e2e 不受影响**（它跑镜像里烘焙好的节点代码，不依赖 `docker cp`）。
+
+**环境副作用（如实记录）**：IC-Light e2e 需 4.07GB，触发 LRU 淘汰了并行工作的 `catvton:mix`
+（3.6GB，空闲无租约）；补跑结束后已 `model.unload` 掉 `iclight:fc` 并 `/gc`，把显存交还。
+服务侧现状：108 算子 / 46 插件文件（含 `vton_158e3d1a3f7a.py`、`vton_3d94ed9961db.py`，**未触碰**）。

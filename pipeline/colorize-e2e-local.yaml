@@ -1,8 +1,8 @@
 Name: colorize-e2e-local
 Description: B4/S1 G8 DDColor 上色 e2e（全 local 执行器）：4 类输入（灰度人像/褪色/偏黄旧照/真人）→ modelscope 变体上色 → 落盘输入+输出（含人脸蒙版定位）
 Param:
-  service_url: "http://4dc21d2a.r7.cpolar.cn"
-  service_url_host: "http://4dc21d2a.r7.cpolar.cn"
+  service_url: "http://1bba08c4.r7.cpolar.cn"
+  service_url_host: "http://1bba08c4.r7.cpolar.cn"
   service_token: "30e494999da13134808ee280aea6dffd"
   gray_path: "~/flowx-input/gray_person.png"
   faded_path: "~/flowx-input/faded.png"

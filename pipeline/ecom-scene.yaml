@@ -1,8 +1,8 @@
 Name: ecom-scene
 Description: B4/S2 G11 电商模板②：场景换底 —— 抠图(lite+去白边) → 背景图合成(羽化 8) → 轻色调统一 → 水印 → 落盘
 Param:
-  service_url: "http://4dc21d2a.r7.cpolar.cn"
-  service_url_host: "http://4dc21d2a.r7.cpolar.cn"
+  service_url: "http://1bba08c4.r7.cpolar.cn"
+  service_url_host: "http://1bba08c4.r7.cpolar.cn"
   service_token: "30e494999da13134808ee280aea6dffd"
   image_path: "~/flowx-input/b3_person.png"
   bg_path: "~/flowx-input/source.png"
