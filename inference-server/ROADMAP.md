@@ -52,6 +52,19 @@
 - 未做：G10 PuLID（= B5，需改部署 + 重启服务）。
 
 
+
+### 部署记录 / Part A 落地（2026-10-13）
+
+- `flowx-inference-server:pascal` 已重建为含**插件归属簿修复**（§52.1/§52.3）与
+  **插件热更新 `.pyc` 失效修复**（§52.7）的镜像；保留回滚标签 `:pascal-prePartA`、`:pascal-partA`。
+- 重启后：108 算子 / 46 插件文件 / `missing_file` 可观测 / 无幽灵条目；活体验证 **12/12**。
+- 运行时配置（重建时必须照抄）：env `INFERENCE_TOKEN / HF_HOME=/hf-cache / MAX_RESIDENT_MODELS=3 /
+  OFFLOAD_MODE=none / PORT=8100 / OBJECT_TTL_SECONDS=14400 / MODELS_DIR=/models`；
+  挂载 `D:/flowx-data/{input,loras,models,videos,hf-cache}`；`-p 8100:8100`；`--gpus all`；`restart=always`。
+- ⚠️ `plugins.d` 里 `vton_3d94ed9961db.py` 声明的算子版本是 `@3bb90bb5788d`（**文件名 hash ≠ 内容 hash**）
+  ⇒ `purge-plugin-versions.py` 会把它判成"旧版本"而删除，**别在 vton 家族工作未收尾时跑该工具**。
+
+
 ## 0. 现状盘点（已对齐的部分）
 
 | ComfyUI 概念 | 本服务对应 | 状态 |

@@ -111,6 +111,30 @@ def main():
               rep3["stale_removed"] == [] and po3["colorize.load"]["sha256"] == "s"
               and set(po3) == {"colorize.load", "colorize.apply"}, str(rep3))
 
+        # ---------- .pyc 陷阱：同文件名 + 等长内容 + 同秒重传 ----------
+        # 真机复现（§52.7）：不失效字节码缓存时，第二次加载会**执行旧代码**
+        TMPL = ("def _op(image=None):\n"
+                "    return {}\n\n\n"
+                "def register(registry):\n"
+                "    registry.register('%s', {'image': 'IMAGE'},\n"
+                "                      {'image': 'IMAGE'}, 'd')(_op)\n")
+        sp = pathlib.Path(td) / "probe_same_size.py"
+        sa = TMPL % "probe.one@aaaaaaaaaaaa"
+        sb = TMPL % "probe.two@bbbbbbbbbbbb"
+        check("两份探针内容等长（构造同名+等长+同秒的前提）", len(sa) == len(sb),
+              f"{len(sa)} vs {len(sb)}")
+        sp.write_text(sa)
+        regA = Registry()
+        namesA = plugins.load_plugin(str(sp), regA)
+        sp.write_text(sb)          # 紧接着改内容（同秒，等长）
+        regB = Registry()
+        namesB = plugins.load_plugin(str(sp), regB)
+        check("重传后加载到的是**新**内容（字节码缓存已失效）",
+              namesA == ["probe.one@aaaaaaaaaaaa"] and namesB == ["probe.two@bbbbbbbbbbbb"],
+              f"{namesA} -> {namesB}")
+        check("drop_bytecode_cache 可用且返回删除数", isinstance(
+            plugins.drop_bytecode_cache(str(sp)), int))
+
         # ---------- 模块名口径（回滚路径依赖） ----------
         check("plugin_module_name 与 load_plugin 同口径",
               plugins.plugin_module_name("/models/plugins.d/seg_abc123.py")

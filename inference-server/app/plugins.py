@@ -42,6 +42,30 @@ def plugin_module_name(filename: str) -> str:
     return "flowx_plugin_" + os.path.splitext(os.path.basename(filename))[0]
 
 
+def drop_bytecode_cache(path: str) -> int:
+    """删掉该文件对应的字节码缓存，返回删除个数。
+
+    ⚠️ 真机复现（dev-plan §52.7）：同文件名重传时，若**新内容与旧内容字节数相同**且写入
+    **落在同一秒**，CPython 的 .pyc 有效性校验（mtime + size）会判定缓存仍有效 ⇒
+    **执行旧代码**：插件热更新静默失效（实测两份 145 字节源码同秒写入，第二次 load_plugin
+    仍返回第一次声明的算子名）。缓存文件名用的是**文件 stem**（`<stem>.cpython-310.pyc`），
+    与模块名无关，所以按 stem 前缀匹配。
+    """
+    cache = os.path.join(os.path.dirname(os.path.abspath(path)), "__pycache__")
+    if not os.path.isdir(cache):
+        return 0
+    stem = os.path.splitext(os.path.basename(path))[0]
+    n = 0
+    for fn in os.listdir(cache):
+        if fn.startswith(stem + ".") and fn.endswith((".pyc", ".pyo")):
+            try:
+                os.remove(os.path.join(cache, fn))
+                n += 1
+            except OSError:
+                pass
+    return n
+
+
 def load_plugin(path: str, registry):
     """加载单个插件文件，返回该插件声明注册的**全部**算子名（含覆盖既有名）。
 
@@ -63,6 +87,8 @@ def load_plugin(path: str, registry):
         spec = importlib.util.spec_from_file_location(mod_name, path)
         mod = importlib.util.module_from_spec(spec)
         sys.modules[mod_name] = mod  # 插件间 import 可见
+        # 必须先失效字节码缓存：同文件名 + 等长内容 + 同秒重传会命中旧 .pyc（见上方注释）
+        drop_bytecode_cache(path)
         spec.loader.exec_module(mod)
         reg = getattr(mod, "register", None)
         if not callable(reg):

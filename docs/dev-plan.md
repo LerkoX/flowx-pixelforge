@@ -4668,3 +4668,40 @@ docker 路径 e2e 本轮做不了；3 个批量节点是 local-only（读写本�
 **环境副作用（如实记录）**：IC-Light e2e 需 4.07GB，触发 LRU 淘汰了并行工作的 `catvton:mix`
 （3.6GB，空闲无租约）；补跑结束后已 `model.unload` 掉 `iclight:fc` 并 `/gc`，把显存交还。
 服务侧现状：108 算子 / 46 插件文件（含 `vton_158e3d1a3f7a.py`、`vton_3d94ed9961db.py`，**未触碰**）。
+
+### 52.7 Part A 落地（重建镜像 + 重启服务；活体验证 12/12）
+
+**部署方式取证**：容器是**手工 `docker run`**（无 `com.docker.compose.*` 标签），`restart=always`，
+配置从 `docker inspect` 完整捕获后**原样重建**：`-e INFERENCE_TOKEN / HF_HOME=/hf-cache /
+MAX_RESIDENT_MODELS=3 / OFFLOAD_MODE=none / PORT=8100 / OBJECT_TTL_SECONDS=14400 / MODELS_DIR=/models`，
+挂载 `input / loras / models / videos / hf-cache`（宿主 `D:/flowx-data/*`），`-p 8100:8100`、`--gpus all`。
+
+**镜像**：`flowx-inference-server:pascal` 重建为含 Part A 的镜像（Dockerfile.pascal，基础层全命中缓存，
+约 1 分钟）。保留两个可回滚标签：`:pascal-prePartA`（原始，= 42 小时前的 `:pascal-b2`）、
+`:pascal-partA`（第一版修复，未含 pyc 修复）。
+
+**重启后核验**：`/health` ok、**108 算子**、46 个插件文件、`GET /admin/plugins` 每条含 `missing_file`
+（= 新代码特征）、无幽灵条目、**并行工作的 `vton.catvton_load/tryon`（两个版本 @158e3d1a3f7a /
+@3bb90bb5788d）完好**。
+
+**活体验证 `~/.flowx-tmp/live_test_partA.py`：PASSED 12 / FAILED 0**（只用自建 `selftest.*` 算子，零风险）
+- A1 幽灵：上传 A → **从宿主 FS 直接删掉 A 的文件**（不走 API，复现真实事故）⇒ A 条目 `missing_file: true`、
+  幽灵列表点名 A ⇒ 上传声明同一算子的 B：**未 409**、响应 `adopted_stale` 点名、幽灵条目被清理 ✓
+- A2 + pyc：重传 B 改声明另一算子 ⇒ `ops` 是新算子、`stale_removed` 摘掉 ghost、`/ops` 里 ghost 消失 ✓
+- 清理：DELETE 后算子数回基线 108、无幽灵 ✓
+
+**活体验证抓出的真 bug（本轮最有价值的发现）：插件热更新的 `.pyc` 陷阱**
+- 现象：同文件名重传时，若新内容与旧内容**字节数相同**且写入落在**同一秒**，CPython 的 `.pyc`
+  有效性校验（mtime + size）判定缓存仍有效 ⇒ `load_plugin` **执行旧字节码** ⇒ 插件热更新**静默失效**
+  （声明的算子名还是旧的 ⇒ 改名/改实现后重传看起来"没生效"）。
+- 受控复现（确定性）：两份 **145 字节**源码紧挨着写入，mtime 完全相同（`1791862948.169`）⇒
+  第二次 `load_plugin` 仍返回 `probe.one@aaaaaaaaaaaa`（应为 `probe.two@bbbbbbbbbbbb`）。
+- 修法：新增 `plugins.drop_bytecode_cache(path)` —— 缓存文件名用的是**文件 stem**
+  （`<stem>.cpython-310.pyc`，与模块名无关），故按 stem 前缀匹配删除；在 `exec_module` **之前**调用。
+- 回归：`tests/test_plugin_registry.py` 加"同名 + 等长 + 同秒重传"断言，并做**负例验证**
+  （临时摘掉修复 ⇒ 该断言必失败：`probe.one -> probe.one`）⇒ 单测 **18/18**。
+- 纪律增补：**"改了必须活体验证"** —— 这个陷阱此前只作为"测试现象"记录，这次是在**生产热更新路径**上
+  被活体验证抓出来的。凡改插件/热加载路径，必须跑一次"同名重传"活体检查。
+
+**运维注记（回滚用）**：回滚 = `docker rm -f flowx-inference-server` 后用同一串参数
+（见上方 env/挂载清单）`docker run` 镜像 `flowx-inference-server:pascal-prePartA`。
