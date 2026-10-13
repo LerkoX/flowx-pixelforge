@@ -4844,3 +4844,110 @@ MAX_RESIDENT_MODELS=3 / OFFLOAD_MODE=none / PORT=8100 / OBJECT_TTL_SECONDS=14400
   不需要重启。**当时判定：不值得，不做。**
 
 **重开条件**（写入 dev-plan 第四节）：出现**真实**的实时/批量变体需求，**且**已换到 fp8 档显卡。
+
+## 五十四、P1-7：服务端算子契约一致性门禁（gate O，2026-10-13）
+
+> dev-plan P1 第 7 项落地。节点侧早有 gate M（flowx.json ↔ main.py）与 gate N（`main()` 桩冒烟），
+> **服务端算子**两条都没有；本节补上，并把 24 个"遗留自带 server_op.py"一并纳入。
+
+### 54.1 要挡的五类漂移（先定口径，再写代码）
+
+| # | 漂移 | 真机后果 |
+| --- | --- | --- |
+| E1 | 声明的 input 端口不在算子函数签名上 | 引擎按 `op.inputs` 名字传 kwarg ⇒ `TypeError: unexpected keyword argument` |
+| E2 | 函数**必填参数**（无默认值）没进声明 | 引擎只按 `op.inputs` 组装 kwarg ⇒ `TypeError: missing required argument` |
+| E3 | **节点传了声明里没有的键** | `resolve_from_ids/resolve_in_process` **只遍历 `op.inputs`** ⇒ 参数被**静默丢弃**：界面能填、流程 success、值没生效（最阴的一类，任何门禁都还没覆盖它） |
+| E4 | 节点漏传函数必填参数 | `TypeError: missing argument` |
+| E5 | 声明的 output 端口不在函数 `return` 字典里 | 运行时 `did not return output '<port>'` |
+| E6 | 同一算子名出现在两个服务端算子文件里 | 上传必 409（跨文件重名，历史事故形态） |
+
+### 54.2 为什么是「静态比对」而不是「import 后桩冒烟」
+
+原计划写的是"桩冒烟"，读完代码后改为 AST 静态比对，**理由是取证出来的**：
+
+| 障碍 | 证据 |
+| --- | --- |
+| 5 个族**顶层 `import torch`** | `cond_latent` / `flux` / `instantid` / `ipadapter` / `vton` |
+| 顶层 `from app import …` | `video_sample`（`from app import execution, ops, preview`）、`ksampler` 等 |
+| 本机（手机 Termux）无 torch、无服务端 `app` 包 | 桩冒烟只能覆盖少数文件，且"跑不起来"会被误当 SKIP 放行 |
+
+而**声明 ↔ 签名 ↔ 节点实参的对齐不需要执行**：AST 足够、零依赖、100% 可复现。
+代价（如实记录）：只查契约对齐，不查行为正确性（那是真机验收的事）。
+
+### 54.3 覆盖面（两类来源，都查）
+
+| 来源 | 文件 | 数量 |
+| --- | --- | --- |
+| 族文件（sync-common 分发） | `nodes/_common/server_ops/*.py` | 15 族 / 51 算子 / 51 成员节点 |
+| **遗留自带**（此前**无任何门禁**） | `<节点>/server_op.py`（未纳入 `OP_FAMILIES`） | 24 文件 / 24 算子 |
+
+遗留那 24 个是 `check-ops.py` 的盲区（它只读 `sync-common.py` 的 `OP_FAMILIES`）——
+本次顺带覆盖：`checkpoint-loader` / `clip-text-encode` / `controlnet-{apply,load}` / `detail-refine` /
+`embedding-load` / `empty-latent` / `flux-mask-refine` / `flux-redux-apply` / `image-upscale` /
+`ksampler` / `load-image` / `lora-loader` / `model-unload` / `motion-loader` / `sd3-*`(5) /
+`vae-{decode,decode-video,encode,load}`。
+
+**解析的形态**（都是仓里真实存在的写法，历史踩坑决定必须两种都认）：
+- 注册：`@registry.register("op", inputs={…})` 装饰器位置 **或** `registry.register(…)(fn)` 手动应用
+  （`vton.py` docstring 记过"写成平铺一行 ⇒ 注册表一个算子都没有"，exec 707 事故）；
+- 节点调用：`run_op("op", {…})` / `call_op(url, "op", {…})` / 老节点 `submit_job(url, {"name": OP, "inputs": inputs})`；
+- 实参取数：字典字面量 / 局部变量 + 条件追加（`iclight`、`tiled-upscale-apply` 写法）/ payload 内嵌 `inputs`；
+- 算子名：字面量 **或** 模块级常量（`OP = "sd.checkpoint.load"`）。
+
+**不猜**：`inputs=` 动态构造、`args[k]` 动态键、算子名来自条件分支、通用节点（`inference-op`）……
+一律 WARN 不 FAIL —— 不假装查过，也不误杀。E5 只在"函数所有 `return` 都是字典字面量"时判定。
+
+### 54.4 验收数据（本机，2026-10-13）
+
+**门禁自检 `--selftest`：11/11**（断言的是**具体错误码**，不是"rc≠0"——否则别的检查碰巧报错会让负例假通过）
+
+| 负例 | 期望 | 实得 |
+| --- | --- | --- |
+| E1 声明了签名没有的端口 | E1 | E1 |
+| E2 必填参数没进声明 | E2 | E2 |
+| E5 声明 output 但 return 里没有 | E5 | E5 |
+| E3 节点多传（静默丢弃） | E3 | E3 |
+| E4 节点漏传必填 | E4 | E4 |
+| E6 两个文件抢同一算子名 | E6 | E6 |
+| PASS 全对（装饰器形态 / 局部变量+条件追加 / 遗留 submit_job+OP 常量） | 全绿 | 全绿 ×3 |
+| WARN 动态键不 FAIL（不猜） | 全绿 | 全绿 |
+
+**真仓库基线**：
+```
+服务端算子契约一致性（gate O）：39 个算子文件（族 15 + 遗留 24）/ 75 算子 / 104 节点
+（静态校验 71 个调用点；E5 可判定 45/75），FAIL 0 / WARN 3
+```
+
+**真仓库负例验证**（纪律 4：门禁必须真的抓得住，改坏即失败，还原即绿）
+
+| 改坏什么 | 结果 |
+| --- | --- |
+| `catvton-tryon/main.py`：`"person"` → `"person_typo"` | **E3 + E4 双命中**（并指出参数会被静默丢弃） |
+| `_common/server_ops/vton.py`：声明里加一个签名没有的端口 `nope` | E1 命中 |
+| `_common/server_ops/colorize.py`：`colorize.load` 声明 output `ghost` | E5 命中 |
+| 还原后 | FAIL 0 / WARN 3，退出码 0 |
+
+**集成**：挂进 `nodes/check-bundle.py`（gate O，紧随 gate J/check-ops 之后）。
+改坏 `vton.py` 后 `python3 nodes/check-bundle.py --quiet` ⇒ 退出码 1，问题清单里带 gate O 的 E1 行；
+还原后退出码 0。
+
+### 54.5 覆盖边界（如实记录，不装作全覆盖）
+
+1. **3 处 WARN**（4% 调用点）——都不是能静态判定的东西：
+   - `checkpoint-loader`：`for knob in ("dtype","offload","use_t5"): inputs[knob] = v`（动态键）；
+   - `inference-op`：通用算子节点的算子名来自参数（**设计如此**）；
+   - `video-gen`：算子名来自条件分支。
+2. **E5 只判 45/75**：其余算子的 `return` 是变量/转发调用（如 `sd.sample` 直接 `return ops.sample(...)`），
+   不猜。
+3. **不覆盖 `app/ops.py` 的核心原语函数签名**：遗留算子常把实现委托给 `ops.sample` / `ops.checkpoint_load`
+   等核心函数，若"声明的 inputs ↔ 核心函数签名"漂移，本门禁看不见（本门禁只看注册函数的签名）。
+   要用时再立项（正例：`ksampler.server_op._op_sample(**声明)` 与 `app.ops.sample` 的对齐）。
+4. **不查行为正确性**：契约对齐 ≠ 算得对，真机验收仍然必需。
+
+### 54.6 纪律增补
+
+- **改服务端算子**（族文件 `_common/server_ops/*.py` 或遗留 `<节点>/server_op.py`）的
+  `inputs`/`outputs`/函数签名 **或** 改节点传参 → 提交前跑
+  `python3 nodes/_tools/check-op-signatures.py`（或直接跑 `check-bundle.py`）。
+- 新增算子族的**注册调用必须挂在函数上**（装饰器位置或 `(…)(fn)`）——本门禁会以 E? 报出来，
+  不再依赖真机 `unknown op` 才发现。
