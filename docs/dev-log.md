@@ -5479,3 +5479,27 @@ Q4 GGUF 逐层反量化开销。**优化候选**（待拍板）：`guide_size` 7
   （租约行 727 仍存在但**不持有任何常驻**，30 分钟 TTL 后自动消失）。
 - 临时工作流（`p0-1-flux-txt2img-512-real-e2e` / stub 取消验证用）已删；桩与临时 YAML 均不在仓库
   （桩工具本体 `nodes/_tools/stub-inference.py` 已入库）。
+
+### 58.10 镜像 tag 与 Studio 快照：一个必须写下来的顺序纪律
+
+本轮踩了两次同类坑，合起来是一条硬纪律：
+
+**正确顺序**（改节点 → 重导）必须插入镜像这一步，且**最后再全量重导一次**：
+
+```
+改节点代码/参数 → bump nodes/BUNDLE_VERSION → python3 nodes/sync-flowx-json.py
+  → bash nodes/build-image.sh（+ 用 docker cp 验镜像内文件）
+  → python3 nodes/_tools/reimport-nodes.py          # 全量！不只是改过的节点
+```
+
+为什么"全量"：**镜像 tag 写在每个节点的 `flowx.json` 里**（`image: ...:v<BUNDLE_VERSION>`），
+`sync-flowx-json.py` 会改**99 个** flowx.json ⇒ 这 99 份快照都与仓库不一致，必须一起重导，
+否则 docker 执行器按快照里的旧 tag 拉**旧镜像**（本轮实测：exec 721 容器里跑的是
+`call_op` 旧代码，traceback 直接指出来；exec 728 则暴露 99 个节点快照仍指向 v1.17.0）。
+
+**其它两个本轮踩到的坑**（写测试时要注意）：
+- **对象仓库有 TTL**：临时工作流别硬编码历史对象 id（本轮 exec 728 用小时前的
+  `vae`/`image` 句柄 → `object ... not found (expired or never created)`）；要么现取句柄
+  （`flux.vae_load` + `POST /images`），要么用 `load-image` 节点现传。
+- **Studio 限流 100 req/min**：重导要节流（`reimport-nodes.py` 已内置 1.25s）；
+  重导后立刻翻页核对也会 429，核对脚本要带退避。
