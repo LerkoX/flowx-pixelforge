@@ -5711,3 +5711,36 @@ emit_preview(f"{pbase}/preview/{jid}", 0.0, tok, base=pbase, job_id=jid)  # 取�
 - `nodes/_tools/` 新增：`check-pipeline.py`、`check-workflow-noderefs.py`（Studio 侧 nodeRef
   校验/修复）、`gen-instantid-sweep.py`、`stub-inference.py`、`reimport-nodes.py --check`；
 - `nodes/README.md` 的"改完必跑"清单加入 pipeline 校验与 nodeRef 校验。
+
+### 61.4 `ecom-model-swap` 模板：混合执行器的**三段地址**约定（+ 一次被外部故障打断的验收）
+
+模板首跑（exec 746）在**引擎展开阶段**就失败——`flux-clip-encode` 未声明 `service_url_host`
+而模板给它传了。这正是新加的 `_tools/check-pipeline.py`（gate Q）要拦的错误类型（已拦下并修正）。
+
+第二跑（exec 747）失败于 `Ensure`：它跑 **local** 执行器却拿到了
+`http://172.17.0.1:8100`（容器视角地址）⇒ 手机侧不可达、60s 超时报 "service not ready"。
+**根因是模板的地址约定写错了**，正确写法（与已验收的 `ecom-bg-replace.yaml` 一致）：
+
+| Param | 给谁用 | 值 |
+| --- | --- | --- |
+| `service_url` | **local** 节点（Ensure / mask-paint / mask-grow / mask-feather / load-image / save-image / model-unload） | Studio/手机可达地址（隧道或局域网） |
+| `service_url_internal` | **docker** 节点（unet/clip/vae load、clip-encode、redux-apply、mask-refine） | 容器视角的宿主机 `http://172.17.0.1:8100` |
+| `service_url_host` | docker 节点的**画布预览/取消兜底**（`host_base`） | Studio/手机可达地址 |
+
+**教训**：混合执行器流水线里"一个 service_url 通吃"必然错——local 与 docker 看到的网络
+视角不同；模板必须显式给三段。（`check-pipeline.py` 能查参数名是否声明，但查不出"值是否
+该用另一个地址"——那属于语义，只能靠约定 + 这份文档。）
+
+第三跑（exec 748）已修正地址：`Ensure` 通过、三个 loader 提交 job、`MaskPaint` 出蒙版
+（768×1280、覆盖 52.1%，与 §59 验收过的 wf113 基线**逐项一致**），随后**推理服务与远端
+docker daemon 同时失联**（隧道全部 000 超时、docker API 500、`/health` 空响应）——
+外部故障，本轮无法远程修复。故 `ecom-model-swap` 的**完整真机验收待宿主恢复后补跑**
+（模板本身已过 gate Q 的静态校验；其节点链与 §59 已验收的 wf113 完全相同）。
+
+### 61.5 本轮遗留（等宿主恢复 / 待拍板）
+
+1. **`ecom-model-swap` 真机 e2e**（模板 wf169/170 + 快档 wf171）：等 GPU 宿主 + 隧道恢复后跑
+   （约 45–60 分钟：冷加载 + 2 步 mask-refine）。
+2. **扫描类工作流容错**：InstantID 扫参里 2 个 `Score*` 节点失败把整跑判 failed（4 张图已产出）
+   ⇒ 打分节点应"可选/不致命"（可加 `optional` 语义或在生成器里改成不阻塞落盘）。
+3. **`flux-mask-refine` 单步 10–25min 的瓶颈定位**（§60.8：需服务端 per-step 计时）。

@@ -131,12 +131,17 @@
 11. **InstantID 调参扫描（跑批中）** —— 生成器 `nodes/_tools/gen-instantid-sweep.py`
    （weight × cn_strength 网格 + 逐点 face-similarity 自动打分；默认 2×2 快档），
    真机跑 exec 743 进行中，报告待落 dev-log §61。
-12. **`ecom-model-swap` 模板** —— `pipeline/ecom-model-swap.yaml`（docker）+ `-local.yaml`，
+12. **`ecom-model-swap` 模板**（静态校验过；真机 e2e 待宿主恢复，见 dev-log §61.4） —— `pipeline/ecom-model-swap.yaml`（docker）+ `-local.yaml`，
    13 节点 Param 驱动（模特图/参考衣/笔画/提示词/seed/guide_size）；结构验收 exec 见 §61。
 
 13. **版本升级的 nodeRef 安全替换**（新）—— 已沉淀 `_tools/check-workflow-noderefs.py`
    （校验每个 name@version 真实存在，`--check` 只报不改）。后续所有批量升级脚本一律
    带前缀边界正则或事后校验（§60.11 实测误伤 4 处）。
+
+14. **GPU 宿主观测**（新，2026-10-13 事故）—— 推理服务与 docker daemon 同时失联
+   （隧道 000 / docker API 500 / `/health` 空），导致模板验收中断。宿主不在本机、无 SSH，
+   只能等恢复。可做：把"宿主健康"纳入例行巡检（`vram-ops action=status` + docker ping），
+   失败即早停流水线，别让节点在 5 分钟窗口里空转。
 
 ### P2 / 大改：独立立项评估
 8. **张量级搬移（大模型线前置）** —— 加载节点支持"显存驻留上限，超出流式供给"，含磁盘流式兜底；

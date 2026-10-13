@@ -1,13 +1,16 @@
 Name: ecom-model-swap-local
 Description: >-
-  G11 电商模板⑤（local 变体：全部节点本机执行，需要本机到推理服务的隧道）：模特换装（FLUX 蒙版局部重绘 + Redux 参考衣注入）。输入＝模特图 + 服装参考图 +
+  G11 电商模板⑤（local 变体：全部节点本机执行）：模特换装（FLUX 蒙版局部重绘 + Redux 参考衣注入）。输入＝模特图 + 服装参考图 +
   蒙版笔画（mask-paint 手绘或外部生成的 strokes JSON），输出＝模特穿着该服装的同尺寸成图，
-  蒙版区外**逐像素不变**（无缝贴回）。与 CatVTON 路线（ecom 模板④）的分工：本路线走 FLUX
+  蒙版区外**逐像素不变**（无缝贴回）。**地址约定**（混合执行器必读）：local 节点用
+  `Param.service_url`（Studio/手机可达），docker 节点用 `Param.service_url_internal`
+  （容器视角的宿主机），画布预览用 `Param.service_url_host`。与 CatVTON 路线（ecom 模板④）的分工：本路线走 FLUX
   img2img 局部重绘，细节保留更好（dev-log §59.2 实测清晰度保留 84% vs 49%），但单节点耗时
   与画布面积强相关（§59.3：guide_size 768 时约 2.8h，512 约 X）。默认 docker 执行器。
 Param:
-  service_url: http://1bba08c4.r7.cpolar.cn
-  service_url_host: http://1bba08c4.r7.cpolar.cn
+  service_url: http://1bba08c4.r7.cpolar.cn         # local 节点用（Studio 可达；手机不是 docker 宿主）
+  service_url_internal: http://172.17.0.1:8100      # docker 节点用（容器视角的宿主机）
+  service_url_host: http://1bba08c4.r7.cpolar.cn    # 画布预览帧/取消兜底中转（Studio 可达）
   service_token: 30e494999da13134808ee280aea6dffd
   model_path: ~/flowx-output/flux-hanfu-beauty_20260929_103417.png
   garment_path: ~/flowx-output/pink_dress_20260921_105810.png
