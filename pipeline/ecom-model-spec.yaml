@@ -1,8 +1,8 @@
 Name: ecom-model-spec
 Description: B4/S2 G11 电商模板③：模特图规格化 —— 人脸修复(GFPGAN) / 裁 512² 中心 → RealESRGAN 4x → 水印 → 落盘（GFPGAN 吃的是检测后对齐的人脸块，输入整图即可；裁剪只服务放大分支）
 Param:
-  service_url: "http://1bba08c4.r7.cpolar.cn"
-  service_url_host: "http://1bba08c4.r7.cpolar.cn"
+  service_url: "http://749a0d06.r7.cpolar.cn"
+  service_url_host: "http://749a0d06.r7.cpolar.cn"
   service_token: "30e494999da13134808ee280aea6dffd"
   image_path: "~/flowx-e2e-out/face_in1_face_sharp_20261011_194659.png"
 Graph: |

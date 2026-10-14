@@ -8,9 +8,9 @@ Description: >-
   img2img 局部重绘，细节保留更好（dev-log §59.2 实测清晰度保留 84% vs 49%），但单节点耗时
   与画布面积强相关（§59.3：guide_size 768 时约 2.8h，512 约 X）。默认 docker 执行器。
 Param:
-  service_url: http://1bba08c4.r7.cpolar.cn         # local 节点用（Studio 可达；手机不是 docker 宿主）
+  service_url: http://749a0d06.r7.cpolar.cn         # local 节点用（Studio 可达；手机不是 docker 宿主）
   service_url_internal: http://172.17.0.1:8100      # docker 节点用（容器视角的宿主机）
-  service_url_host: http://1bba08c4.r7.cpolar.cn    # 画布预览帧/取消兜底中转（Studio 可达）
+  service_url_host: http://749a0d06.r7.cpolar.cn    # 画布预览帧/取消兜底中转（Studio 可达）
   service_token: 30e494999da13134808ee280aea6dffd
   model_path: ~/flowx-output/flux-hanfu-beauty_20260929_103417.png
   garment_path: ~/flowx-output/pink_dress_20260921_105810.png

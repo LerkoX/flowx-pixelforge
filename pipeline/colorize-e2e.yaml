@@ -2,7 +2,7 @@ Name: colorize-e2e
 Description: B4/S1 G8 DDColor 上色 e2e（docker 执行器跑推理 + 手机侧落盘）：验证执行器无关（与 local 版逐字节一致）
 Param:
   service_url: "http://172.17.0.1:8100"
-  service_url_local: "http://1bba08c4.r7.cpolar.cn"
+  service_url_local: "http://749a0d06.r7.cpolar.cn"
   service_token: "30e494999da13134808ee280aea6dffd"
   gray_path: "~/flowx-input/gray_person.png"
   faded_path: "~/flowx-input/faded.png"

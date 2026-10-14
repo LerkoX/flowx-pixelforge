@@ -5824,3 +5824,42 @@ gate Q 静态校验通过；其节点链与已完整验收的 wf113（§59，3 �
 **结论**：模板链路本身已在 exec 760 中被真机走通到 `ReduxApply`（含三段地址约定的 docker/local
 混合），只剩 MaskRefine 之后的两步；**唯一未完成的是一次完整的 success 收尾**，等网站隧道稳定后
 一条命令即可补跑（`pipeline/ecom-model-swap-local.yaml` 的 2 步快档，约 40~60 分钟）。
+
+### 61.9 ✅ `ecom-model-swap` 模板真机验收通过（exec 762 success，13 节点全绿）
+
+新网站隧道（`749a0d06.r7.cpolar.cn`，§61.10）恢复后一次跑通，**模型热态**下总耗时 **3600s**：
+
+| 节点（执行器） | 耗时 / 结果 |
+| --- | --- |
+| Ensure（local） | ~1s；显存闸门通过 |
+| UnetLoad / ClipLoad / VaeLoad（**docker**） | **1.0s / 0.9s / 0.5s**（全部命中常驻缓存） |
+| GarmentLoad（local）/ MaskPaint（local） | 上传 + 手绘蒙版 `768×1280 覆盖 52.1%`（与 §59 基线逐项一致） |
+| MaskGrow / MaskFeather（local） | radius 12 / 8 |
+| Encode（**docker**） | T5 热态编码 → COND |
+| ReduxApply（**docker**） | 101.5s（SigLIP + Redux 适配器注入参考衣，strength 0.9） |
+| **MaskRefine（docker）** | **3177.1s**（2 步快档；第 1 步 ~45–50min、第 2 步 ~10min + 合成解码） |
+| Save（local） | `~/flowx-output/model_swap_local_20261014_183645.png`（918343B） |
+| Unload（local） | `resident=(empty)` —— 收尾干净、无租约残留 |
+
+**内容判据（不靠状态全绿）**：
+1. **逐字节**：本地落盘 sha256 == 服务端对象 `4c07649126fe44fcada084bc49f910ad`
+   （`33669c5e494a8d67c2bc…`，918343B，**像素最大差 0**）；
+2. 尺寸 768×1280 与原图一致；ASCII 对照显示**头部/背景逐格一致**、只有躯干服装区变化
+   （全图平均差 `[51.2,29.3,27.3]`）⇒ 局部重绘无缝贴回；
+3. 清晰度（边缘方差）**998.8**（2 步快档；对照 8 步版 §59 的 1995）——**质量模式以 8 步为准**，
+   本次 2 步只作**结构验收**（省 GPU 时间），路线质量已由 exec 727 验收。
+
+**同时验证**：三段地址约定（local 走隧道 / docker 走 `172.17.0.1:8100` / 画布中转走
+`service_url_host`）在**混合执行器**下真机成立 —— 13 个节点里 6 个 docker、7 个 local，全部一次通过。
+
+### 61.10 运维：隧道地址变更（1bba08c4 → 749a0d06）的批量替换
+
+cpolar 网站隧道重建后域名变更（`1bba08c4.r7.cpolar.cn` → **`749a0d06.r7.cpolar.cn`**，docker 隧道
+`5.tcp.cpolar.top:11745` 未变）。同步更新：
+- 仓库 `pipeline/*.yaml` **21 个文件**（Param 的 `service_url`/`service_url_host`）+ 生成器默认值；
+- Studio **56 条工作流**（同名替换，含各流水线的 Param 段）；
+- 辅助脚本（`wait_job.py` 等）。
+
+**教训（已并入 README 的隧道运维条目）**：隧道地址是**环境变量级**的配置，散落在
+①仓库 pipeline 的 Param、②Studio 工作流快照、③辅助脚本三处；换隧道后要**三处齐步替换**，
+否则会出现"节点连得上但画布预览/取消兜底连不上"这类半通状态。

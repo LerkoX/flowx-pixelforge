@@ -1,8 +1,8 @@
 Name: colorize-variants-e2e
 Description: B4/S1 G8 变体对照 e2e：同一张褪色图过 4 个 DDColor 变体（modelscope/paper/artistic/paper_tiny）→ 落盘 4 份结果，验证 sha 互异与各自确定性
 Param:
-  service_url: "http://1bba08c4.r7.cpolar.cn"
-  service_url_host: "http://1bba08c4.r7.cpolar.cn"
+  service_url: "http://749a0d06.r7.cpolar.cn"
+  service_url_host: "http://749a0d06.r7.cpolar.cn"
   service_token: "30e494999da13134808ee280aea6dffd"
   image_path: "~/flowx-input/faded.png"
 Graph: |

@@ -131,15 +131,16 @@
 11. **InstantID 调参扫描（跑批中）** —— 生成器 `nodes/_tools/gen-instantid-sweep.py`
    （weight × cn_strength 网格 + 逐点 face-similarity 自动打分；默认 2×2 快档），
    真机跑 exec 743 进行中，报告待落 dev-log §61。
-12. **`ecom-model-swap` 模板**（静态校验过 + exec 760 真机走到 ReduxApply 全绿；**只差一次完整
-    success 收尾**，卡在网站隧道不稳定，见 dev-log §61.8。补跑：local 变体 2 步快档 ≈ 40~60 分钟） —— `pipeline/ecom-model-swap.yaml`（docker）+ `-local.yaml`，
+12. ~~**`ecom-model-swap` 模板**~~ ✅（2026-10-14，dev-log §61.9）：**exec 762 success**，13 节点
+    全绿（6 docker + 7 local 混合执行器一次通过）；逐字节判定落盘内容 == 服务端对象；
+    Unload 收尾清空常驻。2 步快档结构验收（3600s），质量模式以 8 步为准（§59 已验收）。 —— `pipeline/ecom-model-swap.yaml`（docker）+ `-local.yaml`，
    13 节点 Param 驱动（模特图/参考衣/笔画/提示词/seed/guide_size）；结构验收 exec 见 §61。
 
 13. **版本升级的 nodeRef 安全替换**（新）—— 已沉淀 `_tools/check-workflow-noderefs.py`
    （校验每个 name@version 真实存在，`--check` 只报不改）。后续所有批量升级脚本一律
    带前缀边界正则或事后校验（§60.11 实测误伤 4 处）。
 
-15. **docker 节点镜像待重建**（新）—— `flowx_client` 的"隧道错误页→瞬态"修复在**本地节点**已随快照
+15. **docker 节点镜像待重建**（§61.7 的 client 修复 + §61.6 的 loader 超时进镜像）（新）—— `flowx_client` 的"隧道错误页→瞬态"修复在**本地节点**已随快照
    生效，但 **docker 节点**要等下一次 `BUNDLE_VERSION` 重建才带上（1.19.3 镜像内仍是旧逻辑）。
 16. **GPU 宿主观测**（新，2026-10-13 事故）—— 推理服务与 docker daemon 同时失联
    （隧道 000 / docker API 500 / `/health` 空），导致模板验收中断。宿主不在本机、无 SSH，

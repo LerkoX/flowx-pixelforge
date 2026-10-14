@@ -1,8 +1,8 @@
 Name: batch-roundtrip
 Description: B5/52.2 G11 批量②：3 张同尺寸图 → 批量另存（逐字节核对）+ 1:1 拼图（格内逐字节核对）
 Param:
-  service_url: "http://1bba08c4.r7.cpolar.cn"
-  service_url_host: "http://1bba08c4.r7.cpolar.cn"
+  service_url: "http://749a0d06.r7.cpolar.cn"
+  service_url_host: "http://749a0d06.r7.cpolar.cn"
   service_token: "30e494999da13134808ee280aea6dffd"
   corpus_dir: "~/flowx-input"
   trio: "faded.png;gray_person.png;old_yellow.png"
