@@ -31,7 +31,7 @@ Nodes:
   LoadCheckpoint:
     name: Checkpoint加载
     config:
-      nodeRef: checkpoint-loader@1.3.0
+      nodeRef: checkpoint-loader@1.4.0
       executor: local
       params:
         service_url: "{{ Ensure.service_url }}"

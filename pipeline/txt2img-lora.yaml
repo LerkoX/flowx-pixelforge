@@ -29,7 +29,7 @@ Nodes:
   LoadCheckpoint:
     name: Checkpoint加载
     config:
-      nodeRef: checkpoint-loader@1.3.0
+      nodeRef: checkpoint-loader@1.4.0
       params:
         service_url: "{{ Ensure.service_url }}"
         service_token: "{{ Param.service_token }}"
@@ -37,7 +37,7 @@ Nodes:
   LoraLoader:
     name: LoRA加载
     config:
-      nodeRef: lora-loader@1.3.0
+      nodeRef: lora-loader@1.4.0
       params:
         service_url: "{{ Ensure.service_url }}"
         service_token: "{{ Param.service_token }}"

@@ -23,7 +23,7 @@ Nodes:
   MotionLoad:
     name: Motion组合
     config:
-      nodeRef: motion-loader@1.2.0
+      nodeRef: motion-loader@1.3.0
       executor: local
       params:
         service_url: "{{ Ensure.service_url }}"

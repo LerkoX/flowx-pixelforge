@@ -59,7 +59,7 @@ Nodes:
   CKPT:
     name: Checkpoint 加载（容器内）
     config:
-      nodeRef: checkpoint-loader@1.3.0
+      nodeRef: checkpoint-loader@1.4.0
       executor: local
       params:
         service_url: "{{ Param.service_url_local }}"
