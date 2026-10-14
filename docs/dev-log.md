@@ -5744,3 +5744,33 @@ docker daemon 同时失联**（隧道全部 000 超时、docker API 500、`/heal
 2. **扫描类工作流容错**：InstantID 扫参里 2 个 `Score*` 节点失败把整跑判 failed（4 张图已产出）
    ⇒ 打分节点应"可选/不致命"（可加 `optional` 语义或在生成器里改成不阻塞落盘）。
 3. **`flux-mask-refine` 单步 10–25min 的瓶颈定位**（§60.8：需服务端 per-step 计时）。
+
+### 61.6 真机第二次打断：node `timeout` 缺省把 82 分钟的节点杀成 failed
+
+`ecom-model-swap` 快档（2 步）第二次真跑（exec 753）走到 `MaskRefine` 失败，但 **job 是 done**：
+
+```
+[MaskRefine] [job ebda962d] running 1/2
+[MaskRefine] [job ebda962d] done  step 1/1  4932s   ← 远程任务成功
+execution_nodes: MaskRefine = failed                ← 节点被判失败
+```
+
+**真因**：`flux-mask-refine` 从建包起就**没有声明 node `timeout`**（gate P 的告警项，
+"历史节点缺省走默认"）⇒ Studio 用默认上限（约 1 小时）把节点进程杀了；而不久前刚修好的
+"取消兜底"此时帮不上忙（这是超时杀，不是取消）。前 10 个节点全部 success、蒙版 52.1% 与基线
+逐项一致——**唯一的问题就是这个缺省值**。
+
+**修（gate P 从"告警"升级为"硬校验"）**：
+
+| 节点 | 改动 |
+| --- | --- |
+| `flux-mask-refine` 1.0.0→1.1.0 | 补 `timeout: 15000`（> `job_timeout` 14400） |
+| `mask-paint` 1.4.0→1.5.0 | 补 `timeout: 1800`（同为缺省历史节点） |
+| `lora-loader` 1.2.0→1.3.0 | **`timeout: 600` < `job_timeout: 1800`** —— 新校验当场抓到的存量隐患，改 2100 |
+
+gate P 新规则：**凡声明了 `job_timeout` 参数，就必须声明 `timeout` 且 `timeout ≥ job_timeout`**
+（否则节点会先被自己的超时杀掉）。这条与 §58.5/§60.11 的"排队预算"是一体两面：
+**任务超时要盖住排队，节点超时要盖住任务超时**。
+
+**教训（值得写进 README）**：gate 的"告警项"就是"未来的故障项"——本轮两次真机事故
+（§58.5 的 `job_timeout` 600、§61.6 的 `timeout` 缺省）都出在"当时被归为约定/告警"的地方。
