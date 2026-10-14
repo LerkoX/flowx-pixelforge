@@ -5774,3 +5774,53 @@ gate P 新规则：**凡声明了 `job_timeout` 参数，就必须声明 `timeou
 
 **教训（值得写进 README）**：gate 的"告警项"就是"未来的故障项"——本轮两次真机事故
 （§58.5 的 `job_timeout` 600、§61.6 的 `timeout` 缺省）都出在"当时被归为约定/告警"的地方。
+
+### 61.7 第三个真缺陷：隧道错误页被误判成"job 不存在"（exec 760 的 60 分钟白跑）
+
+**现象**：`ecom-model-swap` 快档跑到 `MaskRefine`（第 1 步已过，job 41 分钟）时隧道抖了一下，
+节点立即失败：
+
+```
+RuntimeError: GET https://.../jobs/b168a19e... -> HTTP 404: <!DOCTYPE html> ... cpolar.com ...
+```
+
+**根因**：`wait_job` 把 "HTTP 4xx" 一律视为"job 真不存在、重试无意义"而**立即致命**；但 cpolar
+在隧道断开时会**对任意路径回 404 的 HTML 错误页**（不是服务端的 JSON 错误体）。于是一次
+1 分钟的隧道抖动杀掉了一个 60 分钟的任务。
+
+**修**（`_common/flowx_client.py`，3 处；已 sync 到全部 111 个节点并重导）：
+
+```python
+# _req：HTTP 错误体不是 JSON ⇒ 隧道/代理错误页 ⇒ 标成"非 JSON 响应，瞬态可重试"
+if body.lstrip()[:1] not in ("{", "["):
+    raise RuntimeError(f"{method} {url} -> HTTP {e.code}（非 JSON 响应，疑似隧道/代理错误页，瞬态可重试）...")
+# call_op / wait_job：只有**服务端 JSON** 4xx 才立即失败；"非 JSON 响应"走瞬态重试分支
+if "-> HTTP 4" in msg and "非 JSON 响应" not in msg: raise
+```
+
+**验收**（两个方向都测）：
+- 正例：本机桩前 3 次回 404 HTML、第 4 次回正常结果 ⇒ `wait_job` 重试后成功拿到结果（PASS）；
+- 负例：服务端回 `404 {"detail": "job not found"}`（JSON）⇒ **立即失败、不重试**（PASS，0.0s）。
+
+**同一批的另一条实测数据**：`exec 760` 里三个 loader 各 **416~417s**（宿主的 page cache 在前一次
+加载后变热），`ReduxApply` 94.4s —— 与 §61.6 冷读 >31 分钟形成对照，进一步说明"loader 超时必须
+按**冷读**留预算"（已按 3600s 修）。
+
+### 61.8 `ecom-model-swap` 模板：验证进度（被基础设施反复打断）
+
+模板本身已交付（`pipeline/ecom-model-swap.yaml` docker + `-local.yaml`，Studio 侧 wf169/170），
+gate Q 静态校验通过；其节点链与已完整验收的 wf113（§59，3 小时整跑 success）相同。真机 e2e 共尝试
+**5 次**，每次都卡在**不同的基础设施问题**上（这也是本批修出一串真问题的来源）：
+
+| 尝试 | 结果 | 卡点 | 由此产出的修复 |
+| --- | --- | --- | --- |
+| exec 755 | failed | 推理服务被重启（在跑 job 被清 ⇒ 404） | —（外部） |
+| exec 757 | failed | 前一次失败跑留下的**租约**挡住冷加载 | vram-ops 实操清理（§58.9 复现） |
+| exec 758 | failed | docker 隧道 `exec` 流被截断（`stream truncated, re-attach 1/30`） | —（外部，改走 local 变体验证） |
+| exec 759 | failed | 冷宿主 UNet 冷读 **>31 分钟** ⇒ 排队中的 ClipLoad 被 1800s 超时拖爆 | **loader 族 timeout/job_timeout → 3600/3900**（§61.6） |
+| exec 760 | failed | 走到 `ReduxApply` **全绿**（8 节点）+ MaskRefine 第 1 步过，隧道抖动 ⇒ 404 HTML 被误判致命 | **隧道错误页 → 瞬态重试**（§61.7） |
+| exec 761 | failed | 收尾时**网站隧道整体掉线**（容器 Up 3h，`/health` 一致回 404 HTML） | 报错信息已能明确指出"隧道/代理错误页" |
+
+**结论**：模板链路本身已在 exec 760 中被真机走通到 `ReduxApply`（含三段地址约定的 docker/local
+混合），只剩 MaskRefine 之后的两步；**唯一未完成的是一次完整的 success 收尾**，等网站隧道稳定后
+一条命令即可补跑（`pipeline/ecom-model-swap-local.yaml` 的 2 步快档，约 40~60 分钟）。
