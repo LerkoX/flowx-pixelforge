@@ -80,7 +80,7 @@ Nodes:
   MaskPaint:
     name: 手绘蒙版（模特图 + 笔画）
     config:
-      nodeRef: mask-paint@1.4.0
+      nodeRef: mask-paint@1.5.0
       executor: local
       params:
         service_url: '{{ Param.service_url }}'
@@ -140,7 +140,7 @@ Nodes:
   MaskRefine:
     name: 蒙版局部重绘
     config:
-      nodeRef: flux-mask-refine@1.0.0
+      nodeRef: flux-mask-refine@1.1.0
       executor: docker
       params:
         service_url: '{{ Param.service_url_internal }}'
