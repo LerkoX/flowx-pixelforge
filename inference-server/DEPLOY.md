@@ -121,7 +121,9 @@ docker compose -f docker-compose.yml -f docker-compose.pascal.yml up -d --build
 | `OBJECT_TTL_SECONDS` | `3600` | 对象仓库（中间张量）的 TTL |
 | `INPUT_DIR` | `/input` | image.load 算子读取服务端本地图片的目录（compose 默认挂载 `./input`） |
 | `VIDEO_DIR` | `/videos` | VIDEO 对象 mp4 落盘目录（compose 默认挂载 `./videos`），`GET /videos/{id}` 下载 |
+| `VIDEO_INPUT_DIR` | `$INPUT_DIR/videos` | **POST /videos** 上传原片的落盘目录（load-video 节点把本机视频送入服务端；与 VIDEO_DIR 分工：前者放"原片"，后者放"仓库产物"） |
 | `MAX_UPLOAD_MB` | `32` | POST /images 上传体积上限 |
+| `MAX_VIDEO_UPLOAD_MB` | `512` | POST /videos 上传体积上限（原片动辄数百 MB，故与图片分开） |
 | `PORT` | `8100` | 容器内监听端口（在 Dockerfile ENV / compose 端口映射里改） |
 
 启用鉴权后，所有业务端点需携带：
@@ -190,6 +192,30 @@ Studio 与 CLI 都要连 `cpolar` 的 dockerApi 隧道。两个坑：
 
 
 ## 5. 常用运维操作
+
+### 监控页面
+
+浏览器打开 `http://<host>:8100/monitor`（单文件页面，无需构建/额外部署），
+右上角填入 `INFERENCE_TOKEN`（只存浏览器 localStorage，不经服务端）后自动每 2s 刷新：
+
+- GPU：显存堆叠条（已分配/可回收缓存/空闲）、SM 利用率/温度/功耗/风扇（经 NVML，
+  `GET /gpu`；pynvml 不可用时自动降级只显示显存）、显存+利用率最近 6 分钟折线
+  （前端内存采样，刷新页面清零）
+- 常驻模型：体积估算/空闲时长/pin 与租约归属，单个卸载按钮
+- 执行租约：持有模型、空闲时长、TTL 滑动倒计时（快过期红色提示）
+- 任务队列：running/pending 置顶带进度条，可单个取消；历史任务含耗时与错误信息
+- OOM 自愈统计与运维按钮：/gc、卸载全部常驻模型、中断全部任务（均带二次确认）
+
+对应 API：`GET /gpu`（NVML 硬件指标，带 auth）是除 `/health` 外的新增数据源。
+
+```bash
+# 命令行等效：GPU 利用率/温度/功耗/风扇
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8100/gpu
+# 执行租约观测
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8100/leases
+```
+
+### 命令行操作
 
 ```bash
 # 查看日志

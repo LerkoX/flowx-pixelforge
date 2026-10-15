@@ -17,6 +17,9 @@ huggingface-hub==0.34.4
 safetensors==0.4.5
 fastapi>=0.110
 uvicorn[standard]>=0.29
+# GPU 硬件指标（/gpu 端点 + /monitor 监控页）：利用率/温度/功耗/风扇经 NVML 采集；
+# app/gpu_probe.py 做可选导入，缺失时监控页降级只显示显存
+pynvml>=11.5
 pillow>=10.0
 imageio>=2.34
 imageio-ffmpeg>=0.5

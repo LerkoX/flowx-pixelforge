@@ -2,8 +2,13 @@
 
 VIDEO 大对象例外：put 时即编码 mp4 落盘（video_dir），仓库内只留
 {"path", "fps", "num_frames"} 元数据；对象过期/清理时同步删除落盘文件。
+
+VIDEO 预编码直通：data 已是 mp4（带 "path" 且无 "frames"）时不重新编码，
+只把文件拷进 video_dir（纳入同一 TTL 清理）——load-video 的原片入仓走这条路，
+避免「解码→h264 重编码→再解码」的代际损失（见 video.load 算子）。
 """
 import os
+import shutil
 import threading
 import time
 import uuid
@@ -26,7 +31,10 @@ class ObjectStore:
         oid = uuid.uuid4().hex
         if kind == "VIDEO" and self._video_dir:
             path = os.path.join(self._video_dir, oid + ".mp4")
-            data = self._video_encoder(data["frames"], data.get("fps", 24), path)
+            if isinstance(data, dict) and "frames" not in data and data.get("path"):
+                data = self._adopt_video_file(data, path)
+            else:
+                data = self._video_encoder(data["frames"], data.get("fps", 24), path)
         with self._lock:
             self._items[oid] = {
                 "kind": kind,
@@ -35,6 +43,25 @@ class ObjectStore:
                 "created": time.time(),
             }
         return oid
+
+    @staticmethod
+    def _adopt_video_file(data: dict, path: str) -> dict:
+        """预编码 VIDEO 入库：拷贝既有 mp4 到对象目录，只留元数据（不重编码）。
+
+        拷而非引用：对象目录是仓库自己的地盘（TTL 到点要删文件），不能指向
+        调用方的临时上传目录（删了别人的原片 / 或者对象过期把上传物一起删掉）。
+        """
+        src = data["path"]
+        if not os.path.isfile(src):
+            raise ValueError(f"VIDEO source file not found: {src}")
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        try:
+            shutil.copyfile(src, path)
+        except OSError as e:  # noqa: BLE001 - 磁盘满/权限：给出可操作报错
+            raise ValueError(f"VIDEO copy {src} -> {path} failed: {e}")
+        return {"path": path,
+                "fps": int(data.get("fps") or 24),
+                "num_frames": int(data.get("num_frames") or 0)}
 
     def get(self, oid: str, kind: str | None = None):
         with self._lock:

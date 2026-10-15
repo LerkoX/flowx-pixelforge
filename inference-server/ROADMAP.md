@@ -221,6 +221,48 @@ SD1.5 的 fp16 VAE 解码会偶发纯黑图，社区标准修法是 VAE 单独 f
   save-video 内嵌 mp4 播放器（小体积 base64）——外壳零改动
 - 验收（待 GPU 实测）：图生视频出片；首帧+尾帧插帧出片；长任务可取消、进度可见
 
+### 阶段 9.5：视频到视频（v2v / 换人转绘）✅ 已交付
+
+节点族（`video_flow`，5 节点共享一个族文件）：
+- `load-video`（本机原片 → `POST /videos` 上传 → `video.load` 登记 VIDEO；**无归一化参数时原字节直通**，
+  不重编码）、`video-to-frames` / `frames-to-video`（VIDEO ↔ IMAGE 批量帧序列）、
+  `video-repaint`（**逐帧重绘**：每帧 vae.encode → sample(denoise=strength) → decode；
+  `model` 接 ipadapter-apply 的 ModelRef 即逐帧注入参考人物 ⇒ 换人；可选 control_net 按帧注入结构条件）、
+  `video-v2v`（整段 v2v：把 motion-loader 的 t2v 组合管**按组件改视**成
+  `AnimateDiffVideoToVideoPipeline`，共享权重不额外占显存，**无需改核心加载层**）
+- 服务端：`POST /videos`（字节入站 + 返回服务端路径）、`object_store` 支持 VIDEO 预编码直通
+  （`_adopt_video_file`：拷贝既有 mp4 入库，避免"解码→h264 重编码→再解码"代际损失）
+- 真机验收（2026-10-13，GTX 1080 8GB + diffusers 0.35.2）：VIDEO 编码→解码→再编码往返
+  （帧内容逐帧对上）、`video.load` 归一化（抽帧/缩放）、`video.repaint` 逐帧重绘
+  （无 IPA 基线 / IPA weight=0.8 A/B 可复现差异）、`video.sample_v2v` 整段出片
+  （8 帧 64² 3 步，出片帧尺寸跟随源片）
+- ⚠️ 真机定位到的既有缺陷（本批次修）：`load_motion` 组合管出现「`vae.decode` 已被
+  `_decode_fp32` 包装、VAE 权重却是 fp16」的不一致态 ⇒ decode 时 conv2d 报
+  `Input type (float) and bias type (c10::Half)`，**既有 t2v（video.sample）同样复现**。
+  处置分两层（覆盖范围不同，别混）：
+  ① **核心** `model_manager.load_motion` 在 offload 之后二次断言 fp32——覆盖全部组合管
+     （含 t2v 的 `video.sample`），**需重启/重建推理服务生效**；
+  ② **算子层** `align_vae_dtype()`（按 `inspect.ismethod` 判定"解码入口被包装过"，不按名字）
+     + `_VAEDtypeShim`（`config.force_upcast` 对外恒 False、encode/decode 出入参按真实 VAE
+     精度转换，拦住管道"按计算精度把 VAE 转 fp16"那一步）——覆盖本族 repaint / sample_v2v，
+     **插件热更新即生效**（无需重启）
+- 验收口径：视频管线**必须抽帧看图**（状态 success 不代表内容正确，见 dev-plan 视频线教训）
+- ⚠️ **strength 口径坑（真机复现）**：`AnimateDiffVideoToVideoPipeline.strength` 是"时间轴截断比例"，
+  `init_timestep = int(num_inference_steps * strength)` ⇒ `steps=3, strength=0.6` 只跑 **1 步**
+  （DDIM linspace 3 步 = [999,666,333]，截断后只剩 t=333）；实测 ρ(源,出)=0.80~0.86，等于没重绘。
+  要出风格需 `steps × strength ≥ ~12`（例 25×0.7=17 步）。
+  **已处置（2026-10-14）**：算子新增纯函数 `effective_steps(steps, strength, enforce)` 并在
+  `video.sample_v2v`/`video.repaint` 开头打印"有效去噪步数"：**=0 直接报错**（原样返回输入属误用）、
+  **=1 告警**并给出配比建议（不再静默）；`video-v2v` 节点新增 `enforce_inference_steps` 参数
+  （ComfyUI 语义：steps 即实际执行步数，strength 只决定从 sigma 排布哪一段开始）；两个模板
+  参数配比已改为 25×0.7 / 20×0.55。单测覆盖见 `tests/test_video_flow.py`。
+- ⚠️ **"每帧不同猫"= 源片特性，不是 v2v 引入**：定量口径（32² 尺度相邻帧 ρ / 首末帧 ρ / 亮度极差）
+  ——既有 AnimateDiff t2v 出片 0.78 / 0.01 / 33~49；同机 SVD 出片 0.99 / 0.91~0.97 / 1~3；
+  v2v 出片 0.85 / 0.59 / 33.8（继承）。**v2v/repaint 只能保运动、不能创造时间一致性**——
+  源片不连贯时成片必然抖。演示时把 16 帧截成 8 帧（运动模块训练窗口为 16）会进一步削弱一致性。
+- 建议的验收指标（视频线）：相邻帧区域 ρ（角/中/32² 粗尺度）+ 亮度极差 + ρ(源,出)，
+  单看"抽了 2~3 帧像猫"会漏掉身份漂移（exec 199 当时据此判"连贯猫咪"通过）。
+
 ### 阶段 10：图像后处理与电商能力补齐（2026-10-10 立项，清单见 dev-plan §四十四）
 
 对标 ComfyUI 六大类图像处理能力盘点后的缺口补齐（已覆盖部分见 dev-plan §44.1，勿重复投入）：

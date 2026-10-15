@@ -1,7 +1,9 @@
 """FlowX 推理服务 = 远程能力运行时（ComfyUI 语义的公共能力层）。
 
 接口：
-- 系统：/health、/images/{id}（PNG 下载 / thumb 缩略图）、/videos/{id}（mp4 下载）、
+- 系统：/health、/gpu（NVML 硬件指标：利用率/温度/功耗/风扇）、/monitor（监控页）、
+  /images/{id}（PNG 下载 / thumb 缩略图）、/videos/{id}（mp4 下载）、
+  POST /images（图片上传）、POST /videos（视频上传，字节入站 + 返回服务端路径）、
   /gc（清对象仓库+缓存）、/model/unload（显式卸载常驻模型，等价 model.unload 算子）
   /model/policy（读/写显存淘汰策略旋钮，运维节点 vram-ops 用）
 - 能力运行时（同步）：/ops（列出算子）、/op（单算子）、/graph（整图执行，带缓存）
@@ -15,6 +17,9 @@
 import gc as _gc  # 别名：与下方 /gc 端点函数名冲突
 import io
 import os
+import re
+import sys
+import time
 
 import torch
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
@@ -22,7 +27,7 @@ from fastapi.responses import FileResponse, Response
 from PIL import Image
 from pydantic import BaseModel, Field
 
-from . import engine, lease, ops, plugins, policy, preview, sniff
+from . import engine, gpu_probe, lease, ops, plugins, policy, preview, sniff
 from . import model_manager as _mm
 from .jobs import JobManager
 from .model_manager import OFFLOAD_MODE, QUANTIZATION, ModelManager
@@ -40,11 +45,20 @@ if not TOKEN:
         "请设置 INFERENCE_TOKEN 环境变量后重启，并在流水线节点的 service_token "
         "参数填入同一值。")
 VIDEO_DIR = os.environ.get("VIDEO_DIR", "/videos")
+# 视频上传落盘目录（POST /videos）：load-video 节点把 FlowX 侧本地视频经此送入
+# 服务端，随后由 video.load 算子解码成 VIDEO 对象；与 VIDEO_DIR（对象 mp4 落盘）
+# 分开——上传物是「原片」，对象目录是「仓库产物」，两者生命周期不同。
+VIDEO_INPUT_DIR = os.environ.get(
+    "VIDEO_INPUT_DIR", os.path.join(os.environ.get("INPUT_DIR", "/input"), "videos"))
 # 插件算子目录：默认放 MODELS_DIR 下（bind-mount 持久化，重建容器不丢）
 PLUGINS_DIR = os.environ.get("PLUGINS_DIR", "/models/plugins.d")
+# 监控页等静态资源（GET /monitor）；随 COPY app/ 进镜像，按本文件路径定位
+STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 # 插件算子名 -> {"file": 文件名, "sha256": 内容哈希}；/ops 透出供客户端版本比对
 plugin_ops = {}
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_MB", "32")) * 1024 * 1024
+# 视频上传另有体积上限（原片动辄数百 MB，不宜与图片共用 32MB 闸门）
+MAX_VIDEO_UPLOAD_BYTES = int(os.environ.get("MAX_VIDEO_UPLOAD_MB", "512")) * 1024 * 1024
 
 app = FastAPI(title="flowx-inference-server")
 models = ModelManager()
@@ -61,6 +75,7 @@ models.extra_pinned = lambda: models.keys_of(store.referenced_data())
 engine.set_vram_guard(_mm.VramGuard(models))
 registry = Registry()
 os.makedirs(VIDEO_DIR, exist_ok=True)
+os.makedirs(VIDEO_INPUT_DIR, exist_ok=True)
 
 
 def auth(authorization: str = Header(default="")):
@@ -297,6 +312,26 @@ def health():
     return info
 
 
+@app.get("/gpu", dependencies=[Depends(auth)])
+def gpu_stats():
+    """GPU 硬件指标（监控页数据源）：利用率/温度/功耗/风扇 + NVML 口径显存。
+
+    pynvml 为可选依赖：不可用时 available=False，监控页降级只画 /health 的显存区。
+    """
+    return gpu_probe.snapshot()
+
+
+@app.get("/monitor")
+def monitor_page():
+    """监控页面（单文件 HTML，轮询 /health /gpu /leases /jobs 自绘图表）。
+
+    页面本身不带数据所以不设鉴权；数据端点各有 Bearer 闸门，token 在页面内
+    输入后存浏览器 localStorage，不经服务端。
+    """
+    return FileResponse(os.path.join(STATIC_DIR, "monitor.html"),
+                        media_type="text/html")
+
+
 @app.get("/models", dependencies=[Depends(auth)])
 def list_models():
     return {"resident_models": models.resident()}
@@ -326,6 +361,36 @@ async def upload_image(request: Request):
         raise HTTPException(status_code=400, detail=f"cannot decode image: {e}")
     oid = store.put("IMAGE", pil, meta={"source": "upload"})
     return {"id": oid, "width": pil.width, "height": pil.height}
+
+
+@app.post("/videos", dependencies=[Depends(auth)])
+async def upload_video(request: Request, filename: str = ""):
+    """上传视频（原始字节，Content-Type: video/mp4|octet-stream），落盘到
+    VIDEO_INPUT_DIR 并返回**服务端路径**——供 load-video 节点把 FlowX 侧本地视频
+    送入服务端（对称于 POST /images）。
+
+    本端点只做字节入站：解码成 VIDEO 对象由 `video.load` 算子完成（算子全面
+    插件化后 main.py 不再耦合算子实现）。filename 只用来保留扩展名与可读性，
+    落盘名带时间戳前缀，不覆盖既有文件。
+    """
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="empty body")
+    if len(body) > MAX_VIDEO_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"video too large: {len(body)} > {MAX_VIDEO_UPLOAD_BYTES} bytes "
+                   f"(raise MAX_VIDEO_UPLOAD_MB to allow bigger uploads)")
+    base = os.path.basename(filename or "upload.mp4") or "upload.mp4"
+    stem, ext = os.path.splitext(base)
+    ext = (ext or ".mp4").lower()
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", stem)[:80] or "upload"
+    name = f"{int(time.time() * 1000)}_{safe}{ext}"
+    path = os.path.join(VIDEO_INPUT_DIR, name)
+    with open(path, "wb") as f:
+        f.write(body)
+    print(f"[upload] video {name} ({len(body)} bytes) -> {path}", flush=True)
+    return {"path": path, "filename": name, "bytes": len(body)}
 
 
 @app.get("/images/{image_id}", dependencies=[Depends(auth)])

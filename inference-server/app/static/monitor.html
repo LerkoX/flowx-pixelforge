@@ -1,0 +1,452 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FlowX 推理服务监控</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d;
+    --fg: #e6edf3; --dim: #8b949e;
+    --green: #3fb950; --amber: #d29922; --red: #f85149;
+    --blue: #58a6ff; --purple: #bc8cff; --cyan: #39c5cf;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--fg); padding: 16px 20px 40px;
+         font: 14px/1.5 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+  h1 { font-size: 18px; }
+  h2 { font-size: 14px; color: var(--dim); margin-bottom: 8px; font-weight: 600; }
+  header { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 14px; }
+  .lamp { width: 12px; height: 12px; border-radius: 50%; background: var(--dim);
+          box-shadow: 0 0 6px currentColor; }
+  .lamp.ok { background: var(--green); color: var(--green); }
+  .lamp.degraded { background: var(--amber); color: var(--amber); }
+  .lamp.down { background: var(--red); color: var(--red); }
+  #conn-text { font-size: 13px; color: var(--dim); }
+  #token-box { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+  input[type=password] { background: var(--panel); border: 1px solid var(--border);
+    color: var(--fg); border-radius: 6px; padding: 4px 8px; width: 220px; font-size: 13px; }
+  button { background: #21262d; border: 1px solid var(--border); color: var(--fg);
+           border-radius: 6px; padding: 4px 12px; cursor: pointer; font-size: 13px; }
+  button:hover { border-color: var(--dim); }
+  button.danger:hover { border-color: var(--red); color: var(--red); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(340px, 100%), 1fr)); gap: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+          padding: 12px 14px; min-width: 0; /* 防 grid item 被内容（canvas 固有宽度等）撑破 */ }
+  .wide { grid-column: 1 / -1; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: var(--dim); font-weight: 500; padding: 4px 8px;
+       border-bottom: 1px solid var(--border); white-space: nowrap; }
+  td { padding: 5px 8px; border-bottom: 1px solid #21262d; vertical-align: middle; }
+  tr:last-child td { border-bottom: none; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+  .dim { color: var(--dim); }
+  .chip { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px;
+          border: 1px solid var(--border); white-space: nowrap; }
+  .chip.running { color: var(--blue); border-color: var(--blue); }
+  .chip.pending { color: var(--amber); border-color: var(--amber); }
+  .chip.done { color: var(--green); border-color: var(--green); }
+  .chip.failed, .chip.cancelled { color: var(--red); border-color: var(--red); }
+  .bar { position: relative; height: 18px; background: #21262d; border-radius: 4px; overflow: hidden; }
+  .bar > div { position: absolute; top: 0; bottom: 0; }
+  .bar .seg-alloc { background: var(--blue); }
+  .bar .seg-cache { background: #1f6feb55; }
+  .bar .seg-fill { background: var(--green); transition: width .3s; }
+  .bar .seg-fill.warn { background: var(--amber); }
+  .bar .seg-fill.hot { background: var(--red); }
+  .bar .lbl { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+              font-size: 11px; color: var(--fg); text-shadow: 0 1px 2px #000; }
+  .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; margin-top: 10px; }
+  .metric { background: #0d1117; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+  .metric .k { font-size: 11px; color: var(--dim); }
+  .metric .v { font-size: 18px; font-weight: 600; margin: 2px 0; }
+  .metric .sub { font-size: 11px; color: var(--dim); }
+  canvas { width: 100%; height: 140px; display: block; }
+  .legend { display: flex; gap: 14px; font-size: 12px; color: var(--dim); margin-top: 4px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; }
+  .kv { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13px; }
+  .kv b { font-weight: 600; }
+  .oom-stats { display: flex; gap: 22px; flex-wrap: wrap; font-size: 13px; }
+  .oom-stats .n { font-size: 20px; font-weight: 700; }
+  .actions { display: flex; gap: 10px; flex-wrap: wrap; }
+  #err-banner { display: none; background: #f8514922; border: 1px solid var(--red); color: var(--red);
+                border-radius: 8px; padding: 8px 12px; margin-bottom: 12px; font-size: 13px; }
+  .pbar { position: relative; height: 14px; min-width: 120px; background: #21262d; border-radius: 4px; overflow: hidden; }
+  .pbar > div { height: 100%; background: var(--blue); transition: width .3s; }
+  .pbar .lbl { position: absolute; inset: 0; font-size: 10px; display: flex; align-items: center;
+               justify-content: center; color: var(--fg); text-shadow: 0 1px 2px #000; }
+  .empty { color: var(--dim); font-size: 13px; padding: 8px; }
+  /* 表格横向滚动容器：窄屏列多可左右滑，不挤破布局 */
+  #models-wrap, #leases-wrap, #jobs-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  #models-wrap table, #leases-wrap table, #jobs-wrap table { min-width: 100%; }
+
+  /* ===== 手机端适配（≤640px） ===== */
+  @media (max-width: 640px) {
+    body { padding: 10px 10px 32px; }
+    .grid { grid-template-columns: 1fr; gap: 10px; }
+    header { gap: 8px; }
+    /* token 输入框独占一行，避免与标题/状态灯挤在一起 */
+    #token-box { margin-left: 0; flex: 1 1 100%; display: flex; }
+    #token-box input { flex: 1; width: auto; }
+    /* 触控目标加大 */
+    button { padding: 8px 14px; min-height: 36px; }
+    /* 折线图稍矮，给表格留纵向空间 */
+    canvas { height: 120px; }
+    /* 任务表隐藏低优先级列（类型/租约/提交时间/耗时），保留 job/状态/进度/取消 */
+    #jobs-wrap th:nth-child(2), #jobs-wrap td:nth-child(2),
+    #jobs-wrap th:nth-child(5), #jobs-wrap td:nth-child(5),
+    #jobs-wrap th:nth-child(6), #jobs-wrap td:nth-child(6),
+    #jobs-wrap th:nth-child(7), #jobs-wrap td:nth-child(7) { display: none; }
+    /* 模型表隐藏低优先级列（架构/空闲），保留 key/显存/状态/卸载 */
+    #models-wrap th:nth-child(2), #models-wrap td:nth-child(2),
+    #models-wrap th:nth-child(4), #models-wrap td:nth-child(4) { display: none; }
+    #models-wrap td, #models-wrap th { padding: 5px 4px; }
+    .metric .v { font-size: 16px; }
+    .oom-stats { gap: 16px; }
+    .pbar { min-width: 80px; }
+    /* 任务错误摘要收窄，防撑宽表格 */
+    #jobs-wrap td div[title] { max-width: 90px !important; font-size: 11px; }
+    #jobs-wrap td, #jobs-wrap th { padding: 5px 4px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <span id="lamp" class="lamp"></span>
+  <h1>FlowX 推理服务监控</h1>
+  <span id="conn-text" class="dim">连接中…</span>
+  <span id="token-box">
+    <input id="token" type="password" placeholder="INFERENCE_TOKEN（存浏览器本地）">
+    <button id="save-token">保存</button>
+  </span>
+</header>
+
+<div id="err-banner"></div>
+
+<div class="grid">
+  <!-- GPU 面板 -->
+  <div class="card wide" id="gpu-card">
+    <h2>GPU <span id="gpu-name" class="dim"></span></h2>
+    <div class="bar" title="显存：已分配 / 缓存保留(可回收) / 空闲">
+      <div class="seg-alloc" id="vram-alloc"></div>
+      <div class="seg-cache" id="vram-cache"></div>
+      <div class="lbl" id="vram-lbl"></div>
+    </div>
+    <div class="metrics" id="gpu-metrics"></div>
+    <canvas id="hist" width="900" height="140"></canvas>
+    <div class="legend">
+      <span><i style="background:var(--blue)"></i>显存占用（可用口径，%）</span>
+      <span><i style="background:var(--green)"></i>SM 利用率（%）</span>
+      <span class="dim">前端内存保留最近 6 分钟采样，刷新清零</span>
+    </div>
+  </div>
+
+  <!-- 常驻模型 -->
+  <div class="card">
+    <h2>常驻模型 <span id="model-count" class="dim"></span></h2>
+    <div id="models-wrap"></div>
+  </div>
+
+  <!-- 租约 -->
+  <div class="card">
+    <h2>执行租约 <span id="lease-count" class="dim"></span></h2>
+    <div id="leases-wrap"></div>
+  </div>
+
+  <!-- 任务队列 -->
+  <div class="card wide">
+    <h2>任务队列 <span id="job-count" class="dim"></span></h2>
+    <div id="jobs-wrap"></div>
+  </div>
+
+  <!-- OOM 自愈统计 -->
+  <div class="card">
+    <h2>OOM 自愈统计</h2>
+    <div class="oom-stats" id="oom-wrap"></div>
+  </div>
+
+  <!-- 运维操作 -->
+  <div class="card">
+    <h2>运维操作</h2>
+    <div class="actions">
+      <button id="btn-gc">清对象仓库 + 缓存（/gc）</button>
+      <button id="btn-unload-all" class="danger">卸载全部常驻模型</button>
+      <button id="btn-interrupt-all" class="danger">中断 running + 全部排队任务</button>
+    </div>
+    <div class="kv dim" style="margin-top:10px" id="sys-info"></div>
+  </div>
+</div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const TOKEN_KEY = "flowx-inference-token";
+const POLL_MS = 2000, HIST_MAX = 180;  // 2s × 180 = 6 分钟历史
+let hist = [];  // {t, vramPct, util}
+
+// ---------- 基础设施 ----------
+$("token").value = localStorage.getItem(TOKEN_KEY) || "";
+$("save-token").onclick = () => {
+  localStorage.setItem(TOKEN_KEY, $("token").value.trim());
+  poll();
+};
+
+async function api(path, opts = {}) {
+  const headers = Object.assign({}, opts.headers || {});
+  const tok = localStorage.getItem(TOKEN_KEY) || "";
+  if (tok) headers["Authorization"] = "Bearer " + tok;
+  if (opts.body) headers["Content-Type"] = "application/json";
+  const r = await fetch(path, Object.assign({}, opts, { headers }));
+  if (r.status === 401) throw new Error("401 token 无效或未填（右上角输入 INFERENCE_TOKEN）");
+  if (!r.ok) throw new Error(path + " → HTTP " + r.status + " " + (await r.text()).slice(0, 200));
+  return r.json();
+}
+
+function showErr(msg) {
+  const b = $("err-banner");
+  if (msg) { b.textContent = msg; b.style.display = "block"; }
+  else b.style.display = "none";
+}
+
+function setLamp(cls, text) {
+  $("lamp").className = "lamp " + cls;
+  $("conn-text").textContent = text;
+}
+
+const fmtMB = v => v == null ? "—" : (v >= 1024 ? (v / 1024).toFixed(1) + " GB" : v + " MB");
+const fmtSec = s => s == null ? "—" :
+  s < 60 ? s.toFixed(0) + "s" : s < 3600 ? (s / 60).toFixed(1) + "min" : (s / 3600).toFixed(1) + "h";
+const fmtTs = t => t ? new Date(t * 1000).toLocaleTimeString() : "—";
+const shortId = s => s && s.length > 12 ? s.slice(0, 8) + "…" : (s || "");
+const esc = s => String(s == null ? "" : s)
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+// ---------- GPU ----------
+function renderGpu(h, g) {
+  const parts = [];
+  if (h.gpu_name) parts.push(h.gpu_name);
+  if (h.torch_version) parts.push("torch " + h.torch_version);
+  if (h.diffusers_version) parts.push("diffusers " + h.diffusers_version);
+  $("gpu-name").textContent = parts.length ? "｜" + parts.join("｜") : "";
+
+  const total = h.vram_total_mb || 0;
+  const alloc = h.vram_process_allocated_mb || 0;
+  const cache = h.vram_reclaimable_mb || 0;
+  if (total > 0) {
+    const pa = alloc / total * 100, pc = cache / total * 100;
+    $("vram-alloc").style.width = pa + "%";
+    $("vram-cache").style.left = pa + "%";
+    $("vram-cache").style.width = pc + "%";
+    $("vram-lbl").textContent =
+      `已分配 ${fmtMB(alloc)} + 缓存 ${fmtMB(cache)} / 共 ${fmtMB(total)}（可用余量 ${fmtMB(h.vram_free_mb)}）`;
+  }
+  const gpu0 = g && g.available && g.gpus.length ? g.gpus[0] : null;
+  const m = [
+    ["SM 利用率", gpu0 && gpu0.utilization_percent != null ? gpu0.utilization_percent + " %" : "—",
+     gpu0 ? "显存控制器 " + (gpu0.mem_controller_percent ?? "—") + " %" : (g ? esc(g.reason || "NVML 不可用") : "")],
+    ["温度", gpu0 && gpu0.temperature_c != null ? gpu0.temperature_c + " ℃" : "—", ""],
+    ["功耗", gpu0 && gpu0.power_w != null ? gpu0.power_w + " W" : "—",
+     gpu0 && gpu0.power_limit_w != null ? "上限 " + gpu0.power_limit_w + " W" : ""],
+    ["风扇", gpu0 && gpu0.fan_percent != null ? gpu0.fan_percent + " %" : "—", ""],
+    ["常驻权重", fmtMB(h.resident_weights_mb), "模型 " + (h.resident_models || []).length + " 个"],
+    ["进程占用", fmtMB(h.vram_process_reserved_mb), "分配器保留"],
+  ];
+  $("gpu-metrics").innerHTML = m.map(([k, v, sub]) =>
+    `<div class="metric"><div class="k">${k}</div><div class="v">${v}</div><div class="sub">${sub}</div></div>`
+  ).join("");
+
+  // 历史采样：显存占用%（可用口径）+ SM 利用率%
+  if (total > 0) {
+    hist.push({
+      t: Date.now(),
+      vramPct: (total - (h.vram_free_mb || 0)) / total * 100,
+      util: gpu0 && gpu0.utilization_percent != null ? gpu0.utilization_percent : null,
+    });
+    if (hist.length > HIST_MAX) hist.shift();
+    drawHist();
+  }
+}
+
+function drawHist() {
+  const cv = $("hist"), ctx = cv.getContext("2d");
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, hgt = cv.clientHeight;
+  if (cv.width !== w * dpr) { cv.width = w * dpr; cv.height = hgt * dpr; }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, hgt);
+  // 网格线 0/25/50/75/100%
+  ctx.strokeStyle = "#21262d"; ctx.fillStyle = "#8b949e"; ctx.font = "10px sans-serif";
+  for (let p = 0; p <= 100; p += 25) {
+    const y = hgt - p / 100 * (hgt - 14) - 2;
+    ctx.beginPath(); ctx.moveTo(28, y); ctx.lineTo(w, y); ctx.stroke();
+    ctx.fillText(p + "%", 2, y + 3);
+  }
+  if (hist.length < 2) return;
+  const x0 = 28, span = w - x0;
+  const plot = (key, color) => {
+    ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.beginPath();
+    let started = false;
+    hist.forEach((p, i) => {
+      if (p[key] == null) { started = false; return; }
+      const x = x0 + i / (HIST_MAX - 1) * span;
+      const y = hgt - p[key] / 100 * (hgt - 14) - 2;
+      started ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+      started = true;
+    });
+    ctx.stroke(); ctx.lineWidth = 1;
+  };
+  plot("vramPct", "#58a6ff");
+  plot("util", "#3fb950");
+}
+
+// ---------- 常驻模型（join 租约归属） ----------
+function renderModels(h, leases) {
+  const holderOf = {};
+  (leases || []).forEach(l => (l.keys || []).forEach(k => holderOf[k] = l.lease));
+  const rows = (h.resident_details || []);
+  $("model-count").textContent = `${rows.length} / ${h.max_resident_models ?? "?"} 个`;
+  if (!rows.length) { $("models-wrap").innerHTML = '<div class="empty">无常驻模型</div>'; return; }
+  $("models-wrap").innerHTML = `<table>
+    <tr><th>模型 key</th><th>架构</th><th>估算显存</th><th>空闲</th><th>状态</th><th></th></tr>
+    ${rows.map(d => `<tr>
+      <td class="mono" title="${esc(d.key)}">${esc(shortId(d.key))}</td>
+      <td class="dim">${esc(d.arch || "—")}</td>
+      <td class="mono">${fmtMB(d.est_vram_mb)}</td>
+      <td class="mono">${fmtSec(d.idle_seconds)}</td>
+      <td>${d.pinned ? '<span class="chip running">执行中 pin</span>' : ""}
+        ${holderOf[d.key] ? `<span class="chip pending" title="租约 ${esc(holderOf[d.key])}">租约 ${esc(shortId(holderOf[d.key]))}</span>` : ""}</td>
+      <td><button class="danger" data-unload="${esc(d.key)}">卸载</button></td>
+    </tr>`).join("")}
+  </table>`;
+  $("models-wrap").querySelectorAll("[data-unload]").forEach(b => b.onclick = async () => {
+    if (!confirm(`卸载常驻模型 ${b.dataset.unload}？`)) return;
+    await op(() => api("/model/unload", { method: "POST", body: JSON.stringify({ target: b.dataset.unload }) }));
+  });
+}
+
+// ---------- 租约 ----------
+function renderLeases(d) {
+  const ls = (d && d.leases) || [];
+  const ttl = (d && d.lease_ttl_seconds) || 1800;
+  $("lease-count").textContent = ls.length + " 个活跃";
+  if (!ls.length) { $("leases-wrap").innerHTML = '<div class="empty">无活跃租约</div>'; return; }
+  $("leases-wrap").innerHTML = `<table>
+    <tr><th>租约 id</th><th>持有模型</th><th>空闲</th><th style="width:34%" title="TTL ${fmtSec(ttl)} 滑动过期，每次租约活动刷新">TTL 倒计时</th></tr>
+    ${ls.map(l => {
+      const ratio = Math.min(1, (l.idle_seconds || 0) / ttl);
+      const cls = ratio > 0.8 ? "hot" : ratio > 0.5 ? "warn" : "";
+      return `<tr>
+        <td class="mono" title="${esc(l.lease)}">${esc(shortId(l.lease))}</td>
+        <td class="mono dim" title="${esc((l.keys || []).join(", "))}">${(l.keys || []).length} 个</td>
+        <td class="mono">${fmtSec(l.idle_seconds)}</td>
+        <td><div class="bar"><div class="seg-fill ${cls}" style="width:${ratio * 100}%"></div>
+          <div class="lbl">剩余 ${fmtSec(Math.max(0, ttl - (l.idle_seconds || 0)))}</div></div></td>
+      </tr>`;
+    }).join("")}
+  </table>`;
+}
+
+// ---------- 任务队列 ----------
+function renderJobs(d) {
+  const js = ((d && d.jobs) || []).slice().sort((a, b) => {
+    const rank = s => s === "running" ? 0 : s === "pending" ? 1 : 2;
+    return rank(a.status) - rank(b.status) || (b.created_at || 0) - (a.created_at || 0);
+  });
+  const shown = js.slice(0, 20);
+  const active = js.filter(j => j.status === "running" || j.status === "pending").length;
+  $("job-count").textContent = `${active} 个进行中 / 共 ${js.length} 条`;
+  if (!shown.length) { $("jobs-wrap").innerHTML = '<div class="empty">暂无任务</div>'; return; }
+  $("jobs-wrap").innerHTML = `<table>
+    <tr><th>job</th><th>类型</th><th>状态</th><th>进度</th><th>租约</th><th>提交</th><th>耗时</th><th></th></tr>
+    ${shown.map(j => {
+      const pct = j.progress && j.progress.percent;
+      const dur = j.finished_at && j.started_at ? j.finished_at - j.started_at
+        : j.started_at ? Date.now() / 1000 - j.started_at : null;
+      const active = j.status === "running" || j.status === "pending";
+      return `<tr>
+        <td class="mono" title="${esc(j.id)}">${esc(shortId(j.id))}</td>
+        <td class="dim">${esc(j.kind)}</td>
+        <td><span class="chip ${esc(j.status)}">${esc(j.status)}</span>
+          ${j.error ? `<div class="dim" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(j.error)}">${esc(j.error)}</div>` : ""}</td>
+        <td>${pct != null ? `<div class="pbar"><div style="width:${pct}%"></div><div class="lbl">${pct}%</div></div>` : '<span class="dim">—</span>'}</td>
+        <td class="mono dim">${esc(shortId(j.lease)) || "—"}</td>
+        <td class="mono dim">${fmtTs(j.created_at)}</td>
+        <td class="mono">${dur != null ? fmtSec(dur) : "—"}</td>
+        <td>${active ? `<button class="danger" data-cancel="${esc(j.id)}">取消</button>` : ""}</td>
+      </tr>`;
+    }).join("")}
+  </table>${js.length > shown.length ? `<div class="empty">仅显示最近 ${shown.length} 条</div>` : ""}`;
+  $("jobs-wrap").querySelectorAll("[data-cancel]").forEach(b => b.onclick = async () => {
+    if (!confirm(`取消任务 ${b.dataset.cancel}？`)) return;
+    await op(() => api("/interrupt", { method: "POST", body: JSON.stringify({ job_id: b.dataset.cancel }) }));
+  });
+}
+
+// ---------- OOM 自愈 ----------
+function renderOom(h) {
+  const d = h.degraded || {};
+  $("oom-wrap").innerHTML = `
+    <div><div class="n">${d.count ?? 0}</div><div class="dim">累计 OOM</div></div>
+    <div><div class="n" style="color:var(--green)">${d.recovered ?? 0}</div><div class="dim">自愈成功</div></div>
+    <div><div class="n" style="color:var(--red)">${d.failed ?? 0}</div><div class="dim">自愈失败</div></div>
+    <div><div class="dim" style="margin-top:6px">最近算子：${esc(d.last_op || "—")}<br>最近时间：${esc(d.last_at || "—")}</div></div>`;
+}
+
+// ---------- 运维操作 ----------
+async function op(fn) {
+  try { showErr(""); await fn(); await poll(); }
+  catch (e) { showErr("操作失败：" + e.message); }
+}
+$("btn-gc").onclick = () => op(() => api("/gc", { method: "POST" }));
+$("btn-unload-all").onclick = async () => {
+  if (!confirm("卸载全部常驻模型？（其它活跃租约持有的条目会被跳过）")) return;
+  await op(() => api("/model/unload", { method: "POST", body: "{}" }));
+};
+$("btn-interrupt-all").onclick = async () => {
+  if (!confirm("中断当前 running + 全部排队任务？")) return;
+  await op(() => api("/interrupt", { method: "POST", body: "{}" }));
+};
+
+function renderSys(h) {
+  $("sys-info").innerHTML = [
+    ["offload", h.offload_mode], ["量化", h.quantization],
+    ["显存淘汰预算", h.vram_budget_eviction ? "开" : "关"],
+    ["显存保留", fmtMB(h.vram_reserve_mb)],
+    ["vram_low", h.vram_low ? '<b style="color:var(--red)">是（退化）</b>' : "否"],
+  ].map(([k, v]) => `<span>${k}: <b>${v}</b></span>`).join("");
+}
+
+// ---------- 轮询主循环 ----------
+let polling = false;
+async function poll() {
+  if (polling) return;
+  polling = true;
+  try {
+    const [rh, rg, rl, rj] = await Promise.allSettled(
+      [api("/health"), api("/gpu"), api("/leases"), api("/jobs")]);
+    if (rh.status !== "fulfilled") throw rh.reason;
+    const h = rh.value;
+    const g = rg.status === "fulfilled" ? rg.value : null;
+    const l = rl.status === "fulfilled" ? rl.value : null;
+    const j = rj.status === "fulfilled" ? rj.value : null;
+    showErr("");
+    setLamp(h.status === "ok" ? "ok" : "degraded",
+      (h.status === "ok" ? "正常" : "退化") + "｜" + new Date().toLocaleTimeString());
+    renderGpu(h, g);
+    renderModels(h, l ? l.leases : []);
+    renderLeases(l);
+    renderJobs(j);
+    renderOom(h);
+    renderSys(h);
+  } catch (e) {
+    setLamp("down", "连接失败");
+    showErr(e.message);
+  } finally {
+    polling = false;
+  }
+}
+poll();
+setInterval(poll, POLL_MS);
+</script>
+</body>
+</html>

@@ -470,6 +470,15 @@ class ModelManager:
                 print("[model-manager] composed vae -> fp32 (VAE_FP32=1, 防黑图)",
                       flush=True)
             pipe = self._apply_offload(pipe, mode=om)
+            if VAE_FP32 and pipe.vae.dtype != torch.float32:
+                # 二次断言（真机事故 2026-10-13）：实测出现"解码包装器在、VAE 权重却是
+                # fp16"的组合管（_decode_fp32 把 latent 转 fp32 后喂给 fp16 权重 ⇒
+                # conv2d 报 "Input type (float) and bias type (c10::Half)"，t2v/v2v
+                # 都在 decode 阶段崩）。dtype 与包装器语义必须成对，这里以包装器为准
+                # 重新对齐（幂等：已是 fp32 时不进入本分支）。
+                print(f"[model-manager] WARN: composed vae dtype={pipe.vae.dtype} 与 "
+                      f"fp32 解码包装器不一致，重新对齐到 fp32", flush=True)
+                pipe.vae.to(torch.float32)
             pipe.set_progress_bar_config(disable=True)
             self._pipes[key] = pipe
             self._archs[key] = "AnimateDiffPipeline"
