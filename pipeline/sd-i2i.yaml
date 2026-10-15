@@ -1,0 +1,192 @@
+Name: sd-i2i
+Description: >-
+  图生图换装示例（Pony Diffusion V6 XL / SDXL 架构）——**蒙版局部重绘版**：健康检查 →
+  Checkpoint 加载 → CLIP 编码(正/反) → 手绘蒙版(涂衣服) → 蒙版外扩/羽化 → 载入原图并
+  VAE 编码 → latent 噪点蒙版 → KSampler(denoise=1.0) → VAE 解码 → 保存图像。
+  **脸上的像素不动**：latent.set_noise_mask 对标 ComfyUI SetLatentNoiseMask，采样每一步后
+  把蒙版外区域混回原图 latent 的当步加噪版 ⇒ 只有涂过的区域被重绘，其余**逐像素保留原图**
+  （仅 VAE 往返精度损失）。故 denoise 固定 1.0（涂到哪改到哪，幅度不受 denoise 限制）。
+  **使用顺序**：先在画布上打开 MaskPaint 节点 → 用笔刷把要换的衣服涂满（白=重绘）→
+  保存笔画（落盘到 strokes_ref）→ 再运行流水线。没涂蒙版时 coverage=0，输出 = 原图不变。
+  蒙版外扩 grow_radius 吃掉衣服边缘防残留，羽化 feather_radius 让接缝自然过渡。
+  源图已换成 832×1216（SDXL 标准竖版，面积≈1024²，无需再放大）；来源见
+  ~/flowx-input/candidates/CREDITS.txt（StockSnap CC0）。若换用更小的图，建议在 MaskPaint
+  后接 image-upscale 放大到 1024 附近再进 VAEEncode。
+  **执行器纪律**：只有"读本机文件/写本机文件/探活/手绘蒙版"的节点（mask-paint /
+  mask-grow / mask-feather / save-image / inference-ensure）走 local，其余图像节点走 docker。
+Param:
+  service_url: "https://749a0d06.r7.cpolar.cn"          # local 节点用（Studio/手机可达）
+  service_url_internal: "http://172.17.0.1:8100"         # docker 节点用（容器视角的宿主机）
+  service_url_host: "https://749a0d06.r7.cpolar.cn"      # docker 节点的画布预览/取消兜底
+  service_token: "30e494999da13134808ee280aea6dffd"
+  ckpt_name: "ponyDiffusionV6XL_v6StartWithThisOne"
+  image_path: "~/flowx-input/model_832x1216.png"
+  strokes_ref: "~/flowx-input/uploads/strokes/sd-i2i-outfit.strokes.json"
+  positive: "score_9, score_8_up, score_7_up, a woman wearing an elegant red silk evening dress, detailed fabric folds, soft studio lighting, masterpiece, best quality"
+  negative: "score_6, score_5, score_4, lowres, blurry, worst quality, watermark, text, extra limbs"
+  steps: 25
+  cfg: 6.0
+  seed: -1
+  grow_radius: 12
+  feather_radius: 8
+Graph: |
+  stateDiagram-v2
+    [*] --> Ensure
+    Ensure --> LoadCheckpoint
+    Ensure --> MaskPaint
+    LoadCheckpoint --> EncodePos
+    LoadCheckpoint --> EncodeNeg
+    LoadCheckpoint --> VAEEncode
+    MaskPaint --> VAEEncode
+    MaskPaint --> MaskGrow
+    MaskGrow --> MaskFeather
+    MaskFeather --> SetNoiseMask
+    VAEEncode --> SetNoiseMask
+    SetNoiseMask --> KSampler
+    EncodePos --> KSampler
+    EncodeNeg --> KSampler
+    KSampler --> VAEDecode
+    VAEDecode --> SaveImage
+    SaveImage --> [*]
+Nodes:
+  Ensure:
+    name: 服务健康检查
+    config:
+      nodeRef: inference-ensure@1.1.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        wait_seconds: 60
+        min_vram_mb: 2500
+  LoadCheckpoint:
+    name: Checkpoint加载
+    config:
+      nodeRef: checkpoint-loader@1.4.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url_internal }}"
+        service_url_host: "{{ Param.service_url_host }}"
+        service_token: "{{ Param.service_token }}"
+        ckpt_name: "{{ Param.ckpt_name }}"
+        dtype: fp16
+        offload: model
+  EncodePos:
+    name: 正向提示词
+    config:
+      nodeRef: clip-text-encode@1.3.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url_internal }}"
+        service_url_host: "{{ Param.service_url_host }}"
+        service_token: "{{ Param.service_token }}"
+        clip_ref: "{{ LoadCheckpoint.clip_ref }}"
+        text: "{{ Param.positive }}"
+        width: 0
+        height: 0
+  EncodeNeg:
+    name: 反向提示词
+    config:
+      nodeRef: clip-text-encode@1.3.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url_internal }}"
+        service_url_host: "{{ Param.service_url_host }}"
+        service_token: "{{ Param.service_token }}"
+        clip_ref: "{{ LoadCheckpoint.clip_ref }}"
+        text: "{{ Param.negative }}"
+        width: 0
+        height: 0
+  MaskPaint:
+    name: 手绘蒙版（涂要换的衣服）
+    config:
+      nodeRef: mask-paint@1.5.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image_path: "{{ Param.image_path }}"
+        strokes_ref: "{{ Param.strokes_ref }}"
+  MaskGrow:
+    name: 蒙版外扩
+    config:
+      nodeRef: mask-grow@1.1.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        mask: "{{ MaskPaint.mask }}"
+        radius: "{{ Param.grow_radius }}"
+  MaskFeather:
+    name: 蒙版羽化
+    config:
+      nodeRef: mask-feather@1.1.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        mask: "{{ MaskGrow.mask }}"
+        radius: "{{ Param.feather_radius }}"
+  VAEEncode:
+    name: VAE编码
+    config:
+      nodeRef: vae-encode@1.2.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url_internal }}"
+        service_url_host: "{{ Param.service_url_host }}"
+        service_token: "{{ Param.service_token }}"
+        vae_ref: "{{ LoadCheckpoint.vae_ref }}"
+        image: "{{ MaskPaint.image }}"
+  SetNoiseMask:
+    name: latent噪点蒙版（脸不动）
+    config:
+      nodeRef: latent-set-noise-mask@1.1.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url_internal }}"
+        service_url_host: "{{ Param.service_url_host }}"
+        service_token: "{{ Param.service_token }}"
+        latent: "{{ VAEEncode.latent }}"
+        mask: "{{ MaskFeather.mask }}"
+  KSampler:
+    name: KSampler采样（仅蒙版区）
+    config:
+      nodeRef: ksampler@1.5.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url_internal }}"
+        service_url_host: "{{ Param.service_url_host }}"
+        service_token: "{{ Param.service_token }}"
+        model_ref: "{{ LoadCheckpoint.model_ref }}"
+        positive: "{{ EncodePos.conditioning }}"
+        negative: "{{ EncodeNeg.conditioning }}"
+        latent: "{{ SetNoiseMask.latent }}"
+        seed: "{{ Param.seed }}"
+        steps: "{{ Param.steps }}"
+        cfg: "{{ Param.cfg }}"
+        sampler_name: euler
+        scheduler: normal
+        denoise: 1.0
+  VAEDecode:
+    name: VAE解码
+    config:
+      nodeRef: vae-decode@1.2.0
+      executor: docker
+      params:
+        service_url: "{{ Param.service_url_internal }}"
+        service_url_host: "{{ Param.service_url_host }}"
+        service_token: "{{ Param.service_token }}"
+        vae_ref: "{{ LoadCheckpoint.vae_ref }}"
+        latent: "{{ KSampler.latent }}"
+  SaveImage:
+    name: 保存图像
+    config:
+      nodeRef: save-image@1.2.0
+      executor: local
+      params:
+        service_url: "{{ Param.service_url }}"
+        service_token: "{{ Param.service_token }}"
+        image: "{{ VAEDecode.image }}"
+        filename_prefix: flowx_i2i
+        output_dir: "~/flowx-output"
