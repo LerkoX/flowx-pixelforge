@@ -76,6 +76,15 @@ class ObjectStore:
         with self._lock:
             return oid in self._items
 
+    def stats(self) -> dict:
+        """仓库统计（监控页/指标历史用）：对象总数 + 按 kind 分组计数。"""
+        with self._lock:
+            kinds = {}
+            for v in self._items.values():
+                k = v.get("kind") or "?"
+                kinds[k] = kinds.get(k, 0) + 1
+            return {"count": len(self._items), "kinds": kinds}
+
     def referenced_data(self) -> list:
         """仓库内所有条目的 data 列表（供模型淘汰保护：被仓库引用的管道
         本体视同 pin，见 ModelManager.extra_pinned / main.py 注入）。"""

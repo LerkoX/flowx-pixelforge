@@ -1,7 +1,8 @@
 """FlowX 推理服务 = 远程能力运行时（ComfyUI 语义的公共能力层）。
 
 接口：
-- 系统：/health、/gpu（NVML 硬件指标：利用率/温度/功耗/风扇）、/monitor（监控页）、
+- 系统：/health、/gpu（NVML 硬件指标：利用率/温度/功耗/风扇/PCIe/时钟）、
+  /metrics/history（服务端采样历史：监控页图表数据源）、/monitor（监控页）、
   /images/{id}（PNG 下载 / thumb 缩略图）、/videos/{id}（mp4 下载）、
   POST /images（图片上传）、POST /videos（视频上传，字节入站 + 返回服务端路径）、
   /gc（清对象仓库+缓存）、/model/unload（显式卸载常驻模型，等价 model.unload 算子）
@@ -27,7 +28,7 @@ from fastapi.responses import FileResponse, Response
 from PIL import Image
 from pydantic import BaseModel, Field
 
-from . import engine, gpu_probe, lease, ops, plugins, policy, preview, sniff
+from . import engine, gpu_probe, lease, metrics_history, ops, plugins, policy, preview, sniff, sys_probe
 from . import model_manager as _mm
 from .jobs import JobManager
 from .model_manager import OFFLOAD_MODE, QUANTIZATION, ModelManager
@@ -501,7 +502,8 @@ def model_unload(req: UnloadReq | None = None,
                  x_flowx_lease: str = Header(default="")):
     """显式卸载常驻模型（等价 model.unload 算子；运维/自愈用）。
     body {"target": "majicmixRealistic_v7"} 或 {}（全部）。
-    其它活跃租约持有的条目跳过（X-FlowX-Lease 头标识本租约，§43.2）。"""
+    其它活跃租约持有的条目跳过（X-FlowX-Lease 头标识本租约，§43.2）——
+    有跳过时响应带 skipped / skipped_reasons / skipped_detail 三键说明原因。"""
     _bind_lease(x_flowx_lease)
     try:
         target = (req.target if req is not None else "") or ""
@@ -575,6 +577,20 @@ def _execute_job(kind, payload):
 
 jobman = JobManager(_execute_job)
 
+# 指标历史采样：服务端后台线程（2s/帧，环形缓冲 6h），监控页图表数据源；
+# 依赖在此装配（对象仓库统计 + 任务队列 + 模型盘占用）
+metrics_history.start(store=store, jobman=jobman,
+                      disk_paths=[("models", _mm.MODELS_DIR)])
+
+
+@app.get("/metrics/history", dependencies=[Depends(auth)])
+def metrics_history_feed(minutes: int = 60):
+    """指标历史回放（监控页图表数据源）：最近 minutes 分钟的采样帧（升序）。
+
+    服务端后台线程常驻采样，页面刷新/未打开期间历史不丢；进程重启清零。
+    """
+    return metrics_history.history(minutes)
+
 
 @app.post("/jobs", dependencies=[Depends(auth)])
 def submit_job(req: JobReq, x_flowx_lease: str = Header(default="")):
@@ -622,6 +638,19 @@ def list_leases():
     return {"leases": models.leases.view(),
             "lease_ttl_seconds": lease.LEASE_TTL,
             "lease_wait_timeout_seconds": lease.LEASE_WAIT_TIMEOUT}
+
+
+@app.delete("/leases/{lease_id}", dependencies=[Depends(auth)])
+def release_lease(lease_id: str):
+    """显式释放执行租约（监控页清理僵尸租约）：执行已结束但 TTL 未到期的
+    残留租约会挡住 /model/unload（全部条目被视为「其它租约持有」而跳过，
+    实机 exec772 事故）。只摘除租约登记、不卸模型——正在执行的算子仍受
+    pin 保护；释放后其名下常驻条目失去并发保护，调用前确认对应执行已结束。"""
+    if not models.leases.release(lease_id):
+        raise HTTPException(status_code=404,
+                            detail=f"lease '{lease_id}' 不存在或已过期")
+    print(f"[lease] released '{lease_id}'（显式释放，监控页）", flush=True)
+    return {"released": lease_id}
 
 
 @app.post("/interrupt", dependencies=[Depends(auth)])

@@ -311,6 +311,40 @@ def test_no_wait_without_leases():
 # 4. jobs：租约随 job 记录并在 worker 线程绑定
 # ---------------------------------------------------------------------------
 
+def test_unload_detail_skipped_reasons():
+    """unload_detail 返回跳过明细：reason(pinned|leased) + holders（监控页排查用）。"""
+    mgr = _mgr_with_entries()
+    mgr.leases.touch("exec-A", ["leased:a"])
+    mgr.pin("free:b")
+    done, skipped = mgr.unload_detail("all")
+    assert done == []
+    by_key = {s["key"]: s for s in skipped}
+    assert by_key["leased:a"]["reason"] == "leased"
+    assert by_key["leased:a"]["holders"] == ["exec-A"]
+    assert "租约" in by_key["leased:a"]["reason_text"]
+    assert by_key["free:b"]["reason"] == "pinned"
+    assert by_key["free:b"]["holders"] == []
+    # 释放租约 + unpin 后恢复可卸
+    assert mgr.leases.release("exec-A") is True
+    mgr.unpin("free:b")
+    done, skipped = mgr.unload_detail("all")
+    assert sorted(done) == ["free:b", "leased:a"] and skipped == []
+    print("[ok] unload_detail 跳过明细（leased/pinned + holders），释放后恢复")
+
+
+def test_leasebook_release():
+    """显式释放租约（DELETE /leases/{id}）：摘除登记，不存在的返回 False。"""
+    book = lease.LeaseBook(ttl=60)
+    book.touch("a", ["k1"])
+    book.touch("b", ["k2"])
+    assert book.release("a") is True
+    assert book.keys_of_others(None) == {"k2"}   # a 已摘，b 还在
+    assert book.release("a") is False           # 幂等：不存在返回 False
+    assert book.release("") is False             # 非法 id 拒绝
+    assert book.release("x" * 200) is False
+    print("[ok] LeaseBook.release 显式摘除/幂等/非法拒绝")
+
+
 def test_job_binds_lease():
     seen = {}
 
@@ -357,6 +391,8 @@ def main():
     test_wait_succeeds_when_peer_frees()
     test_wait_succeeds_when_lease_expires()
     test_no_wait_without_leases()
+    test_unload_detail_skipped_reasons()
+    test_leasebook_release()
     test_job_binds_lease()
     print("\n✓ 执行租约 pin 测试全部通过")
 

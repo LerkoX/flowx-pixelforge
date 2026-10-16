@@ -726,10 +726,18 @@ class ModelManager:
         return hits
 
     def unload(self, target) -> list:
-        """显式卸载：target 为空/all/* = 全部；否则按 find_keys 匹配。
+        """显式卸载：返回实际卸载的 key 列表（保持既有调用契约）。
+        需要跳过原因时用 unload_detail()。"""
+        done, _skipped = self.unload_detail(target)
+        return done
+
+    def unload_detail(self, target):
+        """显式卸载（带跳过明细）：target 为空/all/* = 全部；否则按 find_keys 匹配。
         走与其他加载完全一致的淘汰路径（断对象仓库视图 → gc → empty_cache）。
         跳过：执行中 pin 的条目 + 其它活跃租约持有的条目（本租约可卸自己的）。
-        返回实际卸载的 key 列表。"""
+        返回 (done, skipped)：done 为实际卸载的 key 列表；skipped 为
+        [{"key", "reason"(pinned|leased), "reason_text", "holders"(租约 id 列表)}]
+        ——监控页「点了没反应」的排查依据（此前只打服务端日志，响应里看不到）。"""
         with self._lock:
             if str(target or "").strip().lower() in ("", "all", "*"):
                 keys = list(self._pipes.keys())
@@ -738,15 +746,29 @@ class ModelManager:
             # 执行中在用（pin）或其它租约持有的条目不动：
             # 卸载正在被别的 job/流水线使用的模型＝抽走它脚下的地板
             others = self.leases.keys_of_others(lease.current())
-            busy = [k for k in keys if k in self._pins or k in others]
-            if busy:
-                print(f"[model-manager] skip in-use (pinned/leased): {busy}", flush=True)
-            done = [k for k in keys if k not in self._pins and k not in others
-                    and self._do_evict(k)]
+            skipped = []
+            for k in keys:
+                if k in self._pins:
+                    skipped.append({"key": k, "reason": "pinned",
+                                    "reason_text": "算子执行中 pin",
+                                    "holders": []})
+                elif k in others:
+                    holders = self.leases.leases_holding(
+                        [k], exclude=lease.current())
+                    skipped.append({"key": k, "reason": "leased",
+                                    "reason_text": "被其它活跃租约持有"
+                                    + ("：" + ",".join(holders) if holders else ""),
+                                    "holders": holders})
+            if skipped:
+                print(f"[model-manager] skip in-use: "
+                      f"{[(s['key'], s['reason'], s['holders']) for s in skipped]}",
+                      flush=True)
+            skip_keys = {s["key"] for s in skipped}
+            done = [k for k in keys if k not in skip_keys and self._do_evict(k)]
             if done:
                 print(f"[model-manager] unloaded {done}；resident={self.resident()}",
                       flush=True)
-            return done
+            return done, skipped
 
     def evict_idle(self, limit=1) -> int:
         """淘汰至多 limit 个**非在用**（未 pin、未被其它租约持有）的最久未用条目；

@@ -23,8 +23,8 @@ def test_monitor_html_exists_and_references_all_endpoints():
     with open(HTML, encoding="utf-8") as f:
         html = f.read()
     # 数据源端点
-    for ep in ["/health", "/gpu", "/leases", "/jobs"]:
-        assert f'"{ep}"' in html, f"monitor.html 未引用数据端点 {ep}"
+    for ep in ["/health", "/gpu", "/leases", "/jobs", "/metrics/history"]:
+        assert f'"{ep}"' in html or f'"{ep}?' in html, f"monitor.html 未引用数据端点 {ep}"
     # 运维操作端点
     for ep in ["/gc", "/model/unload", "/interrupt"]:
         assert ep in html, f"monitor.html 未引用操作端点 {ep}"
@@ -37,8 +37,11 @@ def test_main_registers_monitor_and_gpu_routes():
         src = f.read()
     assert '@app.get("/monitor")' in src
     assert '@app.get("/gpu"' in src
-    # /gpu 是数据端点必须过 auth；/monitor 页面本身无数据不设闸门
+    assert '@app.get("/metrics/history"' in src
+    # 数据端点必须过 auth；/monitor 页面本身无数据不设闸门
     m = re.search(r'@app\.get\("/gpu"[^)]*\)', src)
+    assert m and "auth" in m.group(0)
+    m = re.search(r'@app\.get\("/metrics/history"[^)]*\)', src)
     assert m and "auth" in m.group(0)
     m = re.search(r'@app\.get\("/monitor"[^)]*\)', src)
     assert m and "auth" not in m.group(0)

@@ -30,6 +30,7 @@
            border-radius: 6px; padding: 4px 12px; cursor: pointer; font-size: 13px; }
   button:hover { border-color: var(--dim); }
   button.danger:hover { border-color: var(--red); color: var(--red); }
+  button.on { border-color: var(--blue); color: var(--blue); }
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(340px, 100%), 1fr)); gap: 14px; }
   .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
           padding: 12px 14px; min-width: 0; /* 防 grid item 被内容（canvas 固有宽度等）撑破 */ }
@@ -51,18 +52,28 @@
   .bar > div { position: absolute; top: 0; bottom: 0; }
   .bar .seg-alloc { background: var(--blue); }
   .bar .seg-cache { background: #1f6feb55; }
+  .bar .seg-ram { background: var(--purple); }
+  .bar .seg-swap { background: var(--amber); }
   .bar .seg-fill { background: var(--green); transition: width .3s; }
   .bar .seg-fill.warn { background: var(--amber); }
   .bar .seg-fill.hot { background: var(--red); }
   .bar .lbl { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
               font-size: 11px; color: var(--fg); text-shadow: 0 1px 2px #000; }
-  .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; margin-top: 10px; }
+  .bar-note { font-size: 11px; color: var(--dim); margin: 3px 0 8px; }
+  .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; margin: 10px 0; }
   .metric { background: #0d1117; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
   .metric .k { font-size: 11px; color: var(--dim); }
   .metric .v { font-size: 18px; font-weight: 600; margin: 2px 0; }
   .metric .sub { font-size: 11px; color: var(--dim); }
-  canvas { width: 100%; height: 140px; display: block; }
-  .legend { display: flex; gap: 14px; font-size: 12px; color: var(--dim); margin-top: 4px; }
+  /* small-multiples 图表网格 */
+  .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(230px, 100%), 1fr));
+            gap: 10px; margin-top: 10px; }
+  .chart { background: #0d1117; border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; }
+  .chart .ct { font-size: 11px; color: var(--dim); margin-bottom: 2px; display: flex;
+               justify-content: space-between; gap: 6px; flex-wrap: wrap; }
+  .chart .ct .cur { color: var(--fg); font-weight: 600; }
+  .chart canvas { width: 100%; height: 96px; display: block; }
+  .legend { display: flex; gap: 14px; font-size: 12px; color: var(--dim); margin-top: 4px; flex-wrap: wrap; }
   .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; }
   .kv { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13px; }
   .kv b { font-weight: 600; }
@@ -76,6 +87,7 @@
   .pbar .lbl { position: absolute; inset: 0; font-size: 10px; display: flex; align-items: center;
                justify-content: center; color: var(--fg); text-shadow: 0 1px 2px #000; }
   .empty { color: var(--dim); font-size: 13px; padding: 8px; }
+  .win-box { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--dim); }
   /* 表格横向滚动容器：窄屏列多可左右滑，不挤破布局 */
   #models-wrap, #leases-wrap, #jobs-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
   #models-wrap table, #leases-wrap table, #jobs-wrap table { min-width: 100%; }
@@ -90,8 +102,7 @@
     #token-box input { flex: 1; width: auto; }
     /* 触控目标加大 */
     button { padding: 8px 14px; min-height: 36px; }
-    /* 折线图稍矮，给表格留纵向空间 */
-    canvas { height: 120px; }
+    .chart canvas { height: 84px; }
     /* 任务表隐藏低优先级列（类型/租约/提交时间/耗时），保留 job/状态/进度/取消 */
     #jobs-wrap th:nth-child(2), #jobs-wrap td:nth-child(2),
     #jobs-wrap th:nth-child(5), #jobs-wrap td:nth-child(5),
@@ -133,11 +144,52 @@
       <div class="lbl" id="vram-lbl"></div>
     </div>
     <div class="metrics" id="gpu-metrics"></div>
-    <canvas id="hist" width="900" height="140"></canvas>
-    <div class="legend">
-      <span><i style="background:var(--blue)"></i>显存占用（可用口径，%）</span>
-      <span><i style="background:var(--green)"></i>SM 利用率（%）</span>
-      <span class="dim">前端内存保留最近 6 分钟采样，刷新清零</span>
+    <div class="charts">
+      <div class="chart"><div class="ct"><span>SM / 显存控制器利用率</span><span class="cur" id="c-util"></span></div>
+        <canvas id="ch-util"></canvas>
+        <div class="legend"><span><i style="background:var(--green)"></i>SM %</span><span><i style="background:var(--blue)"></i>显存控制器 %</span></div></div>
+      <div class="chart"><div class="ct"><span>显存占用</span><span class="cur" id="c-vram"></span></div>
+        <canvas id="ch-vram"></canvas>
+        <div class="legend"><span><i style="background:var(--blue)"></i>占用 %（NVML 口径）</span><span><i style="background:var(--cyan)"></i>torch 已分配 %</span></div></div>
+      <div class="chart"><div class="ct"><span>功耗</span><span class="cur" id="c-power"></span></div>
+        <canvas id="ch-power"></canvas></div>
+      <div class="chart"><div class="ct"><span>温度 / 风扇</span><span class="cur" id="c-temp"></span></div>
+        <canvas id="ch-temp"></canvas>
+        <div class="legend"><span><i style="background:var(--red)"></i>温度 ℃</span><span><i style="background:var(--cyan)"></i>风扇 %</span></div></div>
+      <div class="chart"><div class="ct"><span>PCIe 吞吐</span><span class="cur" id="c-pcie"></span></div>
+        <canvas id="ch-pcie"></canvas>
+        <div class="legend"><span><i style="background:var(--purple)"></i>TX（→卡）</span><span><i style="background:var(--cyan)"></i>RX（←卡）</span></div></div>
+      <div class="chart"><div class="ct"><span>时钟频率</span><span class="cur" id="c-clock"></span></div>
+        <canvas id="ch-clock"></canvas>
+        <div class="legend"><span><i style="background:var(--green)"></i>SM MHz</span><span><i style="background:var(--amber)"></i>显存 MHz</span></div></div>
+    </div>
+  </div>
+
+  <!-- 系统内存面板（WSL2 VM 口径） -->
+  <div class="card wide" id="sys-card">
+    <h2>系统资源 <span class="dim">｜WSL2 VM 口径（非 Windows 物理机）</span>
+      <span style="float:right" class="win-box">历史窗口
+        <button data-win="15">15m</button><button data-win="60" class="on">1h</button><button data-win="360">6h</button>
+        <span id="hist-range" class="dim"></span>
+      </span></h2>
+    <div class="bar" title="内存：已用 / 空闲（WSL2 VM）">
+      <div class="seg-ram" id="ram-used"></div>
+      <div class="lbl" id="ram-lbl"></div>
+    </div>
+    <div class="bar-note">RAM（WSL2 VM）</div>
+    <div class="bar" title="swap：offload 权重溢出到磁盘的信号，>0 时采样会雪崩">
+      <div class="seg-swap" id="swap-used"></div>
+      <div class="lbl" id="swap-lbl"></div>
+    </div>
+    <div class="bar-note">Swap</div>
+    <div class="metrics" id="sys-metrics"></div>
+    <div class="charts">
+      <div class="chart"><div class="ct"><span>RAM / Swap / CPU</span><span class="cur" id="c-ram"></span></div>
+        <canvas id="ch-ram"></canvas>
+        <div class="legend"><span><i style="background:var(--purple)"></i>RAM %</span><span><i style="background:var(--amber)"></i>swap %</span><span><i style="background:var(--cyan)"></i>CPU %</span></div></div>
+      <div class="chart"><div class="ct"><span>推理进程 RSS</span><span class="cur" id="c-rss"></span></div>
+        <canvas id="ch-rss"></canvas>
+        <div class="legend"><span><i style="background:var(--blue)"></i>RSS MB（offload 权重宿主）</span></div></div>
     </div>
   </div>
 
@@ -181,14 +233,17 @@
 "use strict";
 const $ = id => document.getElementById(id);
 const TOKEN_KEY = "flowx-inference-token";
-const POLL_MS = 2000, HIST_MAX = 180;  // 2s × 180 = 6 分钟历史
-let hist = [];  // {t, vramPct, util}
+const POLL_MS = 2000, HIST_EVERY = 5;  // 状态 2s 一刷；历史每 5 次轮询（10s）拉一次
+let histFrames = [];        // 服务端采样帧（升序），页面刷新不再丢历史
+let histTimer = 0;
+let WIN_MIN = 60;           // 历史窗口（分钟）：15 / 60 / 360
 
 // ---------- 基础设施 ----------
 $("token").value = localStorage.getItem(TOKEN_KEY) || "";
 $("save-token").onclick = () => {
   localStorage.setItem(TOKEN_KEY, $("token").value.trim());
   poll();
+  pollHistory();
 };
 
 async function api(path, opts = {}) {
@@ -221,6 +276,107 @@ const shortId = s => s && s.length > 12 ? s.slice(0, 8) + "…" : (s || "");
 const esc = s => String(s == null ? "" : s)
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
+// ---------- 通用折线图（small-multiples 复用） ----------
+// series: [{key|get, color}]；get(f) 可自定义取数（如单位换算 KB/s→MB/s）
+function drawChart(id, frames, series, opts = {}) {
+  const cv = $(id);
+  if (!cv) return;
+  const ctx = cv.getContext("2d");
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, hgt = cv.clientHeight;
+  if (!w || !hgt) return;
+  if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(hgt * dpr)) {
+    cv.width = Math.round(w * dpr); cv.height = Math.round(hgt * dpr);
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, hgt);
+
+  const get = (s, f) => s.get ? s.get(f) : f[s.key];
+  const ymin = opts.ymin != null ? opts.ymin : 0;
+  let ymax = opts.ymax;
+  if (ymax == null) {  // 自适应上限：最大值的 1.15 倍
+    ymax = 0;
+    for (const s of series) for (const f of frames) {
+      const v = get(s, f);
+      if (v != null && v > ymax) ymax = v;
+    }
+    ymax = ymax > 0 ? ymax * 1.15 : 1;
+  }
+
+  const x0 = 46, top = 4, bottom = hgt - 12;
+  // 网格 + Y 轴刻度（4 档）
+  ctx.strokeStyle = "#21262d"; ctx.fillStyle = "#8b949e"; ctx.font = "10px sans-serif";
+  for (let i = 0; i <= 4; i++) {
+    const v = ymin + (ymax - ymin) * i / 4;
+    const y = bottom - i / 4 * (bottom - top);
+    ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(w, y); ctx.stroke();
+    const lbl = opts.fmtY ? opts.fmtY(v) : (ymax >= 100 ? Math.round(v) : +v.toFixed(1));
+    ctx.fillText(String(lbl), 2, y + 3);
+  }
+  // X 轴时间范围
+  if (frames.length >= 2) {
+    ctx.fillText(new Date(frames[0].t * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"}), x0, hgt - 1);
+    const last = new Date(frames[frames.length - 1].t * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
+    ctx.fillText(last, w - ctx.measureText(last).width - 2, hgt - 1);
+  }
+  if (frames.length < 2) return;
+  const span = w - x0 - 4, n = frames.length;
+  for (const s of series) {
+    ctx.strokeStyle = s.color; ctx.lineWidth = 1.5; ctx.beginPath();
+    let started = false;
+    for (let i = 0; i < n; i++) {
+      const v = get(s, frames[i]);
+      if (v == null) { started = false; continue; }
+      const x = x0 + i / (n - 1) * span;
+      const y = Math.max(top, Math.min(bottom, bottom - (v - ymin) / (ymax - ymin) * (bottom - top)));
+      started ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+      started = true;
+    }
+    ctx.stroke();
+  }
+  ctx.lineWidth = 1;
+}
+
+const pct = (used, total) => (used != null && total) ? +(used / total * 100).toFixed(1) : null;
+const lastFrame = () => histFrames.length ? histFrames[histFrames.length - 1] : null;
+
+// ---------- 图表总渲染（服务端历史帧 → 各小图） ----------
+function renderCharts() {
+  const f = histFrames, lf = lastFrame();
+  $("hist-range").textContent = f.length ?
+    `（${new Date(f[0].t * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"})} 起 ${f.length} 帧）` : "";
+
+  drawChart("ch-util", f, [{key: "gpu_util", color: "#3fb950"}, {key: "gpu_memctrl", color: "#58a6ff"}], {ymax: 100});
+  $("c-util").textContent = lf && lf.gpu_util != null ? `SM ${lf.gpu_util}%` : "";
+
+  drawChart("ch-vram", f, [
+    {get: fr => pct(fr.vram_used_mb, fr.vram_total_mb), color: "#58a6ff"},
+    {get: fr => pct(fr.vram_alloc_mb, fr.vram_torch_total_mb), color: "#39c5cf"},
+  ], {ymax: 100});
+  $("c-vram").textContent = lf && lf.vram_used_mb != null ? fmtMB(lf.vram_used_mb) : "";
+
+  drawChart("ch-power", f, [{key: "gpu_power_w", color: "#d29922"}], {fmtY: v => Math.round(v) + "W"});
+  $("c-power").textContent = lf && lf.gpu_power_w != null ? lf.gpu_power_w + " W" : "";
+
+  drawChart("ch-temp", f, [{key: "gpu_temp", color: "#f85149"}, {key: "gpu_fan", color: "#39c5cf"}], {ymax: 100});
+  $("c-temp").textContent = lf && lf.gpu_temp != null ? lf.gpu_temp + " ℃" : "";
+
+  drawChart("ch-pcie", f, [
+    {get: fr => fr.pcie_tx_kbps != null ? +(fr.pcie_tx_kbps / 1024).toFixed(1) : null, color: "#bc8cff"},
+    {get: fr => fr.pcie_rx_kbps != null ? +(fr.pcie_rx_kbps / 1024).toFixed(1) : null, color: "#39c5cf"},
+  ], {fmtY: v => Math.round(v) + ""});
+  $("c-pcie").textContent = lf && lf.pcie_tx_kbps != null ? `TX ${(lf.pcie_tx_kbps / 1024).toFixed(0)} MB/s` : "";
+
+  drawChart("ch-clock", f, [{key: "gpu_sm_clock", color: "#3fb950"}, {key: "gpu_mem_clock", color: "#d29922"}], {fmtY: v => Math.round(v) + ""});
+  $("c-clock").textContent = lf && lf.gpu_sm_clock != null ? lf.gpu_sm_clock + " MHz" : "";
+
+  drawChart("ch-ram", f, [{key: "ram_pct", color: "#bc8cff"}, {key: "swap_pct", color: "#d29922"}, {key: "cpu_pct", color: "#39c5cf"}], {ymax: 100});
+  $("c-ram").textContent = lf && lf.ram_pct != null ? `RAM ${lf.ram_pct}%` : "";
+
+  drawChart("ch-rss", f, [{key: "proc_rss_mb", color: "#58a6ff"}], {fmtY: v => fmtMB(v)});
+  $("c-rss").textContent = lf && lf.proc_rss_mb != null ? fmtMB(lf.proc_rss_mb) : "";
+}
+
 // ---------- GPU ----------
 function renderGpu(h, g) {
   const parts = [];
@@ -241,6 +397,7 @@ function renderGpu(h, g) {
       `已分配 ${fmtMB(alloc)} + 缓存 ${fmtMB(cache)} / 共 ${fmtMB(total)}（可用余量 ${fmtMB(h.vram_free_mb)}）`;
   }
   const gpu0 = g && g.available && g.gpus.length ? g.gpus[0] : null;
+  const throttle = gpu0 && gpu0.throttle_reasons ? gpu0.throttle_reasons.filter(r => r !== "gpu_idle") : [];
   const m = [
     ["SM 利用率", gpu0 && gpu0.utilization_percent != null ? gpu0.utilization_percent + " %" : "—",
      gpu0 ? "显存控制器 " + (gpu0.mem_controller_percent ?? "—") + " %" : (g ? esc(g.reason || "NVML 不可用") : "")],
@@ -248,55 +405,42 @@ function renderGpu(h, g) {
     ["功耗", gpu0 && gpu0.power_w != null ? gpu0.power_w + " W" : "—",
      gpu0 && gpu0.power_limit_w != null ? "上限 " + gpu0.power_limit_w + " W" : ""],
     ["风扇", gpu0 && gpu0.fan_percent != null ? gpu0.fan_percent + " %" : "—", ""],
+    ["SM 时钟", gpu0 && gpu0.sm_clock_mhz != null ? gpu0.sm_clock_mhz + " MHz" : "—",
+     gpu0 && gpu0.sm_clock_max_mhz != null ? "上限 " + gpu0.sm_clock_max_mhz + " MHz" : ""],
+    ["PCIe", gpu0 && gpu0.pcie_tx_kbps != null ? "TX " + (gpu0.pcie_tx_kbps / 1024).toFixed(0) + " MB/s" : "—",
+     gpu0 && gpu0.pcie_rx_kbps != null ? "RX " + (gpu0.pcie_rx_kbps / 1024).toFixed(0) + " MB/s" : ""],
     ["常驻权重", fmtMB(h.resident_weights_mb), "模型 " + (h.resident_models || []).length + " 个"],
     ["进程占用", fmtMB(h.vram_process_reserved_mb), "分配器保留"],
+    ["限频", throttle.length ? throttle.join(", ") : "无",
+     gpu0 && gpu0.throttle_reasons && gpu0.throttle_reasons.includes("gpu_idle") ? "（gpu_idle=空闲正常）" : ""],
   ];
   $("gpu-metrics").innerHTML = m.map(([k, v, sub]) =>
-    `<div class="metric"><div class="k">${k}</div><div class="v">${v}</div><div class="sub">${sub}</div></div>`
+    `<div class="metric"><div class="k">${k}</div><div class="v"${k === "限频" && v !== "无" ? ' style="color:var(--amber);font-size:13px"' : ""}>${v}</div><div class="sub">${sub}</div></div>`
   ).join("");
-
-  // 历史采样：显存占用%（可用口径）+ SM 利用率%
-  if (total > 0) {
-    hist.push({
-      t: Date.now(),
-      vramPct: (total - (h.vram_free_mb || 0)) / total * 100,
-      util: gpu0 && gpu0.utilization_percent != null ? gpu0.utilization_percent : null,
-    });
-    if (hist.length > HIST_MAX) hist.shift();
-    drawHist();
-  }
 }
 
-function drawHist() {
-  const cv = $("hist"), ctx = cv.getContext("2d");
-  const dpr = window.devicePixelRatio || 1;
-  const w = cv.clientWidth, hgt = cv.clientHeight;
-  if (cv.width !== w * dpr) { cv.width = w * dpr; cv.height = hgt * dpr; }
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, w, hgt);
-  // 网格线 0/25/50/75/100%
-  ctx.strokeStyle = "#21262d"; ctx.fillStyle = "#8b949e"; ctx.font = "10px sans-serif";
-  for (let p = 0; p <= 100; p += 25) {
-    const y = hgt - p / 100 * (hgt - 14) - 2;
-    ctx.beginPath(); ctx.moveTo(28, y); ctx.lineTo(w, y); ctx.stroke();
-    ctx.fillText(p + "%", 2, y + 3);
-  }
-  if (hist.length < 2) return;
-  const x0 = 28, span = w - x0;
-  const plot = (key, color) => {
-    ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.beginPath();
-    let started = false;
-    hist.forEach((p, i) => {
-      if (p[key] == null) { started = false; return; }
-      const x = x0 + i / (HIST_MAX - 1) * span;
-      const y = hgt - p[key] / 100 * (hgt - 14) - 2;
-      started ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
-      started = true;
-    });
-    ctx.stroke(); ctx.lineWidth = 1;
-  };
-  plot("vramPct", "#58a6ff");
-  plot("util", "#3fb950");
+// ---------- 系统资源（RAM/swap/CPU/RSS/磁盘/对象仓库，WSL2 VM 口径） ----------
+function renderSysRes() {
+  const lf = lastFrame();
+  const ramPct = lf && lf.ram_pct != null ? lf.ram_pct : 0;
+  $("ram-used").style.width = ramPct + "%";
+  $("ram-lbl").textContent = lf && lf.ram_used_mb != null ?
+    `已用 ${fmtMB(lf.ram_used_mb)} / 共 ${fmtMB(lf.ram_total_mb)}（${lf.ram_pct}%）` : "—";
+  const swapPct = lf && lf.swap_pct != null ? lf.swap_pct : 0;
+  $("swap-used").style.width = swapPct + "%";
+  $("swap-lbl").textContent = lf && lf.swap_used_mb != null ?
+    (lf.swap_used_mb > 0 ? `⚠️ 已用 ${fmtMB(lf.swap_used_mb)}（${lf.swap_pct}%）` : "未使用") : "—";
+
+  const m = [
+    ["CPU", lf && lf.cpu_pct != null ? lf.cpu_pct + " %" : "—", "WSL2 VM 口径"],
+    ["进程 RSS", lf && lf.proc_rss_mb != null ? fmtMB(lf.proc_rss_mb) : "—", "offload 权重宿主"],
+    ["模型盘剩余", lf && lf.disk_free_mb != null ? fmtMB(lf.disk_free_mb) : "—",
+     lf && lf.disk_pct != null ? "已用 " + lf.disk_pct + "%" : ""],
+    ["对象仓库", lf && lf.store_objects != null ? lf.store_objects + " 个" : "—", "TTL 自动清理"],
+  ];
+  $("sys-metrics").innerHTML = m.map(([k, v, sub]) =>
+    `<div class="metric"><div class="k">${k}</div><div class="v">${v}</div><div class="sub">${sub}</div></div>`
+  ).join("");
 }
 
 // ---------- 常驻模型（join 租约归属） ----------
@@ -320,8 +464,19 @@ function renderModels(h, leases) {
   </table>`;
   $("models-wrap").querySelectorAll("[data-unload]").forEach(b => b.onclick = async () => {
     if (!confirm(`卸载常驻模型 ${b.dataset.unload}？`)) return;
-    await op(() => api("/model/unload", { method: "POST", body: JSON.stringify({ target: b.dataset.unload }) }));
+    await op(async () => reportUnload(await api("/model/unload", { method: "POST", body: JSON.stringify({ target: b.dataset.unload }) })));
   });
+}
+
+// 卸载结果反馈：被 pin/租约跳过的条目在此显式提示（否则「点了没反应」）
+function reportUnload(r) {
+  if (!r) return;
+  if (r.skipped_reasons) {
+    alert("部分条目未卸载（被跳过）：\n" + r.skipped_reasons +
+      "\n\n可在「执行租约」卡片释放对应租约后重试；算子执行中 pin 的请等任务结束。");
+  } else if (r.unloaded === "(none)") {
+    alert("没有匹配的常驻模型被卸载（target 未命中或已全部卸载）。");
+  }
 }
 
 // ---------- 租约 ----------
@@ -331,7 +486,7 @@ function renderLeases(d) {
   $("lease-count").textContent = ls.length + " 个活跃";
   if (!ls.length) { $("leases-wrap").innerHTML = '<div class="empty">无活跃租约</div>'; return; }
   $("leases-wrap").innerHTML = `<table>
-    <tr><th>租约 id</th><th>持有模型</th><th>空闲</th><th style="width:34%" title="TTL ${fmtSec(ttl)} 滑动过期，每次租约活动刷新">TTL 倒计时</th></tr>
+    <tr><th>租约 id</th><th>持有模型</th><th>空闲</th><th style="width:30%" title="TTL ${fmtSec(ttl)} 滑动过期，每次租约活动刷新">TTL 倒计时</th><th></th></tr>
     ${ls.map(l => {
       const ratio = Math.min(1, (l.idle_seconds || 0) / ttl);
       const cls = ratio > 0.8 ? "hot" : ratio > 0.5 ? "warn" : "";
@@ -341,13 +496,19 @@ function renderLeases(d) {
         <td class="mono">${fmtSec(l.idle_seconds)}</td>
         <td><div class="bar"><div class="seg-fill ${cls}" style="width:${ratio * 100}%"></div>
           <div class="lbl">剩余 ${fmtSec(Math.max(0, ttl - (l.idle_seconds || 0)))}</div></div></td>
+        <td><button class="danger" data-release="${esc(l.lease)}">释放</button></td>
       </tr>`;
     }).join("")}
   </table>`;
+  $("leases-wrap").querySelectorAll("[data-release]").forEach(b => b.onclick = async () => {
+    if (!confirm(`释放租约 ${b.dataset.release}？\n\n只摘除租约登记、不卸模型。请确认对应执行已结束：释放后其名下常驻模型失去并发保护，可能被其它执行的加载淘汰。`)) return;
+    await op(() => api("/leases/" + encodeURIComponent(b.dataset.release), { method: "DELETE" }));
+  });
 }
 
 // ---------- 任务队列 ----------
 function renderJobs(d) {
+  const lf = lastFrame();
   const js = ((d && d.jobs) || []).slice().sort((a, b) => {
     const rank = s => s === "running" ? 0 : s === "pending" ? 1 : 2;
     return rank(a.status) - rank(b.status) || (b.created_at || 0) - (a.created_at || 0);
@@ -359,16 +520,19 @@ function renderJobs(d) {
   $("jobs-wrap").innerHTML = `<table>
     <tr><th>job</th><th>类型</th><th>状态</th><th>进度</th><th>租约</th><th>提交</th><th>耗时</th><th></th></tr>
     ${shown.map(j => {
-      const pct = j.progress && j.progress.percent;
+      const pct2 = j.progress && j.progress.percent;
       const dur = j.finished_at && j.started_at ? j.finished_at - j.started_at
         : j.started_at ? Date.now() / 1000 - j.started_at : null;
       const active = j.status === "running" || j.status === "pending";
+      // 服务端差分的每步秒数（采样任务速度，offload 瓶颈一眼可见）
+      const sps = j.status === "running" && lf && lf.run_job === j.id && lf.sec_per_step != null
+        ? `<div class="dim" style="font-size:11px">${lf.sec_per_step}s/步</div>` : "";
       return `<tr>
         <td class="mono" title="${esc(j.id)}">${esc(shortId(j.id))}</td>
         <td class="dim">${esc(j.kind)}</td>
         <td><span class="chip ${esc(j.status)}">${esc(j.status)}</span>
           ${j.error ? `<div class="dim" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(j.error)}">${esc(j.error)}</div>` : ""}</td>
-        <td>${pct != null ? `<div class="pbar"><div style="width:${pct}%"></div><div class="lbl">${pct}%</div></div>` : '<span class="dim">—</span>'}</td>
+        <td>${pct2 != null ? `<div class="pbar"><div style="width:${pct2}%"></div><div class="lbl">${pct2}%</div></div>${sps}` : '<span class="dim">—</span>'}</td>
         <td class="mono dim">${esc(shortId(j.lease)) || "—"}</td>
         <td class="mono dim">${fmtTs(j.created_at)}</td>
         <td class="mono">${dur != null ? fmtSec(dur) : "—"}</td>
@@ -400,7 +564,7 @@ async function op(fn) {
 $("btn-gc").onclick = () => op(() => api("/gc", { method: "POST" }));
 $("btn-unload-all").onclick = async () => {
   if (!confirm("卸载全部常驻模型？（其它活跃租约持有的条目会被跳过）")) return;
-  await op(() => api("/model/unload", { method: "POST", body: "{}" }));
+  await op(async () => reportUnload(await api("/model/unload", { method: "POST", body: "{}" })));
 };
 $("btn-interrupt-all").onclick = async () => {
   if (!confirm("中断当前 running + 全部排队任务？")) return;
@@ -415,6 +579,13 @@ function renderSys(h) {
     ["vram_low", h.vram_low ? '<b style="color:var(--red)">是（退化）</b>' : "否"],
   ].map(([k, v]) => `<span>${k}: <b>${v}</b></span>`).join("");
 }
+
+// ---------- 历史窗口切换 ----------
+document.querySelectorAll("[data-win]").forEach(b => b.onclick = () => {
+  WIN_MIN = +b.dataset.win;
+  document.querySelectorAll("[data-win]").forEach(x => x.classList.toggle("on", x === b));
+  pollHistory();
+});
 
 // ---------- 轮询主循环 ----------
 let polling = false;
@@ -433,11 +604,14 @@ async function poll() {
     setLamp(h.status === "ok" ? "ok" : "degraded",
       (h.status === "ok" ? "正常" : "退化") + "｜" + new Date().toLocaleTimeString());
     renderGpu(h, g);
+    renderSysRes();
     renderModels(h, l ? l.leases : []);
     renderLeases(l);
     renderJobs(j);
     renderOom(h);
     renderSys(h);
+    // 历史低频拉取（每 5 次轮询一次，10s）
+    if (++histTimer >= HIST_EVERY) { histTimer = 0; pollHistory(); }
   } catch (e) {
     setLamp("down", "连接失败");
     showErr(e.message);
@@ -445,7 +619,25 @@ async function poll() {
     polling = false;
   }
 }
+
+let histPolling = false;
+async function pollHistory() {
+  if (histPolling) return;
+  histPolling = true;
+  try {
+    const d = await api("/metrics/history?minutes=" + WIN_MIN);
+    histFrames = d.frames || [];
+    renderCharts();
+    renderSysRes();   // 系统资源面板数据来自历史帧，刷新联动
+  } catch (e) {
+    // 历史拉取失败不打断状态轮询（banner 已由主循环管理）
+  } finally {
+    histPolling = false;
+  }
+}
+
 poll();
+pollHistory();
 setInterval(poll, POLL_MS);
 </script>
 </body>

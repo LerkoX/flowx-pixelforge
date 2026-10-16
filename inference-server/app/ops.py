@@ -319,10 +319,17 @@ def model_unload(models, target=""):
     字符串（node 输出端口只能传字符串，便于在画布/日志里看结果）。
     走与加载一致的淘汰路径：断对象仓库视图 → gc.collect → empty_cache。
     """
-    done = models.unload(target)
+    done, skipped = models.unload_detail(target)
     resident = models.resident()
-    return {"unloaded": ",".join(done) if done else "(none)",
-            "resident": ",".join(resident) if resident else "(empty)"}
+    out = {"unloaded": ",".join(done) if done else "(none)",
+           "resident": ",".join(resident) if resident else "(empty)"}
+    # 跳过明细：节点输出只传字符串（skipped），端点/监控页另给结构化 skipped_detail
+    if skipped:
+        out["skipped"] = ",".join(s["key"] for s in skipped)
+        out["skipped_reasons"] = "；".join(
+            f"{s['key']}（{s.get('reason_text') or s['reason']}）" for s in skipped)
+        out["skipped_detail"] = skipped
+    return out
 
 
 def clip_encode(pipe, text, width=0, height=0, clip_skip=None):

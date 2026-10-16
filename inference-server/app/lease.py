@@ -12,9 +12,10 @@
   OOM 自愈误杀正在前向的模型。
 - 保护：淘汰决策（含显式 unload）跳过**其它活跃租约**持有的条目；
   本租约自己的条目对自己可淘汰（同流水线内换模型不受影响）。
-- 释放：TTL 滑动过期唯一途径（LEASE_TTL_SECONDS，默认 30min，每次租约
+- 释放：TTL 滑动过期为主要途径（LEASE_TTL_SECONDS，默认 30min，每次租约
   活动刷新）——不依赖调用方收尾，节点崩溃/进程被杀/隧道断均自愈；
-  显式 release 端点不做（无真实调用方，见决策 1）。
+  另有 DELETE /leases/{id} 显式释放（监控页清理僵尸租约：执行已结束但
+  TTL 未到期的残留租约会挡住 /model/unload，实机 exec772 事故）。
 - 排队：加载需腾地方但可淘汰条目都被其它租约占着时，阻塞等待
   （LEASE_WAIT_TIMEOUT，默认 300s）周期重查；超时失败带 oom_help 风格
   指引。等待期间持模型锁＝后来的加载自然排队。
@@ -96,6 +97,17 @@ class LeaseBook:
         """清理过期租约（等待循环周期调用）；返回过期的 lease_id 列表。"""
         with self._lock:
             return self._sweep_locked(time.time())
+
+    def release(self, lease_id) -> bool:
+        """显式摘除租约（僵尸租约清理）。只删登记、不卸模型：正在执行的算子
+        仍受 ModelManager._pins 保护；但释放后该租约名下的常驻条目失去并发
+        保护，可能被其它执行的加载淘汰——调用方需确认对应执行已结束。
+        返回是否有该租约。"""
+        lid = sanitize(lease_id)
+        if lid is None:
+            return False
+        with self._lock:
+            return self._leases.pop(lid, None) is not None
 
     def keys_of_others(self, lease_id):
         """其它活跃租约持有的 key 集合（淘汰跳过）；顺带清扫过期租约。"""
