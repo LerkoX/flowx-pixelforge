@@ -28,6 +28,21 @@ VRAM_BUDGET = os.environ.get("VRAM_BUDGET", "1").lower() not in ("0", "false", "
 VRAM_RESERVE_MB = int(os.environ.get("VRAM_RESERVE_MB", "1024"))
 # 体积估算放大系数：显存占用 = 权重 + CUDA 上下文/缓冲/碎片
 VRAM_LOAD_FACTOR = float(os.environ.get("VRAM_LOAD_FACTOR", "1.25"))
+# 物理超订硬闸门（exec 795，2026-10-16）：WSL2/WDDM 下 CUDA 超订**不报 OOM**，
+# 而是借用主机内存按页取用 —— OOM 自愈护栏（engine._call_op）因此全程失效，
+# 采样静默退化到 170~210s/步。1 = 判定"物理上装不下"时**拒绝加载**（抛带指引的
+# RuntimeError），不让它掉进兜底；0 = 只打醒目 WARNING（默认，行为兼容）。
+# 可用 POST /model/policy {"vram_strict":1} 在运行时打开，无需重建容器。
+VRAM_STRICT = os.environ.get("VRAM_STRICT", "0").lower() in ("1", "true", "yes")
+# offload=model/sequential 条目**不按权重全量占显存预算**（权重在 CPU，按需搬进卡），
+# 只给一个保守 floor 代表"运行时峰值子模块 + 激活"。
+# 为什么必须分账（同一次事故）：SDXL 的 offload 条目按全量记是 6616MB×1.25 >
+# 整卡 8GB ⇒ 预算条件 `free+freed ≥ need+reserve` **永远不可能满足**，于是每次
+# 加载都把其它可淘汰条目全部清空（实测 flux 四条 6470/477/381/123MB 被逐个顶掉），
+# 清完它自己也装不下 ⇒ 照样掉进兜底。
+OFFLOAD_VRAM_FLOOR_MB = int(os.environ.get("OFFLOAD_VRAM_FLOOR_MB", "1024"))
+# 运行时可变旋钮（app.policy 可读可写；env 给初值，POST /model/policy 改）
+KNOBS = {"vram_strict": int(VRAM_STRICT), "offload_floor_mb": OFFLOAD_VRAM_FLOOR_MB}
 OFFLOAD_MODE = offload.resolve_offload_mode()   # none / model / sequential
 QUANTIZATION = offload.resolve_quantization()   # fp8 接口预留，未实现时告警
 # M3：图像管道的 VAE 单独转 fp32 防黑图（fp16 解码溢出），代价 ~0.2GB 显存；
@@ -89,6 +104,11 @@ class ModelManager:
         self._archs = {}  # pipe_key -> 管道类名（嗅探结果，供诊断/分派）
         self._adapters = {}  # pipe_key -> set(已加载的 adapter 名)
         self._sizes = {}     # pipe_key -> 估算显存占用（字节，用于预算式淘汰与诊断）
+        # pipe_key -> **按 offload 分账后的显存预算占用**（offload 条目只算 floor）；
+        # 与 _sizes（权重体积，诊断用）分开：预算判断用 _vram，报告用 _sizes。
+        self._vram_sizes = {}
+        self._offloads = {}  # pipe_key -> "none"|"model"|"sequential"（诊断/分账依据）
+        self._last_oversub_warn = 0.0
         self._estimate_cache = {}  # (path, dtype) -> 估算字节数
         self._pins = set()   # 执行中在用的 key（淘汰跳过；引擎算子执行期间 pin）
         self.leases = lease.LeaseBook()  # 执行租约 → 持有 keys（dev-plan §43.2）
@@ -249,8 +269,20 @@ class ModelManager:
         dt = _resolve_dtype(dtype)
         om = _resolve_offload(offload)
         t5 = _resolve_use_t5(use_t5)
-        if dtype not in (None, "", "auto") or offload not in (None, "", "auto") \
-                or use_t5 not in (None, "", "auto"):
+        explicit = (dtype not in (None, "", "auto")
+                    or offload not in (None, "", "auto")
+                    or use_t5 not in (None, "", "auto"))
+        if om == "none" and self._strict():
+            est_hint = self.estimate(path, dt)
+            downgrade, why = self._needs_downgrade(est_hint)
+            if downgrade:
+                # 硬闸门（B1）：物理上装不下时不再硬塞（被 WSL2 兜底接管＝PCIe 抖动），
+                # 强制降档为 model：权重留 CPU，按子模块搬移。
+                print(f"[model-manager] vram_strict=1 → offload 降档 none→model"
+                      f"（{why}）", flush=True)
+                om = "model"
+                explicit = True
+        if explicit:
             key = f"{key}|dtype={dt}|offload={om}|t5={int(t5)}"
         with self._lock:
             if key in self._pipes:
@@ -258,7 +290,8 @@ class ModelManager:
                 self._attribute(key)
                 return key, False
             est = self.estimate(path, dt)
-            self._evict_if_needed(est)
+            self._warn_oversub_once()
+            self._evict_if_needed(self.vram_budget_of(est, om))
             t0 = time.time()
             loader, cls_name = sniff.sniff_arch(path)
             pipe = self._instantiate(path, loader, cls_name,
@@ -275,8 +308,12 @@ class ModelManager:
             self._pipes[key] = pipe
             self._archs[key] = cls_name
             self._sizes[key] = est
+            self._vram_sizes[key] = self.vram_budget_of(est, om)
+            self._offloads[key] = om
             self._last_used[key] = time.time()
-            print(f"[model-manager] loaded '{key}' ({cls_name}) in {time.time()-t0:.1f}s",
+            print(f"[model-manager] loaded '{key}' ({cls_name}) in {time.time()-t0:.1f}s"
+                  f" [offload={om} 权重~{est / 1024**2:.0f}MB 预算"
+                  f"~{self._vram_size(key) / 1024**2:.0f}MB]",
                   flush=True)
             self._attribute(key)
             return key, True
@@ -312,6 +349,8 @@ class ModelManager:
             self._pipes[key] = shim
             self._archs[key] = f"AutoencoderKL({loader})"
             self._sizes[key] = est
+            self._vram_sizes[key] = self.vram_budget_of(est, "none")
+            self._offloads[key] = "none"  # 组件常驻上卡（不参与 offload 钩子）
             self._last_used[key] = time.time()
             print(f"[model-manager] loaded vae '{key}' in {time.time()-t0:.1f}s",
                   flush=True)
@@ -350,6 +389,8 @@ class ModelManager:
             self._pipes[key] = cn
             self._archs[key] = f"ControlNetModel({loader})"
             self._sizes[key] = est
+            self._vram_sizes[key] = self.vram_budget_of(est, "none")
+            self._offloads[key] = "none"  # 组件常驻上卡（采样侧按余量决定是否按次搬移）
             self._last_used[key] = time.time()
             print(f"[model-manager] loaded controlnet '{key}' "
                   f"in {time.time()-t0:.1f}s", flush=True)
@@ -558,6 +599,167 @@ class ModelManager:
             pass
         return int(free + cached)
 
+    # ---------- 物理口径占用快照与超订闸门（B1，exec 795） ----------
+
+    @staticmethod
+    def occupancy():
+        """当前显存占用的**物理口径**快照（/health 诊断 + 超订判定）。
+
+        - `driver_free_bytes`：驱动视角余量（兜底态下恒 0）
+        - `reserved/allocated/reclaimable_bytes`：分配器账本
+        - `oversubscribed`：vram.oversubscribed 判定（见该函数注释）
+        - `headroom_bytes`：物理真余量 = total − reserved（与乐观口径
+          `driver_free + reclaimable` 的区别见 vram.headroom_bytes）
+        """
+        out = {"available": False, "total_bytes": 0, "driver_free_bytes": None,
+               "reserved_bytes": 0, "allocated_bytes": 0,
+               "reclaimable_bytes": 0, "oversubscribed": False,
+               "saturated": False, "oversub_ratio": 0.0, "headroom_bytes": 0}
+        if not torch.cuda.is_available():
+            return out
+        try:
+            free, total = torch.cuda.mem_get_info()
+        except Exception:  # pragma: no cover - 驱动异常时退化为无信息
+            return out
+        reserved = allocated = 0
+        try:
+            reserved = int(torch.cuda.memory_reserved(0))
+            allocated = int(torch.cuda.memory_allocated(0))
+        except Exception:  # pragma: no cover
+            pass
+        out.update({
+            "available": True,
+            "total_bytes": int(total),
+            "driver_free_bytes": int(free),
+            "reserved_bytes": reserved,
+            "allocated_bytes": allocated,
+            "reclaimable_bytes": max(0, reserved - allocated),
+            "oversubscribed": vram.oversubscribed(reserved, total),
+            "saturated": vram.saturated(reserved, total, free),
+            "oversub_ratio": round(vram.oversub_ratio(reserved, total), 3),
+            "headroom_bytes": vram.headroom_bytes(reserved, total),
+        })
+        return out
+
+    def vram_budget_bytes(self):
+        """已申报的显存预算合计（按 offload 分账，见 _vram_size）。"""
+        return sum(self._vram_size(k) for k in self._pipes)
+
+    def _vram_size(self, key):
+        """条目的**显存预算**占用：offload=model/sequential 只算 floor（权重在 CPU）。
+
+        为什么不直接用 _sizes（权重体积）：预算式淘汰拿它做
+        `free+freed ≥ need+reserve` 的加法，把"不在显存里的权重"也加进去，
+        会让条件永远无法满足 ⇒ 无意义地把别的条目全淘汰（见 OFFLOAD_VRAM_FLOOR_MB）。
+        兼容：老代码/单测直接往 _pipes 摆条目（只填 _sizes）时回退到 _sizes。
+        """
+        if key in self._vram_sizes:
+            return self._vram_sizes[key]
+        return self._sizes.get(key, 0)
+
+    def _other_leases_vram(self):
+        """其它活跃租约名下常驻条目的显存预算合计（B4 总量仲裁依据）。"""
+        ks = self.leases.keys_of_others(lease.current())
+        return sum(self._vram_size(k) for k in ks if k in self._pipes)
+
+    def _strict(self):
+        """当前是否开启超订硬闸门（env 默认，可被 /model/policy 运行时覆盖）。"""
+        return bool(KNOBS.get("vram_strict"))
+
+    @staticmethod
+    def _offload_floor():
+        """offload 条目的显存预算 floor（字节，运行时可变）。"""
+        return max(0, int(KNOBS.get("offload_floor_mb", OFFLOAD_VRAM_FLOOR_MB))) * 1024**2
+
+    def _warn_oversub_once(self, min_interval=60.0):
+        """超订告警（节流）：把"静默掉进 host memory 兜底"变成日志里看得见的事实。
+
+        exec 795：全程 100 分钟无任何告警（OOM 自愈不触发、/health 报 ok），
+        只有事后看 reserved(9276MB) > total(8192MB) 才能反推出来。
+        """
+        occ = self.occupancy()
+        if not occ.get("oversubscribed"):
+            return False
+        now = time.time()
+        if now - self._last_oversub_warn < min_interval:
+            return True
+        self._last_oversub_warn = now
+        print(f"[model-manager] WARNING: 物理显存超订 —— reserved "
+              f"{occ['reserved_bytes'] / 1024**2:.0f}MB > total "
+              f"{occ['total_bytes'] / 1024**2:.0f}MB（driver_free="
+              f"{occ['driver_free_bytes']}，物理真余量 "
+              f"{occ['headroom_bytes'] / 1024**2:.0f}MB）：CUDA 转 host memory "
+              f"兜底（WSL2 不报 OOM，OOM 自愈护栏失效），采样会退化到分钟级/步。"
+              f"处置：POST /model/unload {{}} 清空常驻 / 重启容器 / 减少并发流水线",
+              flush=True)
+        return True
+
+    def _check_total_budget(self, need):
+        """B4 总量仲裁：其它活跃租约的申报显存 + 本次需求 > 物理 − reserve 时，
+        明确拒绝（vram_strict=1）或给出可执行提示（默认），而不是放任掉进兜底。
+
+        exec 795 的真实场景：租约 794（FLUX，~7.4GB）+ 795（SDXL+CN，~9.0GB）
+        = 16.4GB 硬塞 8GB。租约机制只保证"不互踩淘汰"，**不做总量预算** ⇒
+        两条流水线一起掉进 PCIe 抖动（170~210s/步，干净态 40s/步）。
+        """
+        occ = self.occupancy()
+        total = occ.get("total_bytes") or 0
+        if not total or not need:
+            return False
+        others_keys = self.leases.keys_of_others(lease.current())
+        others = sum(self._vram_size(k) for k in others_keys if k in self._pipes)
+        budget = total - VRAM_RESERVE_MB * 1024**2
+        if others + int(need) <= budget:
+            return False
+        holders = self.leases.leases_holding(sorted(others_keys),
+                                            exclude=lease.current())
+        detail = (f"本次加载需 {need / 1024**2:.0f}MB + 其它执行租约占用 "
+                  f"{others / 1024**2:.0f}MB > 物理可用预算 {budget / 1024**2:.0f}MB"
+                  f"（占用租约：{sorted(holders) or '(未知)'}）")
+        if self._strict():
+            raise RuntimeError(oversub_help(detail))
+        print(f"[model-manager] WARNING: 总量超订 —— {detail}", flush=True)
+        return True
+
+    def _needs_downgrade(self, est_bytes):
+        """是否必须把 offload=none 降档（返回 (bool, 原因文案)）。
+
+        两个触发条件（都是"硬塞肯定翻车"的物理事实，不是保守估算）：
+        1) 已经在 host memory 兜底态（oversubscribed）——再往卡上塞只会加重抖动；
+        2) 权重全量上卡本身就超过"物理显存 − reserve"——肯定塞不下。
+        外部记忆：exec 795，SDXL 6616MB×1.25 > 8192MB − 1024MB 就属于第 2 种。
+        """
+        occ = self.occupancy()
+        if not occ.get("available"):
+            return False, ""
+        if occ["oversubscribed"]:
+            return True, (f"已在 host memory 兜底态"
+                          f"（reserved {occ['reserved_bytes'] / 1024**2:.0f}MB > "
+                          f"total {occ['total_bytes'] / 1024**2:.0f}MB）")
+        total = occ.get("total_bytes") or 0
+        need = int(int(est_bytes or 0) * VRAM_LOAD_FACTOR)
+        if total and need > total - VRAM_RESERVE_MB * 1024**2:
+            return True, (f"权重全量上卡不可行（{need / 1024**2:.0f}MB > "
+                          f"物理 {total / 1024**2:.0f}MB − reserve {VRAM_RESERVE_MB}MB）")
+        return False, ""
+
+    @classmethod
+    def vram_budget_of(cls, est_bytes, offload_mode):
+        """按 offload 档位把"权重体积"折算成"显存预算"（纯函数，便于无 GPU 单测）。
+
+        offload=none（权重全量上卡）→ 权重体积；
+        offload=model/sequential（权重在 CPU，按需搬移）→ floor。
+        """
+        try:
+            est = int(est_bytes or 0)
+        except (TypeError, ValueError):
+            est = 0
+        if offload_mode in ("model", "sequential"):
+            # 只按 floor 计：权重在 CPU，显存峰值 ≈ 最大子模块 + 激活，与总权重无关。
+            # （不能用 max(est, floor)——那就等于叉回“按全量算”，本修复白做）
+            return cls._offload_floor()
+        return est
+
     def resident_weights(self) -> int:
         """当前常驻模型的权重总量估算（字节）。"""
         return sum(int(self._sizes.get(k, 0)) for k in self._pipes)
@@ -614,7 +816,7 @@ class ModelManager:
         # 本租约自己的条目对自己可淘汰（同流水线内换模型不受影响）
         pinned |= self.leases.keys_of_others(lease.current())
         plan = vram.plan_eviction(
-            [(k, self._sizes.get(k, 0), self._last_used.get(k, 0)) for k in self._pipes],
+            [(k, self._vram_size(k), self._last_used.get(k, 0)) for k in self._pipes],
             free_bytes=free or 0,
             need_bytes=need if free is not None else 0,
             reserve_bytes=VRAM_RESERVE_MB * 1024**2 if free is not None else 0,
@@ -687,6 +889,8 @@ class ModelManager:
             print(f"[model-manager] WARNING: 余量仍不足（free={after / 1024**2:.0f}MB "
                   f"< need+reserve={need_total / 1024**2:.0f}MB）："
                   f"可淘汰条目已用尽或体积未知（pin={sorted(self._pins)}）", flush=True)
+            # B4 总量仲裁：余量不足且别的租约占着大盘时，把事实说清（strict 直接拒）
+            self._check_total_budget(need)
 
     # ---------- 显式卸载（dev-plan §21.3 任务 2） ----------
 
@@ -788,7 +992,11 @@ class ModelManager:
         return sorted(self._pipes.keys())
 
     def details(self):
-        """常驻条目明细（/health 诊断：体积估算/最近使用/是否在用）。"""
+        """常驻条目明细（/health 诊断：体积估算/最近使用/是否在用）。
+
+        两个体积字段的区别（B1 分账）：`est_vram_mb` = 权重体积（诊断用）；
+        `vram_est_mb` = 计入显存预算的量（offload 条目只算 floor）。
+        """
         now = time.time()
         out = []
         for key in sorted(self._pipes):
@@ -796,9 +1004,61 @@ class ModelManager:
                 "key": key,
                 "arch": self._archs.get(key),
                 "est_vram_mb": round(self._sizes.get(key, 0) / 1024**2),
+                "vram_est_mb": round(self._vram_size(key) / 1024**2),
+                "offload": self._offloads.get(key, "none"),
                 "idle_seconds": round(now - self._last_used.get(key, now), 1),
                 "pinned": key in self._pins,
             })
+        return out
+
+    def module_map(self, key):
+        """条目的**顶层组件 → (device, dtype, MB)**（诊断：验证 offload 是否真下车）。
+
+        为什么要这个（exec 795）：`offload=model` 的钩子是**惰性**的（accelerate
+        cpu_offload_with_hook：下一个模块前向时才把上一个搬回 CPU），而本服务是
+        手动采样循环（只调 unet）—— 光看参数名无法判断 text_encoder/vae 到底
+        在不在卡上。实测 `allocated` 8000MB ≈ UNet 2.56 + CN 2.5 + CLIP-L/G 1.64
+        + VAE fp32 0.34 + 激活 1，高度嗂示 CLIP 没下车，但需要这个明细实锤。
+        不可用/无 CUDA 时返回空列表（/health 不因诊断失败而 500）。
+        """
+        pipe = self._pipes.get(key)
+        if pipe is None:
+            return []
+        try:
+            import torch.nn as nn
+        except Exception:  # pragma: no cover
+            return []
+        items = []
+        try:
+            if isinstance(pipe, nn.Module):
+                children = list(pipe.named_children())
+                items = children if children else [(key, pipe)]
+            else:
+                # 视图对象（VAEShim / CLIP/VAE 视图等）：探测常见组件属性
+                seen = set()
+                for name in ("vae", "text_encoder", "text_encoder_2",
+                             "text_encoder_3", "unet", "transformer",
+                             "controlnet", "image_encoder"):
+                    mod = getattr(pipe, name, None)
+                    if isinstance(mod, nn.Module) and id(mod) not in seen:
+                        seen.add(id(mod))
+                        items.append((name, mod))
+        except Exception:  # noqa: BLE001 - 诊断不抛
+            return []
+        out = []
+        for name, mod in items:
+            dev, dt, mb = "?", "?", 0.0
+            try:
+                p = next(mod.parameters())
+                dev, dt = str(p.device), str(p.dtype).replace("torch.", "")
+                mb = sum(x.numel() * x.element_size()
+                         for x in mod.parameters()) / 1024**2
+            except StopIteration:
+                pass
+            except Exception:  # noqa: BLE001 - 诊断不抛
+                pass
+            out.append({"module": name, "device": dev, "dtype": dt,
+                        "mb": round(mb)})
         return out
 
 
@@ -842,3 +1102,18 @@ def oom_help(op_name, detail=""):
             f"建议：① 降低分辨率/步数或 batch；② 加载时用 offload=model|sequential；"
             f"③ 调小 VRAM_RESERVE_MB 或提高 VRAM_BUDGET；"
             f"④ 卸载其它常驻模型（POST /model/unload 或 model-unload 节点）后重试。{detail}")
+
+
+def oversub_help(detail=""):
+    """物理超订/总量超订的可执行指引（vram_strict=1 时拒载的错误文案）。
+
+    与 oom_help 的区别：这不是"CUDA 报 OOM"（WSL2 根本不会报），而是**提前**
+    发现"再塞下去只能走主机内存兜底"。
+    """
+    return (f"显存超订，拒绝加载：{detail}。建议："
+            f"① 错开两条重流水线（8GB 卡同时只跑一条）；"
+            f"② 先 POST /model/unload {{}} 释放常驻，或让对端流水线收尾加 model-unload 节点；"
+            f"③ 加载时用 offload=model|sequential（权重留 CPU）；"
+            f"④ 降低分辨率/步数/batch；"
+            f"⑤ 重启推理服务容器（清掉 host memory 兜底态后速度才恢复）；"
+            f"⑥ 确认要硬跑：POST /model/policy {{\"vram_strict\":0}} 关掉硬闸门")

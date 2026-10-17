@@ -64,14 +64,26 @@ MAX_VIDEO_UPLOAD_BYTES = int(os.environ.get("MAX_VIDEO_UPLOAD_MB", "512")) * 102
 app = FastAPI(title="flowx-inference-server")
 models = ModelManager()
 store = ObjectStore(ttl_seconds=int(os.environ.get("OBJECT_TTL_SECONDS", "3600")),
-                    video_dir=VIDEO_DIR)
+                    video_dir=VIDEO_DIR,
+                    # B2：孤儿对象回收（租约结束 + 龄期超限 → 回收）。
+                    # 实测环境 OBJECT_TTL_SECONDS=86400（24h），没有这层回收的话，
+                    # 上一轮流水线留下的 model/clip/vae 视图能把 7.4GB 常驻条目
+                    # 钉一整天（exec 795：靠人工 model.unload 才松开）。
+                    lease_alive=lambda lid: models.leases.is_active(lid),
+                    orphan_ttl_seconds=int(os.environ.get(
+                        "OBJECT_TTL_ORPHAN_SECONDS", "1800")))
 # 模型淘汰联动：LRU 顶掉的管道仍被对象仓库的 model/clip/vae 视图钉住，
 # 必须在 evict 时按对象身份断开引用（先断引用后 GC，见 ModelManager._evict_if_needed）
 models.on_evict = lambda pipe: store.discard_where(lambda d: d is pipe)
 # 反向保护：对象仓库仍引用的常驻条目视同执行中 pin，淘汰计划跳过
 # （并发加载竞态：后完成的大模型入驻检查不得淘汰先完成、对象已被下游
 # 绑定待消费的模型——exec442 的 InstantID CN 误杀事故）
-models.extra_pinned = lambda: models.keys_of(store.referenced_data())
+# B2 修正（exec 795）：只保护**本租约**创建的对象。原先不看租约，把上一轮/另一条
+# 流水线遗留的 model/clip/vae 视图也当“不可淘汰”（配上 24h 对象 TTL ⇒ flux 的
+# 7.4GB 常驻条目钉了一整天，与 SDXL+CN 一起把 8GB 顶爆）。跨租约的保护由
+# lease.keys_of_others 负责，不靠这一层。
+models.extra_pinned = lambda: models.keys_of(
+    store.referenced_data(lease.current()))
 # 显存护栏注入引擎：算子执行期间 pin 在用模型（淘汰跳过），OOM 时淘汰非在用条目后重试
 engine.set_vram_guard(_mm.VramGuard(models))
 registry = Registry()
@@ -265,11 +277,19 @@ class InterruptReq(BaseModel):
 # ---------- 系统端点 ----------
 
 @app.get("/health")
-def health():
+def health(modules: int = 0):
     """健康检查 + 显存治理诊断（dev-plan §21.3 任务 1/3/4 的数据源）。
 
     vram_free_mb / resident_models 供 inference-ensure 的显存闸门（min_vram_mb）判断；
     resident_details 给每个常驻条目的体积估算与在用状态；degraded 记录 OOM 自愈史。
+
+    B1 新增（exec 795 事故）：`vram_oversubscribed` / `vram_oversub_ratio` /
+    `vram_headroom_mb`（物理口径真余量）/ `vram_budget_mb`（按 offload 分账后的
+    显存预算）。为什么必须加：WSL2/WDDM 下 CUDA 超订**不报 OOM**，旧的
+    `vram_low`（乐观口径 driver_free + reclaimable）在兜底态下被缓存掩盖成
+    false、status 恒 ok —— 跑了 100 分钟的 PCIe 抖动没有任何接口能看出来。
+    `?modules=1` 额外返回 `module_map`（每个常驻条目的顶层组件在哪个设备上，
+    用于实锤 offload 到底有没有把 text_encoder/vae 搬下车）。
     """
     info = {"status": "ok", "cuda_available": torch.cuda.is_available(),
             "resident_models": models.resident(),
@@ -278,6 +298,8 @@ def health():
             "max_resident_models": _mm.MAX_RESIDENT,
             "vram_budget_eviction": _mm.VRAM_BUDGET,
             "vram_reserve_mb": _mm.VRAM_RESERVE_MB,
+            "vram_strict": _mm.KNOBS.get("vram_strict", 0),
+            "offload_floor_mb": _mm.KNOBS.get("offload_floor_mb"),
             "degraded": engine.oom_state()}
     try:  # 版本可观测性（验收/排障时要确认跑的是哪套 diffusers/torch）
         import diffusers as _diffusers
@@ -310,6 +332,22 @@ def health():
         info["vram_low"] = (free + reclaimable) < _mm.VRAM_RESERVE_MB * 1024**2
         if info["vram_low"]:
             info["status"] = "degraded"
+        # B1：物理口径（兜底态检测）——与上面的乐观口径互补，不替代
+        occ = models.occupancy()
+        info.update({
+            "vram_oversubscribed": occ["oversubscribed"],
+            "vram_saturated": occ["saturated"],
+            "vram_oversub_ratio": occ["oversub_ratio"],
+            "vram_headroom_mb": round(occ["headroom_bytes"] / 1024**2),
+            "vram_budget_mb": round(models.vram_budget_bytes() / 1024**2),
+        })
+        if occ["oversubscribed"]:
+            # 超订态：采样正在经 PCIe 从主机内存取权重，必须显式报出行来
+            # （否则前端与闸门都把这种“静默退化”当健康，exec 795 教训）
+            info["status"] = "degraded"
+        if modules:
+            info["module_map"] = {k: models.module_map(k)
+                                  for k in models.resident()}
     return info
 
 
@@ -463,24 +501,35 @@ def model_policy_get():
 
 
 class PolicyReq(BaseModel):
-    """可写旋钮（只传要改的字段）；其它字段视为非法。"""
+    """可写旋钮（只传要改的字段）；其它字段视为非法。
+
+    B1/B2/B4 新增（exec 795）：vram_strict / offload_floor_mb /
+    object_ttl_orphan_seconds —— 容器是手工 docker run 的，env 改不了，
+    这三个旋钮必须能热改（沿用现有的 /model/policy 通道）。
+    """
     max_resident_models: int | None = None
     vram_reserve_mb: int | None = None
+    vram_strict: int | None = None
+    offload_floor_mb: int | None = None
+    object_ttl_orphan_seconds: int | None = None
 
 
 @app.post("/model/policy", dependencies=[Depends(auth)])
 def model_policy_set(req: PolicyReq):
     """写策略旋钮（写后立即生效：淘汰逻辑每次调用都读模块级常量）。
 
-    body {"vram_reserve_mb": 768} / {"max_resident_models": 3}；
+    body 例：{"vram_reserve_mb": 768} / {"vram_strict": 1}
+    （vram_strict=1：物理装不下时拒绝加载而非掉进 host memory 兜底）。
     越界或不可写键 ⇒ 400。参考 GET /model/policy 的当前值。
     """
     _attach_policy()
     patch = {k: v for k, v in (req.model_dump().items() if hasattr(req, "model_dump")
                                else req.dict().items()) if v is not None}
     if not patch:
+        writable = sorted(policy.WRITERS) or ["max_resident_models",
+                                              "vram_reserve_mb"]
         raise HTTPException(status_code=400, detail="policy: 需至少给一个可写字段"
-                            "（max_resident_models / vram_reserve_mb）")
+                            f"（{' / '.join(writable)}）")
     try:
         return policy.update(patch)
     except ValueError as e:
@@ -491,9 +540,20 @@ def _attach_policy():
     """把 model_manager 的模块级旋钮注入 policy（每次调用幂等重挂，防测试替换后失效）。"""
     policy.attach(
         readers={"max_resident_models": lambda: _mm.MAX_RESIDENT,
-                 "vram_reserve_mb": lambda: _mm.VRAM_RESERVE_MB},
+                 "vram_reserve_mb": lambda: _mm.VRAM_RESERVE_MB,
+                 # B1/B2/B4 运行时旋钮（env 给初值；这里可热改，不必重建容器）
+                 "vram_strict": lambda: int(_mm.KNOBS.get("vram_strict", 0)),
+                 "offload_floor_mb": lambda: int(_mm.KNOBS.get("offload_floor_mb", 0)),
+                 "object_ttl_orphan_seconds": lambda: int(
+                     store.orphan_ttl_seconds or 0)},
         writers={"max_resident_models": lambda v: setattr(_mm, "MAX_RESIDENT", v),
-                 "vram_reserve_mb": lambda v: setattr(_mm, "VRAM_RESERVE_MB", v)},
+                 "vram_reserve_mb": lambda v: setattr(_mm, "VRAM_RESERVE_MB", v),
+                 "vram_strict": lambda v: _mm.KNOBS.__setitem__(
+                     "vram_strict", 1 if int(v) else 0),
+                 "offload_floor_mb": lambda v: _mm.KNOBS.__setitem__(
+                     "offload_floor_mb", int(v)),
+                 "object_ttl_orphan_seconds": lambda v: setattr(
+                     store, "orphan_ttl_seconds", int(v))},
     )
 
 
@@ -575,7 +635,11 @@ def _execute_job(kind, payload):
     return engine.run_op(store, registry, payload["name"], payload.get("inputs") or {})
 
 
-jobman = JobManager(_execute_job)
+# 续租回调（B2）：长任务（如 90 分钟的采样）每次进度心跳刷新租约活跃时间 ——
+# 否则租约 TTL 一到就“看似执行结束”，导致本执行的模型失去并发保护、
+# 对象仓库把它的对象当孤儿回收（exec 795 采样跑了 5425s，TTL 只有 1800s）。
+jobman = JobManager(_execute_job,
+                    lease_touch=lambda lid: models.leases.touch(lid))
 
 # 指标历史采样：服务端后台线程（2s/帧，环形缓冲 6h），监控页图表数据源；
 # 依赖在此装配（对象仓库统计 + 任务队列 + 模型盘占用）
@@ -616,7 +680,13 @@ def submit_job(req: JobReq, x_flowx_lease: str = Header(default="")):
 
 @app.get("/jobs", dependencies=[Depends(auth)])
 def list_jobs():
-    return {"jobs": jobman.list()}
+    """任务队列总览（监控页）：jobs 列表 + queue 汇总（worker 忙闲 / 队头等待）。
+
+    每条 job 带 title（op 名或 graph·N 节点）/ ops / stage（当前节点）/ queue_pos
+    （pending 排队位次）/ wait_seconds（排队时长）——旧版只有 kind="graph|op"，
+    监控页无法分辨是哪个算子、卡在哪个节点。
+    """
+    return {"jobs": jobman.list(), "queue": jobman.queue_state()}
 
 
 @app.get("/jobs/{job_id}", dependencies=[Depends(auth)])

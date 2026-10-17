@@ -158,13 +158,17 @@ def run_graph(store, registry, graph: dict, cache=None):
     order = topo_sort(nodes)
 
     results, out_meta, cached, memo = {}, {}, [], {}
+    total = len(order)
     with EXEC_LOCK:
-        for nid in order:
+        for idx, nid in enumerate(order):
             execution.check_cancelled()  # 节点间取消检查点（异步 job 上下文生效）
             spec = nodes[nid]
             if "op" not in spec:
                 raise ValueError(f"node '{nid}' missing 'op'")
             op = registry.get(spec["op"])
+            # 阶段上报（异步 job）：监控页能看到「跑到第几个节点/哪个算子」。
+            # 同步 /graph 无 job 绑定，这里为空操作。
+            execution.report_stage(idx + 1, total, nid, op.name)
             raw_inputs = spec.get("inputs") or {}
 
             key = _node_key(nodes, nid, memo)
@@ -190,6 +194,7 @@ def run_op(store, registry, name: str, raw_inputs: dict):
     """单算子调用（/op）：对象端口用 {"$id": uuid} 引用。"""
     op = registry.get(name)
     with EXEC_LOCK:
+        execution.report_stage(1, 1, None, op.name)  # 阶段上报（异步 job）
         kwargs = registry.resolve_from_ids(store, op, raw_inputs or {})
         out = _run_op(op, kwargs)
         return {"outputs": outputs_to_store(store, op, out)}

@@ -23,6 +23,10 @@ WRITERS: Dict[str, Callable[[Any], Any]] = {}
 LIMITS = {
     "max_resident_models": (1, 16),
     "vram_reserve_mb": (0, 8192),
+    # B1/B2/B4 新增（exec 795）：超订硬闸门、offload 预算 floor、孤儿对象 TTL
+    "vram_strict": (0, 1),
+    "offload_floor_mb": (0, 8192),
+    "object_ttl_orphan_seconds": (0, 86400),
 }
 
 

@@ -109,6 +109,20 @@ class LeaseBook:
         with self._lock:
             return self._leases.pop(lid, None) is not None
 
+    def is_active(self, lease_id) -> bool:
+        """该租约是否仍活跃（已登记且未过期）。
+
+        孤儿对象回收（B2）的依据：仓库条目记着所属租约，租约一结束，
+        该租约创建的对象就再没人会消费，可以回收（其钉住的模型本体随之可淘汰）。
+        注：长任务（90 分钟采样）靠 jobs 进度心跳续租，不会被人为判为已死。
+        """
+        lid = sanitize(lease_id)
+        if lid is None:
+            return False
+        with self._lock:
+            self._sweep_locked(time.time())
+            return lid in self._leases
+
     def keys_of_others(self, lease_id):
         """其它活跃租约持有的 key 集合（淘汰跳过）；顺带清扫过期租约。"""
         now = time.time()

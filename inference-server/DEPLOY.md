@@ -119,6 +119,9 @@ docker compose -f docker-compose.yml -f docker-compose.pascal.yml up -d --build
 | `QUANTIZATION` | `none` | 权重量化：`fp8` 接口已预留（当前版本识别配置但未实现，加载时告警并按原 dtype 继续） |
 | `INFERENCE_TOKEN` | 无（必填） | **必填**：算子全面插件化（节点 server_op.py 经 /admin/plugins 自注册），无 token 服务启动即失败；同时作为 Bearer 鉴权令牌 |
 | `OBJECT_TTL_SECONDS` | `3600` | 对象仓库（中间张量）的 TTL |
+| `VRAM_STRICT` | `0` | **物理超订硬闸门**（exec 795）：`1` = 权重全量上卡物理上不可行（或已在超订态）时**拒绝加载**并给指引，不再把它交给 host memory 兜底（WSL2 下不报 OOM，采样会静默退化到分钟级/步）。可用 `POST /model/policy {"vram_strict":1}` 热改（重启即丢） |
+| `OFFLOAD_VRAM_FLOOR_MB` | `1024` | `offload=model/sequential` 条目计入**显存预算**的 floor（MB）—— 权重在 CPU，不按全量占额（旧行为按全量记，SDXL 6616MB×1.25 > 整卡 8GB ⇒ 预算永远不满足 ⇒ 每次都把别的条目全淘汰） |
+| `OBJECT_TTL_ORPHAN_SECONDS` | `1800` | 孤儿对象回收：条目所属**租约已结束**且龄期超此值 ⇒ 回收（其钉住的模型本体随之可淘汰）。`0` = 立即回收；**不设**（或未注入租约回调）= 关闭。长任务靠 job 进度心跳续租，不会被误回收 |
 | `INPUT_DIR` | `/input` | image.load 算子读取服务端本地图片的目录（compose 默认挂载 `./input`） |
 | `VIDEO_DIR` | `/videos` | VIDEO 对象 mp4 落盘目录（compose 默认挂载 `./videos`），`GET /videos/{id}` 下载 |
 | `VIDEO_INPUT_DIR` | `$INPUT_DIR/videos` | **POST /videos** 上传原片的落盘目录（load-video 节点把本机视频送入服务端；与 VIDEO_DIR 分工：前者放"原片"，后者放"仓库产物"） |
@@ -198,13 +201,23 @@ Studio 与 CLI 都要连 `cpolar` 的 dockerApi 隧道。两个坑：
 浏览器打开 `http://<host>:8100/monitor`（单文件页面，无需构建/额外部署），
 右上角填入 `INFERENCE_TOKEN`（只存浏览器 localStorage，不经服务端）后自动每 2s 刷新：
 
-- GPU：显存堆叠条（已分配/可回收缓存/空闲）、SM 利用率/温度/功耗/风扇（经 NVML，
-  `GET /gpu`；pynvml 不可用时自动降级只显示显存）、显存+利用率最近 6 分钟折线
-  （前端内存采样，刷新页面清零）
+- GPU：**四段显存分账条**（本进程已分配 / 缓存保留可回收 / 其它进程·驱动 / 空闲=轨道色）
+  + 条外图例与明细（NVML 已用、torch reserved/allocated、可回收缓存、物理余量、显存预算）；
+  SM 利用率/温度/功耗/风扇（经 NVML，`GET /gpu`；pynvml 不可用时自动降级只显示显存）；
+  显存/利用率/功耗/温度/PCIe/时钟/系统资源各一张折线（服务端采样历史，`GET /metrics/history`）
 - 常驻模型：体积估算/空闲时长/pin 与租约归属，单个卸载按钮
-- 执行租约：持有模型、空闲时长、TTL 滑动倒计时（快过期红色提示）
-- 任务队列：running/pending 置顶带进度条，可单个取消；历史任务含耗时与错误信息
-- OOM 自愈统计与运维按钮：/gc、卸载全部常驻模型、中断全部任务（均带二次确认）
+- 执行租约：持有模型、空闲时长、TTL 滑动倒计时（快过期红色提示）、单个释放
+- 任务队列：worker 忙闲与队头等待汇总；每条含算子名（op 名 / graph·N 节点 + 算子清单）、
+  状态、进度（`12/25 步 · 48%` + 当前节点 `flux.sampler · 3/5 节点`；加载阶段走流动条纹）、
+  速度与 ETA（服务端 EMA `sec/步` → 前端差分 → 节点均值粗估）、租约、排队时长、耗时；
+  done 任务按产出数出 `🖼 n / 🎬 n`，可弹层预览输出图/视频（带 Bearer 拉 blob），
+  failed 可展开错误全文；可单个取消、可「只看未完成」
+- OOM 自愈统计；运维按钮：/gc、卸载全部常驻模型、中断全部任务、释放全部租约
+  （危险操作**页内二次确认**：按钮变「确认？」，3s 内再点生效；结果与时间写入按钮下方，
+  卸载被租约/pin 跳过时逐条给原因与「释放租约」按钮）
+
+> 监控页说明：`app/static/monitor.html` 随镜像 `COPY` 进容器，改页面需重建镜像才生效
+> （免重启临时验证：`docker cp app/static/monitor.html flowx-inference-server:/app/app/static/monitor.html`）。
 
 对应 API：`GET /gpu`（NVML 硬件指标，带 auth）是除 `/health` 外的新增数据源。
 

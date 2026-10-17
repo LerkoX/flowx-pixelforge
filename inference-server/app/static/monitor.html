@@ -9,7 +9,7 @@
     --bg: #0d1117; --panel: #161b22; --border: #30363d;
     --fg: #e6edf3; --dim: #8b949e;
     --green: #3fb950; --amber: #d29922; --red: #f85149;
-    --blue: #58a6ff; --purple: #bc8cff; --cyan: #39c5cf;
+    --blue: #58a6ff; --purple: #bc8cff; --cyan: #39c5cf; --grey: #6e7681;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: var(--bg); color: var(--fg); padding: 16px 20px 40px;
@@ -29,7 +29,10 @@
   button { background: #21262d; border: 1px solid var(--border); color: var(--fg);
            border-radius: 6px; padding: 4px 12px; cursor: pointer; font-size: 13px; }
   button:hover { border-color: var(--dim); }
+  button:disabled { opacity: .5; cursor: progress; }
   button.danger:hover { border-color: var(--red); color: var(--red); }
+  button.armed { border-color: var(--red); color: var(--red); }
+  button.mini { padding: 1px 7px; font-size: 11px; }
   button.on { border-color: var(--blue); color: var(--blue); }
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(340px, 100%), 1fr)); gap: 14px; }
   .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
@@ -48,17 +51,20 @@
   .chip.pending { color: var(--amber); border-color: var(--amber); }
   .chip.done { color: var(--green); border-color: var(--green); }
   .chip.failed, .chip.cancelled { color: var(--red); border-color: var(--red); }
+  /* 分段条：轨道=空闲，子段靠 left/width 依次排布 */
   .bar { position: relative; height: 18px; background: #21262d; border-radius: 4px; overflow: hidden; }
-  .bar > div { position: absolute; top: 0; bottom: 0; }
+  .bar.tall { height: 24px; }
+  .bar > div { position: absolute; top: 0; bottom: 0; left: 0; }
   .bar .seg-alloc { background: var(--blue); }
-  .bar .seg-cache { background: #1f6feb55; }
+  .bar .seg-cache { background: #1f6feb99; }
+  .bar .seg-other { background: var(--grey); }
   .bar .seg-ram { background: var(--purple); }
   .bar .seg-swap { background: var(--amber); }
   .bar .seg-fill { background: var(--green); transition: width .3s; }
   .bar .seg-fill.warn { background: var(--amber); }
   .bar .seg-fill.hot { background: var(--red); }
   .bar .lbl { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
-              font-size: 11px; color: var(--fg); text-shadow: 0 1px 2px #000; }
+              font-size: 11px; color: var(--fg); text-shadow: 0 1px 2px #000; left: 0; }
   .bar-note { font-size: 11px; color: var(--dim); margin: 3px 0 8px; }
   .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; margin: 10px 0; }
   .metric { background: #0d1117; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
@@ -75,6 +81,13 @@
   .chart canvas { width: 100%; height: 96px; display: block; }
   .legend { display: flex; gap: 14px; font-size: 12px; color: var(--dim); margin-top: 4px; flex-wrap: wrap; }
   .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; }
+  .legend b { color: var(--fg); font-weight: 600; }
+  /* 显存分账明细（图例已说明颜色，这里只给数字，不再往细条里塞文字） */
+  .vram-detail { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+                 gap: 4px 16px; margin: 10px 0 2px; font-size: 12px; }
+  .vram-detail .k { color: var(--dim); }
+  .vram-detail .v { color: var(--fg); font-weight: 600; }
+  .vram-detail .v .mono { font-weight: 400; }
   .kv { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13px; }
   .kv b { font-weight: 600; }
   .oom-stats { display: flex; gap: 22px; flex-wrap: wrap; font-size: 13px; }
@@ -82,12 +95,57 @@
   .actions { display: flex; gap: 10px; flex-wrap: wrap; }
   #err-banner { display: none; background: #f8514922; border: 1px solid var(--red); color: var(--red);
                 border-radius: 8px; padding: 8px 12px; margin-bottom: 12px; font-size: 13px; }
-  .pbar { position: relative; height: 14px; min-width: 120px; background: #21262d; border-radius: 4px; overflow: hidden; }
-  .pbar > div { height: 100%; background: var(--blue); transition: width .3s; }
-  .pbar .lbl { position: absolute; inset: 0; font-size: 10px; display: flex; align-items: center;
-               justify-content: center; color: var(--fg); text-shadow: 0 1px 2px #000; }
+  /* 进度条：轨道 + 填充层（.fill）。文字一律放条外（.pmeta），
+     历史 bug：`.pbar > div` 会把叠在上面的文字层也染成蓝色铺满整条，
+     导致「永远是一条满格蓝条」。 */
+  .pbar { position: relative; height: 12px; min-width: 96px; background: #21262d;
+          border-radius: 4px; overflow: hidden; }
+  .pbar > .fill { position: absolute; top: 0; bottom: 0; left: 0; background: var(--blue);
+                  transition: width .3s; }
+  .pbar > .fill.ok { background: var(--green); }
+  .pbar > .fill.bad { background: var(--red); }
+  .pbar > .fill.skip { background: var(--grey); }
+  .pbar > .fill.pend { background: #d2992244; }
+  .pbar > .fill.indet { background: repeating-linear-gradient(45deg,
+      var(--blue) 0 6px, #1f6feb 6px 12px); background-size: 200% 100%;
+      animation: pbar-move 1.2s linear infinite; }
+  @keyframes pbar-move { from { background-position: 0 0 } to { background-position: 24px 0 } }
+  .prog { display: flex; flex-direction: column; gap: 2px; min-width: 130px; }
+  .pmeta { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; color: var(--fg); }
+  .pmeta .dim { color: var(--dim); }
+  /* 操作列：按钮与产出计数挤在一行，不因列宽变容而竖着堆 */
+  .opcell { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+  .opcell .out { color: var(--dim); font-size: 11px; }
+  /* 手机端：速度/ETA 列被隐藏，改在进度条下用 .m-eta 补一行 */
+  .m-eta { display: none; }
   .empty { color: var(--dim); font-size: 13px; padding: 8px; }
   .win-box { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--dim); }
+  .h2-right { float: right; font-weight: 400; }
+  /* 运维操作结果区：每次点击都有「结果 + 时间」，不再石沉大海 */
+  .ops-out { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+  .ops-line { font-size: 12px; border-left: 3px solid var(--border); padding: 4px 0 4px 8px;
+              background: #0d1117; border-radius: 0 6px 6px 0; word-break: break-word; }
+  .ops-line.ok { border-left-color: var(--green); }
+  .ops-line.err { border-left-color: var(--red); color: #ff9b94; }
+  .ops-line .warn-line { color: var(--amber); margin-top: 4px; }
+  .ops-list { margin: 4px 0 0 16px; }
+  .ops-list li { margin: 2px 0; }
+  /* 结果预览弹层 */
+  .modal { display: none; position: fixed; inset: 0; background: #010409cc; z-index: 40;
+           padding: 5vh 4vw; overflow: auto; }
+  .modal.open { display: block; }
+  .modal-box { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+               max-width: 900px; margin: 0 auto; padding: 12px 14px; }
+  .modal-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .modal-head span { font-weight: 600; }
+  .modal-head button { margin-left: auto; }
+  .modal-body img, .modal-body video { max-width: 100%; max-height: 70vh; display: block;
+                                       margin: 0 auto 10px; border-radius: 6px; }
+  .modal-body pre { background: #0d1117; border: 1px solid var(--border); border-radius: 6px;
+                    padding: 8px; font-size: 11px; overflow: auto; max-height: 40vh;
+                    white-space: pre-wrap; word-break: break-word; }
+  .lnk { color: var(--blue); text-decoration: none; font-size: 12px; }
+  .lnk:hover { text-decoration: underline; }
   /* 表格横向滚动容器：窄屏列多可左右滑，不挤破布局 */
   #models-wrap, #leases-wrap, #jobs-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
   #models-wrap table, #leases-wrap table, #jobs-wrap table { min-width: 100%; }
@@ -102,19 +160,33 @@
     #token-box input { flex: 1; width: auto; }
     /* 触控目标加大 */
     button { padding: 8px 14px; min-height: 36px; }
+    button.mini { padding: 2px 8px; min-height: 0; }
     .chart canvas { height: 84px; }
-    /* 任务表隐藏低优先级列（类型/租约/提交时间/耗时），保留 job/状态/进度/取消 */
-    #jobs-wrap th:nth-child(2), #jobs-wrap td:nth-child(2),
+    /* 任务表隐藏低优先级列（速度·ETA / 租约 / 提交·耗时），保留 job/状态/进度/操作；
+       速度与 ETA 降到进度条下方一行（.m-eta），不丢信息 */
     #jobs-wrap th:nth-child(5), #jobs-wrap td:nth-child(5),
     #jobs-wrap th:nth-child(6), #jobs-wrap td:nth-child(6),
     #jobs-wrap th:nth-child(7), #jobs-wrap td:nth-child(7) { display: none; }
+    #jobs-wrap .m-eta { display: flex; }
+    /* 窄屏只留主信息：算子清单、错误长文、阶段节点文本都收掉（详情按钮里有全文） */
+    #jobs-wrap td div.oplist, #jobs-wrap td div.errline, #jobs-wrap .pmeta .stg { display: none; }
+    #jobs-wrap .prog { min-width: 0; max-width: 100px; }
+    #jobs-wrap .pmeta { flex-wrap: wrap; }
+    #jobs-wrap .pbar { min-width: 64px; }
+    #jobs-wrap .opcell .out { display: none; }
+    /* 列宽极限压缩：算子名可断词、job id 缩小、chip 收紧，保证「取消/详情」不出屏 */
+    #jobs-wrap td:nth-child(2) { word-break: break-word; }
+    #jobs-wrap td:nth-child(1) { font-size: 10px; }
+    #jobs-wrap .chip { padding: 1px 5px; font-size: 11px; }
+    #jobs-wrap td, #jobs-wrap th { padding: 5px 3px; }
     /* 模型表隐藏低优先级列（架构/空闲），保留 key/显存/状态/卸载 */
     #models-wrap th:nth-child(2), #models-wrap td:nth-child(2),
     #models-wrap th:nth-child(4), #models-wrap td:nth-child(4) { display: none; }
     #models-wrap td, #models-wrap th { padding: 5px 4px; }
     .metric .v { font-size: 16px; }
     .oom-stats { gap: 16px; }
-    .pbar { min-width: 80px; }
+    .prog { min-width: 84px; }
+    .pbar { min-width: 72px; }
     /* 任务错误摘要收窄，防撑宽表格 */
     #jobs-wrap td div[title] { max-width: 90px !important; font-size: 11px; }
     #jobs-wrap td, #jobs-wrap th { padding: 5px 4px; }
@@ -138,11 +210,13 @@
   <!-- GPU 面板 -->
   <div class="card wide" id="gpu-card">
     <h2>GPU <span id="gpu-name" class="dim"></span></h2>
-    <div class="bar" title="显存：已分配 / 缓存保留(可回收) / 空闲">
+    <div class="bar tall" title="显存分账（段序：本进程已分配 / 缓存保留可回收 / 其它进程与驱动；剩余轨道=空闲）">
       <div class="seg-alloc" id="vram-alloc"></div>
       <div class="seg-cache" id="vram-cache"></div>
-      <div class="lbl" id="vram-lbl"></div>
+      <div class="seg-other" id="vram-other"></div>
     </div>
+    <div class="legend" id="vram-legend"></div>
+    <div class="vram-detail" id="vram-detail"></div>
     <div class="metrics" id="gpu-metrics"></div>
     <div class="charts">
       <div class="chart"><div class="ct"><span>SM / 显存控制器利用率</span><span class="cur" id="c-util"></span></div>
@@ -168,7 +242,7 @@
   <!-- 系统内存面板（WSL2 VM 口径） -->
   <div class="card wide" id="sys-card">
     <h2>系统资源 <span class="dim">｜WSL2 VM 口径（非 Windows 物理机）</span>
-      <span style="float:right" class="win-box">历史窗口
+      <span class="win-box h2-right">历史窗口
         <button data-win="15">15m</button><button data-win="60" class="on">1h</button><button data-win="360">6h</button>
         <span id="hist-range" class="dim"></span>
       </span></h2>
@@ -207,7 +281,8 @@
 
   <!-- 任务队列 -->
   <div class="card wide">
-    <h2>任务队列 <span id="job-count" class="dim"></span></h2>
+    <h2>任务队列 <span id="job-count" class="dim"></span><span id="queue-summary" class="dim"></span>
+      <label class="win-box h2-right"><input type="checkbox" id="jobs-only-active"> 只看未完成</label></h2>
     <div id="jobs-wrap"></div>
   </div>
 
@@ -224,8 +299,17 @@
       <button id="btn-gc">清对象仓库 + 缓存（/gc）</button>
       <button id="btn-unload-all" class="danger">卸载全部常驻模型</button>
       <button id="btn-interrupt-all" class="danger">中断 running + 全部排队任务</button>
+      <button id="btn-release-leases" class="danger">释放全部租约</button>
     </div>
+    <div id="ops-out" class="ops-out"><div class="ops-line dim">点按钮后这里会显示服务端返回结果与时间；危险操作需点两次确认。</div></div>
     <div class="kv dim" style="margin-top:10px" id="sys-info"></div>
+  </div>
+</div>
+
+<div id="modal" class="modal">
+  <div class="modal-box">
+    <div class="modal-head"><span id="modal-title"></span><button id="modal-close">关闭</button></div>
+    <div class="modal-body" id="modal-body"></div>
   </div>
 </div>
 
@@ -237,6 +321,8 @@ const POLL_MS = 2000, HIST_EVERY = 5;  // 状态 2s 一刷；历史每 5 次轮�
 let histFrames = [];        // 服务端采样帧（升序），页面刷新不再丢历史
 let histTimer = 0;
 let WIN_MIN = 60;           // 历史窗口（分钟）：15 / 60 / 360
+let lastJobs = [];          // 最近一次 /jobs 快照（结果预览弹层用）
+const jobSpeed = {};        // job_id -> {percent, t}：前端差分算速度（服务端无 EMA 时的兜底）
 
 // ---------- 基础设施 ----------
 $("token").value = localStorage.getItem(TOKEN_KEY) || "";
@@ -246,15 +332,29 @@ $("save-token").onclick = () => {
   pollHistory();
 };
 
-async function api(path, opts = {}) {
-  const headers = Object.assign({}, opts.headers || {});
+function authHeaders(extra) {
+  const headers = Object.assign({}, extra || {});
   const tok = localStorage.getItem(TOKEN_KEY) || "";
   if (tok) headers["Authorization"] = "Bearer " + tok;
+  return headers;
+}
+
+async function api(path, opts = {}) {
+  const headers = authHeaders(opts.headers);
   if (opts.body) headers["Content-Type"] = "application/json";
   const r = await fetch(path, Object.assign({}, opts, { headers }));
-  if (r.status === 401) throw new Error("401 token 无效或未填（右上角输入 INFERENCE_TOKEN）");
+  if (r.status === 401) throw new Error("401 token 无效或未填（右上角输入 INFERENCE_TOKEN 后点保存）");
   if (!r.ok) throw new Error(path + " → HTTP " + r.status + " " + (await r.text()).slice(0, 200));
   return r.json();
+}
+
+/* 需要鉴权的二进制资源（图片/视频）不能用 <img src> 直接引用（不会带 Bearer 头），
+   统一 fetch 成 blob URL 再塞进弹层。 */
+async function authBlobUrl(path) {
+  const r = await fetch(path, { headers: authHeaders() });
+  if (r.status === 401) throw new Error("401 token 无效或未填");
+  if (!r.ok) throw new Error(path + " → HTTP " + r.status);
+  return URL.createObjectURL(await r.blob());
 }
 
 function showErr(msg) {
@@ -275,6 +375,7 @@ const fmtTs = t => t ? new Date(t * 1000).toLocaleTimeString() : "—";
 const shortId = s => s && s.length > 12 ? s.slice(0, 8) + "…" : (s || "");
 const esc = s => String(s == null ? "" : s)
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+const pctOf = (v, total) => (v != null && total) ? Math.max(0, Math.min(100, v / total * 100)) : 0;
 
 // ---------- 通用折线图（small-multiples 复用） ----------
 // series: [{key|get, color}]；get(f) 可自定义取数（如单位换算 KB/s→MB/s）
@@ -377,6 +478,58 @@ function renderCharts() {
   $("c-rss").textContent = lf && lf.proc_rss_mb != null ? fmtMB(lf.proc_rss_mb) : "";
 }
 
+// ---------- 显存分账（顶部堆叠条 + 图例 + 明细） ----------
+/* 4 段口径（互斥且总和 = 总量），段色见 CSS：
+   ① 本进程已分配  torch allocated（真正装着张量）
+   ② 缓存保留       torch reserved - allocated（可回收，empty_cache 即还）
+   ③ 其它进程·驱动  NVML 已用 - torch reserved（别的进程/驱动上下文）
+   ④ 空闲           NVML 空闲（轨道底色）
+   以前只有 ①② 两段同色系、还把整行中文塞在 18px 细条里，读数不可行。 */
+function renderVram(h) {
+  const total = h.vram_total_mb || 0;
+  if (!total) {
+    ["vram-alloc", "vram-cache", "vram-other"].forEach(id => { $(id).style.width = "0%"; });
+    $("vram-legend").innerHTML = '<span class="dim">CUDA 不可用</span>';
+    $("vram-detail").innerHTML = "";
+    return;
+  }
+  const alloc = h.vram_process_allocated_mb || 0;
+  const reserved = h.vram_process_reserved_mb != null ? h.vram_process_reserved_mb : alloc;
+  const cache = h.vram_reclaimable_mb != null ? h.vram_reclaimable_mb : Math.max(0, reserved - alloc);
+  const driverFree = h.vram_driver_free_mb;
+  const usedNvml = driverFree != null ? Math.max(0, total - driverFree) : null;
+  const other = usedNvml != null ? Math.max(0, usedNvml - reserved) : 0;
+  const free = usedNvml != null ? Math.max(0, total - usedNvml) : Math.max(0, total - reserved);
+
+  const w0 = pctOf(alloc, total), w1 = pctOf(cache, total), w2 = pctOf(other, total);
+  $("vram-alloc").style.left = "0%";         $("vram-alloc").style.width = w0 + "%";
+  $("vram-cache").style.left = w0 + "%";      $("vram-cache").style.width = w1 + "%";
+  $("vram-other").style.left = w0 + w1 + "%"; $("vram-other").style.width = w2 + "%";
+
+  const seg = [
+    ["var(--blue)", "已分配（张量）", alloc],
+    ["#1f6feb99", "缓存保留（可回收）", cache],
+    ["var(--grey)", "其它进程·驱动", other],
+    ["#21262d", "空闲", free],
+  ];
+  $("vram-legend").innerHTML = seg.map(([c, k, v]) =>
+    `<span><i style="background:${c}"></i>${k} <b class="mono">${fmtMB(v)}</b>
+       <span class="dim">${Math.round(v / total * 100)}%</span></span>`).join("");
+
+  const rows = [
+    ["NVML 已用", usedNvml != null ? fmtMB(usedNvml) : "—", usedNvml != null ? usedNvml + "/" + total + " MB" : "NVML 不可用"],
+    ["本进程保留", fmtMB(reserved), "torch reserved"],
+    ["其中张量", fmtMB(alloc), "allocated"],
+    ["可回收缓存", fmtMB(cache), "empty_cache 即释放"],
+    ["物理余量", fmtMB(h.vram_headroom_mb), "headroom（闸门口径）"],
+    ["显存预算", fmtMB(h.vram_budget_mb), "offload 分账后"],
+    ["常驻权重", fmtMB(h.resident_weights_mb), (h.resident_models || []).length + " 个条目"],
+  ].filter(r => r[1] !== undefined);
+  $("vram-detail").innerHTML = rows.map(([k, v, sub]) =>
+    `<div><span class="k">${k}</span> <span class="v">${v}</span>
+      <div class="mono dim">${sub || ""}</div></div>`).join("");
+}
+
 // ---------- GPU ----------
 function renderGpu(h, g) {
   const parts = [];
@@ -385,17 +538,8 @@ function renderGpu(h, g) {
   if (h.diffusers_version) parts.push("diffusers " + h.diffusers_version);
   $("gpu-name").textContent = parts.length ? "｜" + parts.join("｜") : "";
 
-  const total = h.vram_total_mb || 0;
-  const alloc = h.vram_process_allocated_mb || 0;
-  const cache = h.vram_reclaimable_mb || 0;
-  if (total > 0) {
-    const pa = alloc / total * 100, pc = cache / total * 100;
-    $("vram-alloc").style.width = pa + "%";
-    $("vram-cache").style.left = pa + "%";
-    $("vram-cache").style.width = pc + "%";
-    $("vram-lbl").textContent =
-      `已分配 ${fmtMB(alloc)} + 缓存 ${fmtMB(cache)} / 共 ${fmtMB(total)}（可用余量 ${fmtMB(h.vram_free_mb)}）`;
-  }
+  renderVram(h);
+
   const gpu0 = g && g.available && g.gpus.length ? g.gpus[0] : null;
   const throttle = gpu0 && gpu0.throttle_reasons ? gpu0.throttle_reasons.filter(r => r !== "gpu_idle") : [];
   const m = [
@@ -409,14 +553,17 @@ function renderGpu(h, g) {
      gpu0 && gpu0.sm_clock_max_mhz != null ? "上限 " + gpu0.sm_clock_max_mhz + " MHz" : ""],
     ["PCIe", gpu0 && gpu0.pcie_tx_kbps != null ? "TX " + (gpu0.pcie_tx_kbps / 1024).toFixed(0) + " MB/s" : "—",
      gpu0 && gpu0.pcie_rx_kbps != null ? "RX " + (gpu0.pcie_rx_kbps / 1024).toFixed(0) + " MB/s" : ""],
-    ["常驻权重", fmtMB(h.resident_weights_mb), "模型 " + (h.resident_models || []).length + " 个"],
-    ["进程占用", fmtMB(h.vram_process_reserved_mb), "分配器保留"],
+    ["超订", h.vram_oversubscribed ? "是（退化）" : "否",
+     h.vram_saturated ? "显存饱和" : (h.vram_headroom_mb != null ? "余量 " + fmtMB(h.vram_headroom_mb) : "")],
     ["限频", throttle.length ? throttle.join(", ") : "无",
      gpu0 && gpu0.throttle_reasons && gpu0.throttle_reasons.includes("gpu_idle") ? "（gpu_idle=空闲正常）" : ""],
   ];
-  $("gpu-metrics").innerHTML = m.map(([k, v, sub]) =>
-    `<div class="metric"><div class="k">${k}</div><div class="v"${k === "限频" && v !== "无" ? ' style="color:var(--amber);font-size:13px"' : ""}>${v}</div><div class="sub">${sub}</div></div>`
-  ).join("");
+  $("gpu-metrics").innerHTML = m.map(([k, v, sub]) => {
+    const warn = (k === "限频" && v !== "无") || (k === "超订" && v !== "否");
+    return `<div class="metric"><div class="k">${k}</div>
+      <div class="v"${warn ? ' style="color:var(--amber);font-size:13px"' : ""}>${v}</div>
+      <div class="sub">${sub}</div></div>`;
+  }).join("");
 }
 
 // ---------- 系统资源（RAM/swap/CPU/RSS/磁盘/对象仓库，WSL2 VM 口径） ----------
@@ -459,24 +606,37 @@ function renderModels(h, leases) {
       <td class="mono">${fmtSec(d.idle_seconds)}</td>
       <td>${d.pinned ? '<span class="chip running">执行中 pin</span>' : ""}
         ${holderOf[d.key] ? `<span class="chip pending" title="租约 ${esc(holderOf[d.key])}">租约 ${esc(shortId(holderOf[d.key]))}</span>` : ""}</td>
-      <td><button class="danger" data-unload="${esc(d.key)}">卸载</button></td>
+      <td><button class="danger mini" data-unload="${esc(d.key)}">卸载</button></td>
     </tr>`).join("")}
   </table>`;
-  $("models-wrap").querySelectorAll("[data-unload]").forEach(b => b.onclick = async () => {
-    if (!confirm(`卸载常驻模型 ${b.dataset.unload}？`)) return;
-    await op(async () => reportUnload(await api("/model/unload", { method: "POST", body: JSON.stringify({ target: b.dataset.unload }) })));
+  $("models-wrap").querySelectorAll("[data-unload]").forEach(b => b.onclick = () => {
+    const key = b.dataset.unload;
+    opButton(b, "卸载", () => api("/model/unload", { method: "POST",
+      body: JSON.stringify({ target: key }) }), fmtUnload, `卸载 ${shortId(key)}`);
   });
 }
 
-// 卸载结果反馈：被 pin/租约跳过的条目在此显式提示（否则「点了没反应」）
-function reportUnload(r) {
-  if (!r) return;
-  if (r.skipped_reasons) {
-    alert("部分条目未卸载（被跳过）：\n" + r.skipped_reasons +
-      "\n\n可在「执行租约」卡片释放对应租约后重试；算子执行中 pin 的请等任务结束。");
-  } else if (r.unloaded === "(none)") {
-    alert("没有匹配的常驻模型被卸载（target 未命中或已全部卸载）。");
+/* 卸载结果反馈（"点了没反应"的正解）：服务端把跳过原因逐条返回，
+   这里直接把原因 + 持有租约 + 一键释放按钮摆出来。 */
+function fmtUnload(r) {
+  if (!r) return "无返回";
+  const done = (r.unloaded && r.unloaded !== "(none)") ? r.unloaded.split(",") : [];
+  let msg = done.length
+    ? `已卸载 ${done.length} 个：<span class="mono">${esc(r.unloaded)}</span>`
+    : "没有条目被卸载（target 未命中或已全部卸载）";
+  const sk = r.skipped_detail || [];
+  if (sk.length) {
+    msg += `<div class="warn-line">跳过 ${sk.length} 条（仍被占用）：</div><ul class="ops-list">`
+      + sk.map(s => {
+          const holders = s.holders || [];
+          const btns = holders.map(lid =>
+            `<button class="mini danger" data-release="${esc(lid)}">释放租约 ${esc(shortId(lid))}</button>`).join(" ");
+          return `<li><span class="mono">${esc(s.key)}</span>
+            <span class="dim">${esc(s.reason_text || s.reason)}</span> ${btns}</li>`;
+        }).join("") + "</ul>";
   }
+  msg += `<div class="dim" style="margin-top:4px">剩余常驻：<span class="mono">${esc(r.resident)}</span></div>`;
+  return msg;
 }
 
 // ---------- 租约 ----------
@@ -496,54 +656,221 @@ function renderLeases(d) {
         <td class="mono">${fmtSec(l.idle_seconds)}</td>
         <td><div class="bar"><div class="seg-fill ${cls}" style="width:${ratio * 100}%"></div>
           <div class="lbl">剩余 ${fmtSec(Math.max(0, ttl - (l.idle_seconds || 0)))}</div></div></td>
-        <td><button class="danger" data-release="${esc(l.lease)}">释放</button></td>
+        <td><button class="danger mini" data-release="${esc(l.lease)}">释放</button></td>
       </tr>`;
     }).join("")}
   </table>`;
-  $("leases-wrap").querySelectorAll("[data-release]").forEach(b => b.onclick = async () => {
-    if (!confirm(`释放租约 ${b.dataset.release}？\n\n只摘除租约登记、不卸模型。请确认对应执行已结束：释放后其名下常驻模型失去并发保护，可能被其它执行的加载淘汰。`)) return;
-    await op(() => api("/leases/" + encodeURIComponent(b.dataset.release), { method: "DELETE" }));
+  $("leases-wrap").querySelectorAll("[data-release]").forEach(b => b.onclick = () => {
+    const lid = b.dataset.release;
+    opButton(b, "释放", () => api("/leases/" + encodeURIComponent(lid), { method: "DELETE" }),
+      () => `已释放租约 <span class="mono">${esc(shortId(lid))}</span>（只摘登记，不卸模型）`,
+      `释放租约 ${shortId(lid)}`);
   });
 }
 
 // ---------- 任务队列 ----------
+/* 速度/ETA 三级取数：
+   ① 服务端 EMA sec/step（metrics_history 差分，最准，采样阶段才有）
+   ② 前端差分 percent/时间（任意带百分比的阶段都能用）
+   ③ 节点级均值（只有 stage 没有 percent 时粗估，标注「粗估」） */
+function jobEta(j, lf) {
+  const p = j.progress || {};
+  if (j.status !== "running") return null;
+  if (lf && lf.run_job === j.id && lf.sec_per_step != null && p.total) {
+    return { sps: lf.sec_per_step, eta: (p.total - p.current) * lf.sec_per_step, rough: false };
+  }
+  const prev = jobSpeed[j.id];
+  if (prev && p.percent != null && prev.percent != null) {
+    const dt = (Date.now() - prev.t) / 1000;
+    const dp = p.percent - prev.percent;
+    if (dt > 0.5 && dp > 0) return { sps: null, eta: (100 - p.percent) / (dp / dt), rough: false };
+  }
+  const st = j.stage;
+  if (st && st.index > 0 && st.total > st.index && j.started_at) {
+    const perNode = (Date.now() / 1000 - j.started_at) / st.index;
+    return { sps: null, eta: perNode * (st.total - st.index), rough: true };
+  }
+  return null;
+}
+
+function progressCell(j, lf) {
+  const p = j.progress || {};
+  const st = j.stage;
+  const stageTxt = st && st.op ? esc(st.op) + (st.total > 1 ? ` · ${st.index}/${st.total} 节点` : "") : "";
+  // 手机端隐藏「速度·ETA」列，把它降到进度条下面一行（.m-eta 只在窄屏显示）
+  const eta = speedText(j, lf);
+  const mEta = eta ? `<div class="pmeta m-eta dim">${esc(eta)}</div>` : "";
+  if (j.status === "pending") {
+    const wait = j.created_at ? Date.now() / 1000 - j.created_at : null;
+    return `<div class="prog"><div class="pbar"><div class="fill pend" style="width:100%"></div></div>
+      <div class="pmeta"><span>${j.queue_pos ? "排队 #" + j.queue_pos : "排队中"}</span>
+      <span class="dim">等 ${fmtSec(wait)}</span></div>${mEta}</div>`;
+  }
+  if (j.status === "running") {
+    if (p.percent != null) {
+      return `<div class="prog"><div class="pbar"><div class="fill" style="width:${p.percent}%"></div></div>
+        <div class="pmeta"><span class="mono">${p.current}/${p.total} 步 · ${p.percent}%</span>
+        ${stageTxt ? `<span class="dim stg" title="${stageTxt}">${stageTxt}</span>` : ""}</div>${mEta}</div>`;
+    }
+    return `<div class="prog"><div class="pbar"><div class="fill indet" style="width:100%"></div></div>
+      <div class="pmeta"><span>${stageTxt || "执行中"}</span></div>${mEta}</div>`;
+  }
+  const cls = j.status === "done" ? "ok" : j.status === "failed" ? "bad" : "skip";
+  const w = j.status === "done" ? 100 : (p.percent || 0);
+  return `<div class="prog"><div class="pbar"><div class="fill ${cls}" style="width:${w}%"></div></div>
+    <div class="pmeta"><span class="mono">${p.total ? p.current + "/" + p.total + " 步" : "—"}</span></div>${mEta}</div>`;
+}
+
+/* 速度/ETA 的一句话文本（列里与手机端进度条下共用同一份口径） */
+function speedText(j, lf) {
+  if (j.status !== "running") return null;
+  const e = jobEta(j, lf);
+  if (!e) return null;
+  const sps = e.sps != null ? e.sps + "s/步" : "";
+  const eta = e.eta != null ? `剩 ~${fmtSec(e.eta)}${e.rough ? "（粗估）" : ""}` : "";
+  return [sps, eta].filter(Boolean).join(" · ");
+}
+
+function speedCell(j, lf) {
+  if (j.status === "pending") return '<span class="dim">等 GPU</span>';
+  const t = speedText(j, lf);
+  return t ? `<span title="服务端 EMA 步速优先；无则前端差分/节点均值粗估">${esc(t)}</span>`
+           : '<span class="dim">—</span>';
+}
+
+/* done 任务的产出摘要：结果里的对象元数据已随 /jobs 返回（{port:{id,type}}），
+   直接数 IMAGE/VIDEO 即可给出「几张图/几个视频」，不用再打一次接口。 */
+function resultSummary(j) {
+  const r = j.result || {};
+  const groups = r.nodes ? Object.values(r.nodes) : (r.outputs ? [r.outputs] : []);
+  let images = 0, videos = 0, firstImg = null, firstVid = null;
+  for (const ports of groups) {
+    for (const m of Object.values(ports || {})) {
+      if (!m || !m.id) continue;
+      if (m.type === "IMAGE") { images++; firstImg = firstImg || m.id; }
+      else if (m.type === "VIDEO") { videos++; firstVid = firstVid || m.id; }
+    }
+  }
+  return { images, videos, firstImg, firstVid };
+}
+
 function renderJobs(d) {
   const lf = lastFrame();
-  const js = ((d && d.jobs) || []).slice().sort((a, b) => {
+  const onlyActive = $("jobs-only-active").checked;
+  let js = ((d && d.jobs) || []).slice().sort((a, b) => {
     const rank = s => s === "running" ? 0 : s === "pending" ? 1 : 2;
     return rank(a.status) - rank(b.status) || (b.created_at || 0) - (a.created_at || 0);
   });
-  const shown = js.slice(0, 20);
+  lastJobs = js;
+  const totalN = js.length;
   const active = js.filter(j => j.status === "running" || j.status === "pending").length;
-  $("job-count").textContent = `${active} 个进行中 / 共 ${js.length} 条`;
-  if (!shown.length) { $("jobs-wrap").innerHTML = '<div class="empty">暂无任务</div>'; return; }
+  if (onlyActive) js = js.filter(j => j.status === "running" || j.status === "pending");
+  const shown = js.slice(0, 20);
+  $("job-count").textContent = `${active} 个进行中 / 共 ${totalN} 条`;
+  const q = d && d.queue;
+  $("queue-summary").textContent = q
+    ? (q.running
+        ? `｜ worker 忙：${q.running_title || shortId(q.running_id)}（${fmtSec(q.running_seconds)}）`
+        : "｜ worker 空闲")
+      + (q.pending ? ` · 排队 ${q.pending}（队头等 ${fmtSec(q.head_wait_seconds)}）` : "")
+    : "";
+  if (!shown.length) {
+    $("jobs-wrap").innerHTML = `<div class="empty">${onlyActive ? "没有进行中的任务" : "暂无任务"}</div>`;
+    return;
+  }
   $("jobs-wrap").innerHTML = `<table>
-    <tr><th>job</th><th>类型</th><th>状态</th><th>进度</th><th>租约</th><th>提交</th><th>耗时</th><th></th></tr>
+    <tr><th>job</th><th>算子 / 类型</th><th>状态</th><th>进度</th><th>速度 · ETA</th>
+      <th>租约</th><th>提交 · 耗时</th><th></th></tr>
     ${shown.map(j => {
-      const pct2 = j.progress && j.progress.percent;
+      const isActive = j.status === "running" || j.status === "pending";
       const dur = j.finished_at && j.started_at ? j.finished_at - j.started_at
         : j.started_at ? Date.now() / 1000 - j.started_at : null;
-      const active = j.status === "running" || j.status === "pending";
-      // 服务端差分的每步秒数（采样任务速度，offload 瓶颈一眼可见）
-      const sps = j.status === "running" && lf && lf.run_job === j.id && lf.sec_per_step != null
-        ? `<div class="dim" style="font-size:11px">${lf.sec_per_step}s/步</div>` : "";
+      const rs = j.status === "done" ? resultSummary(j) : null;
+      const opsList = (j.ops || []).join(" → ");
+      const sub = (j.ops || []).length > 1
+        ? `<div class="dim oplist" style="font-size:11px;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+             title="${esc(opsList)}">${esc(opsList)}</div>` : "";
+      const err = j.error
+        ? `<div class="dim mono errline" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+             title="${esc(j.error)}">${esc(j.error)}</div>` : "";
+      const outCount = rs && (rs.images || rs.videos)
+        ? `<span class="out" title="产出对象">${rs.images ? "🖼 " + rs.images : ""}${rs.videos ? " 🎬 " + rs.videos : ""}</span>` : "";
+      const waitTip = j.wait_seconds != null && j.wait_seconds > 1 ? `排队 ${fmtSec(j.wait_seconds)}` : "";
       return `<tr>
         <td class="mono" title="${esc(j.id)}">${esc(shortId(j.id))}</td>
-        <td class="dim">${esc(j.kind)}</td>
-        <td><span class="chip ${esc(j.status)}">${esc(j.status)}</span>
-          ${j.error ? `<div class="dim" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(j.error)}">${esc(j.error)}</div>` : ""}</td>
-        <td>${pct2 != null ? `<div class="pbar"><div style="width:${pct2}%"></div><div class="lbl">${pct2}%</div></div>${sps}` : '<span class="dim">—</span>'}</td>
+        <td><div class="mono">${esc(j.title || j.kind)}</div>${sub}</td>
+        <td><span class="chip ${esc(j.status)}">${esc(j.status)}</span>${err}</td>
+        <td>${progressCell(j, lf)}</td>
+        <td class="mono">${speedCell(j, lf)}</td>
         <td class="mono dim">${esc(shortId(j.lease)) || "—"}</td>
-        <td class="mono dim">${fmtTs(j.created_at)}</td>
-        <td class="mono">${dur != null ? fmtSec(dur) : "—"}</td>
-        <td>${active ? `<button class="danger" data-cancel="${esc(j.id)}">取消</button>` : ""}</td>
+        <td class="mono dim" style="white-space:nowrap" title="${esc(waitTip)}">${fmtTs(j.created_at)}
+          <div style="font-size:11px">${dur != null ? "耗时 " + fmtSec(dur) : ""}</div></td>
+        <td><div class="opcell">
+          ${isActive ? `<button class="danger mini" data-cancel="${esc(j.id)}">取消</button>` : ""}
+          ${outCount}
+          ${(rs && (rs.images || rs.videos)) ? `<button class="mini" data-view="${esc(j.id)}">查看</button>` : ""}
+          ${(j.status === "done" || j.status === "failed") ? `<button class="mini" data-detail="${esc(j.id)}">详情</button>` : ""}
+        </div></td>
       </tr>`;
     }).join("")}
-  </table>${js.length > shown.length ? `<div class="empty">仅显示最近 ${shown.length} 条</div>` : ""}`;
-  $("jobs-wrap").querySelectorAll("[data-cancel]").forEach(b => b.onclick = async () => {
-    if (!confirm(`取消任务 ${b.dataset.cancel}？`)) return;
-    await op(() => api("/interrupt", { method: "POST", body: JSON.stringify({ job_id: b.dataset.cancel }) }));
+  </table>${js.length > shown.length ? `<div class="empty">仅显示最近 ${shown.length} 条（共 ${js.length} 条待显示）</div>` : ""}`;
+
+  // 速度采样（下一次渲染差分用）
+  const now = Date.now();
+  shown.forEach(j => {
+    const p = j.progress || {};
+    jobSpeed[j.id] = { percent: p.percent, t: now };
   });
+
+  $("jobs-wrap").querySelectorAll("[data-cancel]").forEach(b => b.onclick = () => {
+    const id = b.dataset.cancel;
+    opButton(b, "取消任务", () => api("/interrupt", { method: "POST", body: JSON.stringify({ job_id: id }) }),
+      r => `已发送取消（${(r.interrupted || []).length} 个）：running 任务在下一个检查点（节点间/每步采样）生效`,
+      `取消任务 ${shortId(id)}`);
+  });
+  $("jobs-wrap").querySelectorAll("[data-view]").forEach(b => b.onclick = () => openResult(b.dataset.view, true));
+  $("jobs-wrap").querySelectorAll("[data-detail]").forEach(b => b.onclick = () => openResult(b.dataset.detail, false));
+}
+
+// ---------- 结果预览弹层 ----------
+let modalUrls = [];
+function closeModal() {
+  $("modal").classList.remove("open");
+  modalUrls.forEach(u => URL.revokeObjectURL(u));
+  modalUrls = [];
+  $("modal-body").innerHTML = "";
+}
+$("modal-close").onclick = closeModal;
+$("modal").onclick = e => { if (e.target.id === "modal") closeModal(); };
+
+async function openResult(jobId, withMedia) {
+  const job = lastJobs.find(j => j.id === jobId);
+  if (!job) return;
+  $("modal-title").textContent = `${shortId(job.id)} · ${job.title || job.kind} · ${job.status}`;
+  const body = $("modal-body");
+  body.innerHTML = '<div class="dim">加载中…</div>';
+  $("modal").classList.add("open");
+  let html = "";
+  if (withMedia) {
+    const rs = resultSummary(job);
+    try {
+      if (rs.firstImg) {
+        const u = await authBlobUrl(`/images/${rs.firstImg}?thumb=1024`);
+        modalUrls.push(u);
+        html += `<img src="${u}" alt="输出图">`;
+      }
+      if (rs.firstVid) {
+        const u = await authBlobUrl(`/videos/${rs.firstVid}`);
+        modalUrls.push(u);
+        html += `<video src="${u}" controls playsinline></video>`;
+      }
+    } catch (e) {
+      html += `<div class="ops-line err">预览失败：${esc(e.message)}</div>`;
+    }
+  }
+  const payload = job.status === "done" ? job.result : (job.error || job.result);
+  html += `<pre>${esc(JSON.stringify(payload, null, 2)).slice(0, 6000)}</pre>`;
+  body.innerHTML = html;
 }
 
 // ---------- OOM 自愈 ----------
@@ -557,19 +884,94 @@ function renderOom(h) {
 }
 
 // ---------- 运维操作 ----------
-async function op(fn) {
-  try { showErr(""); await fn(); await poll(); }
-  catch (e) { showErr("操作失败：" + e.message); }
+/* 为什么不用 window.confirm/alert：内嵌 webview 或禁弹窗策略下它们会静默返回
+   false/undefined，handler 直接 return —— 表现就是「点了没效果」。
+   改成页内二次确认（按钮变「确认？」，3s 内再点生效）+ 结果写入 ops-out。 */
+function opsLog(html, cls) {
+  const box = $("ops-out");
+  const line = document.createElement("div");
+  line.className = "ops-line " + (cls || "");
+  line.innerHTML = `<span class="dim mono">${new Date().toLocaleTimeString()}</span> ${html}`;
+  box.prepend(line);
+  while (box.children.length > 5) box.lastChild.remove();
+  box.querySelectorAll("[data-release]").forEach(b => b.onclick = () => {
+    const lid = b.dataset.release;
+    opButton(b, "释放", () => api("/leases/" + encodeURIComponent(lid), { method: "DELETE" }),
+      () => `已释放租约 <span class="mono">${esc(shortId(lid))}</span>`,
+      `释放租约 ${shortId(lid)}`);
+  });
 }
-$("btn-gc").onclick = () => op(() => api("/gc", { method: "POST" }));
-$("btn-unload-all").onclick = async () => {
-  if (!confirm("卸载全部常驻模型？（其它活跃租约持有的条目会被跳过）")) return;
-  await op(async () => reportUnload(await api("/model/unload", { method: "POST", body: "{}" })));
-};
-$("btn-interrupt-all").onclick = async () => {
-  if (!confirm("中断当前 running + 全部排队任务？")) return;
-  await op(() => api("/interrupt", { method: "POST", body: "{}" }));
-};
+
+async function opButton(btn, label, fn, fmt, confirmText) {
+  // 需要确认的操作：首次点击转为「确认？」态
+  if (confirmText) {
+    if (btn.dataset.armed !== "1") {
+      btn.dataset.origin = btn.dataset.origin || btn.innerHTML;
+      btn.dataset.armed = "1";
+      btn.innerHTML = `确认${label}？`;
+      btn.classList.add("armed");
+      clearTimeout(+(btn.dataset.timer || 0));
+      btn.dataset.timer = String(setTimeout(() => {
+        btn.dataset.armed = "";
+        btn.innerHTML = btn.dataset.origin;
+        btn.classList.remove("armed");
+      }, 3000));
+      opsLog(`${confirmText} <span class="dim">— 3s 内再点一次确认</span>`);
+      return;
+    }
+    btn.dataset.armed = "";
+    btn.innerHTML = btn.dataset.origin || btn.innerHTML;
+    btn.classList.remove("armed");
+    clearTimeout(+(btn.dataset.timer || 0));
+  }
+  if (btn.disabled) return;
+  btn.disabled = true;
+  try {
+    showErr("");
+    const r = await fn();
+    opsLog(typeof fmt === "function" ? fmt(r) : "完成", "ok");
+    await poll();
+  } catch (e) {
+    opsLog("失败：" + esc(e.message), "err");
+    showErr("操作失败：" + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+$("btn-gc").onclick = () => opButton($("btn-gc"), "清理",
+  () => api("/gc", { method: "POST" }),
+  r => `已清对象仓库 <b>${r.cleared ?? 0}</b> 个对象 + 图缓存 + empty_cache
+        <div class="dim">常驻模型不在此操作范围内（要腾显存用「卸载」）</div>`);
+
+$("btn-unload-all").onclick = () => opButton($("btn-unload-all"), "卸载全部",
+  () => api("/model/unload", { method: "POST", body: "{}" }),
+  fmtUnload, "卸载全部常驻模型（被租约/pin 持有的会跳过）");
+
+$("btn-interrupt-all").onclick = () => opButton($("btn-interrupt-all"), "中断全部",
+  () => api("/interrupt", { method: "POST", body: "{}" }),
+  r => `已标记中断 <b>${(r.interrupted || []).length}</b> 个任务
+        <div class="dim">running 任务在下一个检查点（节点间 / 每步采样）生效，队列中的直接置 cancelled</div>`,
+  "中断 running + 全部排队任务");
+
+$("btn-release-leases").onclick = () => opButton($("btn-release-leases"), "释放全部",
+  async () => {
+    const d = await api("/leases");
+    const ls = (d && d.leases) || [];
+    const done = [], failed = [];
+    for (const l of ls) {
+      try {
+        await api("/leases/" + encodeURIComponent(l.lease), { method: "DELETE" });
+        done.push(l.lease);
+      } catch (e) { failed.push(shortId(l.lease) + "：" + e.message); }
+    }
+    return { done, failed };
+  },
+  r => (r.done.length ? `已释放 ${r.done.length} 个租约：<span class="mono">${esc(r.done.map(shortId).join(", "))}</span>`
+                      : "没有活跃租约可释放")
+        + (r.failed.length ? `<div class="warn-line">失败：${esc(r.failed.join("；"))}</div>` : "")
+        + '<div class="dim">只摘除登记、不卸模型；确认对应执行已结束后再释放</div>',
+  "释放全部活跃租约（只摘登记，不卸模型）");
 
 function renderSys(h) {
   $("sys-info").innerHTML = [
@@ -587,10 +989,12 @@ document.querySelectorAll("[data-win]").forEach(b => b.onclick = () => {
   pollHistory();
 });
 
+$("jobs-only-active").onchange = () => renderJobs(lastJobsPayload);
+
 // ---------- 轮询主循环 ----------
-let polling = false;
+let polling = false, pollAgain = false, lastJobsPayload = null;
 async function poll() {
-  if (polling) return;
+  if (polling) { pollAgain = true; return; }
   polling = true;
   try {
     const [rh, rg, rl, rj] = await Promise.allSettled(
@@ -607,6 +1011,7 @@ async function poll() {
     renderSysRes();
     renderModels(h, l ? l.leases : []);
     renderLeases(l);
+    lastJobsPayload = j;
     renderJobs(j);
     renderOom(h);
     renderSys(h);
@@ -617,6 +1022,7 @@ async function poll() {
     showErr(e.message);
   } finally {
     polling = false;
+    if (pollAgain) { pollAgain = false; poll(); }
   }
 }
 

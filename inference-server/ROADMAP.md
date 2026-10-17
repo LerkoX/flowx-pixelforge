@@ -61,6 +61,15 @@
 - 运行时配置（重建时必须照抄）：env `INFERENCE_TOKEN / HF_HOME=/hf-cache / MAX_RESIDENT_MODELS=3 /
   OFFLOAD_MODE=none / PORT=8100 / OBJECT_TTL_SECONDS=14400 / MODELS_DIR=/models`；
   挂载 `D:/flowx-data/{input,loras,models,videos,hf-cache}`；`-p 8100:8100`；`--gpus all`；`restart=always`。
+- **2026-10-16 新增（exec 795 事故修复，重建时必须一并照抄）**：
+  env `VRAM_STRICT=1`（物理装不下时拒绝加载，而不是掉进 WSL2 的 host memory 兜底
+  变成分钟级/步）—— 本项也能热改：`POST /model/policy {"vram_strict":1}`，
+  但**容器重启会丢**，所以重建命令里要显式带上；
+  可选 `OFFLOAD_VRAM_FLOOR_MB=1024`、`OBJECT_TTL_ORPHAN_SECONDS=1800`。
+  诊断看 `/health`（`vram_oversubscribed` / `vram_headroom_mb` / `vram_budget_mb`，
+  `?modules=1` 出每个常驻条目的 device 明细）。
+  本次部署方式：`docker cp` 8 个 `app/*.py` 进容器 + `restart`
+  （容器内旧版备份 `/app/app.bak-20261016T222727Z`；镜像仍为 `pascal-partA4`，未重建镜像）。
 - ⚠️ `plugins.d` 里 `vton_3d94ed9961db.py` 声明的算子版本是 `@3bb90bb5788d`（**文件名 hash ≠ 内容 hash**）
   ⇒ `purge-plugin-versions.py` 会把它判成"旧版本"而删除，**别在 vton 家族工作未收尾时跑该工具**。
 
@@ -318,6 +327,24 @@ Pascal 钉版（transformers==4.44.2 / diffusers==0.35.2 / numpy<2）不得随�
 - 每架构一个适配函数：`predict_noise(pipe_arch, latents, t, cond_bundle) -> noise_pred`
 - SDXL/ControlNet/Flux 的差异**只允许进适配函数**，不允许在骨架里加 if-else
 - 第三个架构接入之前不做统一抽象（两个实例时直接分派，三个时再提炼接口）
+
+### 3.1 架构全覆盖（硬约束，2026-10-16）
+
+**本系统对 GPU 架构的支持是横向全覆盖，不是“新卡优先、旧卡将就”。**
+在役的 Pascal（GTX 1080，算力 6.1）与后续每一代（二代 / 三代 / 四代 / 五代…）
+**都在支持范围内且同等对待**；任何优化、依赖、预编译内核与镜像都不得以“放弃某一代”为代价。
+完整条款见 `docs/dev-plan.md`（一、开发纪律 第 11 条）。
+
+落地要点：
+
+- **速度可分档，功能与正确性不分档**：禁止把算力/架构门槛硬编码进主路径。
+  反例（2026-10-16 瓶颈定位）：diffusers `can_use_cuda_kernels` 的 `capability >= 7`
+  ⇒ Pascal 永远落 `forward_native`，每步全量反量化 GGUF 权重（实测 ≈6min/步）。
+- 任何加速分支都必须**保留正确性等价的慢路径**，且慢路径在旧档上能跑通。
+- 验收覆盖**两端**（最旧在役档 + 最新一档）；确实不支持的档位必须显式记录
+  （原因 / 代价 / 重开条件），不许沉默降级。
+- 选型 / 依赖 / 镜像（CUDA 版本、预编译内核可获得性等）**按档评估**，
+  不得让某一代直接无法启动。
 
 ## 4. 显存治理演进
 

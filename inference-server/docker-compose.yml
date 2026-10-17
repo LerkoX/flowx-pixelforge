@@ -11,6 +11,9 @@ services:
       VIDEO_DIR: /videos              # VIDEO 对象 mp4 落盘目录（GET /videos/{id} 下载）
       MAX_RESIDENT_MODELS: "2"        # 显存常驻模型上限，超出按 LRU 淘汰
       OFFLOAD_MODE: "none"            # 显存治理：none / model（子模块搬移）/ sequential（逐层搬移，视频模型用）
+      VRAM_STRICT: "1"                # 物理超订硬闸门（exec 795）：装不下就拒载，不交给 host memory 兜底；0=只告警
+      OFFLOAD_VRAM_FLOOR_MB: "1024"   # offload 条目计入显存预算的 floor（MB）
+      OBJECT_TTL_ORPHAN_SECONDS: "1800"  # 租约结束后的孤儿对象回收龄期（秒）
       INFERENCE_TOKEN: "change-me"     # 必填（算子全面插件化，无 token 启动即失败）；改强随机值
     volumes:
       - ./models:/models              # 把 safetensors/ckpt 模型文件放到 ./models

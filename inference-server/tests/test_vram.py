@@ -10,8 +10,9 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from app.vram import (DTYPE_BYTES, estimate_bytes, plan_eviction,
-                      safetensors_bytes, target_bytes)
+from app.vram import (DTYPE_BYTES, estimate_bytes, headroom_bytes,
+                      oversub_ratio, oversubscribed, plan_eviction,
+                      safetensors_bytes, saturated, target_bytes)
 
 
 def _write_safetensors(path, tensors):
@@ -106,6 +107,47 @@ def test_plan_eviction_unknown_size_and_empty():
                          reserve_bytes=0, max_resident=2) == ["y", "x"]
 
 
+def test_oversubscribed_detects_host_memory_fallback():
+    """B1：物理超订判定（exec 795 实测数据）。
+
+    为什么要它：WSL2/WDDM 下 CUDA 超订**不报 OOM**，而是借主机内存按页取用 ——
+    采样静默退化到 170~210s/步（干净态 40s/步），OOM 自愈护栏全程未触发、
+    /health 还是 ok。唯一硬证据就是“分配额度 > 物理显存”。
+    """
+    mb = 1024 ** 2
+    gb = 1024 ** 3
+    # 实测现场：reserved 9276MB vs 物理 8192MB
+    assert oversubscribed(9276 * mb, 8192 * mb) is True
+    assert oversub_ratio(9276 * mb, 8192 * mb) > 1.0
+    assert headroom_bytes(9276 * mb, 8192 * mb) == 0
+    # 健康态：分配器把整卡缓存下来（额度 == 物理量）→ 不算超订，否则大批误报
+    assert oversubscribed(8192 * mb, 8192 * mb) is False
+    assert oversubscribed(6 * gb, 8 * gb) is False
+    assert headroom_bytes(6 * gb, 8 * gb) == 2 * gb
+    # 异常输入不抛
+    assert oversubscribed(None, 8 * gb) is False
+    assert oversubscribed(1, 0) is False
+    assert oversubscribed(0, 8 * gb) is False
+    assert oversub_ratio(1, 0) == 0.0
+    # slack：允许少量容忍（默认 0 = 严格）
+    assert oversubscribed(8 * gb + 1024, 8 * gb, slack_bytes=2048) is False
+    assert oversubscribed(8 * gb + 4096, 8 * gb, slack_bytes=2048) is True
+
+
+def test_saturated_is_not_oversubscribed():
+    """B1：saturated（物理无余量）与 oversubscribed（已借主机内存）是两件事。
+
+    driver_free=0 且额度贴满，**在健康态下也会出现**（分配器缓存整卡）——
+    把它当成“正在兜底”会大批误报，所以两者分开暴露（/health 两个字段）。
+    """
+    gb = 1024 ** 3
+    assert saturated(8 * gb, 8 * gb, 0) is True          # 没余量（可能是缓存）
+    assert oversubscribed(8 * gb, 8 * gb) is False       # 但没超订
+    assert saturated(2 * gb, 8 * gb, 0) is False         # 额度没贴满
+    assert saturated(8 * gb, 8 * gb, 512 * 1024 ** 2) is False   # 驱动还有余量
+    assert saturated(None, 8 * gb, 0) is False
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="vram-test-")
     fp16 = os.path.join(tmp, "fp16.safetensors")
@@ -122,6 +164,8 @@ def main():
         test_plan_eviction_memory_budget,
         test_plan_eviction_pinned_skipped,
         test_plan_eviction_unknown_size_and_empty,
+        test_oversubscribed_detects_host_memory_fallback,
+        test_saturated_is_not_oversubscribed,
     ]
     for fn in checks:
         fn()

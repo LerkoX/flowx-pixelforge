@@ -5863,3 +5863,59 @@ cpolar 网站隧道重建后域名变更（`1bba08c4.r7.cpolar.cn` → **`749a0d
 **教训（已并入 README 的隧道运维条目）**：隧道地址是**环境变量级**的配置，散落在
 ①仓库 pipeline 的 Param、②Studio 工作流快照、③辅助脚本三处；换隧道后要**三处齐步替换**，
 否则会出现"节点连得上但画布预览/取消兜底连不上"这类半通状态。
+
+---
+
+## 62. 监控页可读性返工（进度条 / 显存分账 / 运维按钮反馈）
+
+**触发**：用户看 `/monitor` 提出三条 ——「进度百分比不是进度条，都是一条」「顶部显存占用
+看不懂，显存/缓存能不能分开显示」「运维操作按钮点了没效果」。
+
+### 62.1 三个现象 → 三个真因
+
+1. **所有任务的进度条都是满格蓝条**：不是数据问题，是 CSS 选择器命中了文字层 ——
+   `.pbar > div { background: var(--blue) }` 同时匹配「填充层」和「绝对定位的百分比文字层」，
+   文字层 `inset:0` 铺满整条并染成蓝色，填充宽度再正确也被盖住。
+   ⇒ 填充层独立成 `.pbar > .fill`，文字移出条外（`.pmeta`），条内不再压字。
+2. **顶部显存条读不出数**：只有两段（alloc `--blue` + cache `#1f6feb55`，与空轨道 `#21262d`
+   几乎同色），且没有「其它进程/驱动」和「空闲」分账；一整行中文（已分配/缓存/总量/余量）
+   塞进 18px 细条里，段边界被文字盖住。
+   ⇒ 改成**四段互斥分账**（已分配 / 缓存保留可回收 / 其它进程·驱动 / 空闲=轨道色），
+   图例与明细数字全部移到条外，另给 NVML 已用 / torch reserved / allocated / 可回收缓存 /
+   物理余量 / 显存预算 / 常驻权重 七项明细。
+3. **运维按钮"没效果"**：三个端点（`/gc`、`/model/unload`、`/interrupt`）本身是对的，
+   问题全在页面与场景：
+   - 旧页面 `op()` 只清错误 banner，**成功时把返回体整包丢弃**（`/gc` 的 `cleared`、
+     `/interrupt` 的 `interrupted`、unload 的 `skipped_detail` 全不显示），
+     所以「清理了 12 个对象」和「什么都没有发生变化」在界面上长得一样；
+   - `/gc` 不卸常驻模型、`卸载全部` 又常被**残留租约** pin 掉（exec772 那一类），
+     旧页面连「被谁持有」都不给，用户只能判定为按钮坏了；
+   - 依赖 `window.confirm/alert`：内嵌 webview / 禁弹窗策略下会**静默返回 false**，
+     handler 直接 return —— 一模一样的「点了没效果」。
+   ⇒ 页内二次确认（按钮变「确认？」，3s 内再点生效）+ 结果写入 `#ops-out`（带时间戳），
+   卸载被跳过时就地列出 `skipped_detail` 的持有租约并给「释放租约」按钮，
+   另加「释放全部租约」按钮（逐个 DELETE，结果汇总）。
+
+### 62.2 顺带把任务队列做实（`/jobs` 之前只有 kind=graph|op）
+
+- 服务端 `jobs.py`：`Job.summary`（title = op 名 / `graph · N 节点`，ops 去重清单）、
+  `stage`（节点级阶段，`engine.run_graph` 每节点经 `execution.report_stage` 上报）、
+  `queue_pos`（pending 排队位次）、`wait_seconds`（提交→开始）；
+  `JobManager.queue_state()` → `/jobs` 多回 `queue`（worker 忙闲 / 跑的是谁 / 队头等待）。
+- 页面：任务表列改为 `job｜算子·类型｜状态｜进度｜速度·ETA｜租约｜提交·耗时｜操作`；
+  进度文本外置成「12/25 步 · 48%」+ 当前节点「flux.sampler · 3/5 节点」；
+  ETA 三级取数（服务端 EMA `sec_per_step` → 前端百分位差分 → 节点均值粗估）；
+  done 任务按结果元数据数出「🖼 n / 🎬 n」，点击「查看」用 Bearer 拉 blob 在弹层预览
+  （`<img src>` 带不上 Authorization，直链必然 401）；failed 错误摘要可展开全文。
+- 加载阶段（progress 为 0/0）不再是一片空白：进度条走流动条纹 + 显示当前节点。
+
+**兼容性纪律**：页面必须能跑在**旧后端**上（没有 title/ops/stage/queue/queue_pos 时全部
+回退到 `kind`、`排队中`、空汇总）。已用 DOM 桩跑两套 payload（新/旧）验证渲染不崩、
+运维回执与二次确认均生效。
+
+### 62.3 部署提醒
+
+`app/` 是 `COPY` 进镜像的（compose 只挂 `models/loras/input/videos`），所以：
+- 只改 `app/static/monitor.html` ⇒ 重建镜像才生效；想免重启验证可以
+  `docker cp app/static/monitor.html flowx-inference-server:/app/app/static/monitor.html`（静态文件每次请求现读）；
+- 改 `app/*.py`（jobs/engine/execution/main）⇒ 必须重建并重启容器（模块导入期装配）。

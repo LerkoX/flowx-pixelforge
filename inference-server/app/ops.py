@@ -290,6 +290,206 @@ def exec_device_of(pipe):
     return dev
 
 
+# ---------- offload 大件驻留管理（B3，exec 795/796 事故） ----------
+#
+# 背景：`offload=model` 的钩子是**惰性**的（accelerate `cpu_offload_with_hook`：
+# 下一个模块前向时才把上一个搬回 CPU），而本服务是手动采样循环——只调 unet。
+# 于是编码阶段上卡的 text_encoder / VAE 没人“顶”它下车，采样全程赖在显存里。
+# 
+# **实测尺寸（2026-10-16 真机 module_map）**——8GB 卡上这四件加起来就是装不下：
+#   SDXL UNet fp16        4897MB   ← 注意：不是 2.5GB（2.567B 参数 × 2B ≈ 5GB）
+#   SDXL ControlNet fp16  2386MB
+#   CLIP-G (text_encoder_2) 1325MB + CLIP-L 235MB
+#   VAE fp32               319MB
+# 合计 ~9.2GB > 物理 8192MB ⇒ WSL2/WDDM 不报 OOM、借主机内存 ⇒ 每步经 PCIe
+# 取权重（exec 795：170~210s/步；干净对照 40s/步）。
+# 所以 B3 只做两件能做的事：① 把不参与循环的 CLIP/VAE 搬下车（省 1.6GB）；
+# ② 按余量决定 CN 常驻/按次搬移。[sample] 会打印“想不出办法就直说”的告警——
+# SDXL+CN 在 8GB 上本来就超容，真解是 offload=sequential / SD1.5 / 降分辨率。
+
+
+def _hook_managed(module):
+    """该模块是否处于 accelerate offload 钩子管理下（可安全手工搬走）。"""
+    return getattr(module, "_hf_hook", None) is not None
+
+
+def is_offloaded_pipe(pipe):
+    """管道是否启用 offload（model/sequential 档）——用 unet 上的钩子判定。"""
+    return _hook_managed(getattr(pipe, "unet", None))
+
+
+def park_idle_components(pipe, names=("text_encoder", "text_encoder_2",
+                                     "text_encoder_3", "vae")):
+    """把不参与采样循环的大件送回 CPU，返回 [(名字, MB)] 供日志。
+
+    安全前提：**只动受 offload 钩子管理的模块**（钩子会在需要时自己搬回来）；
+    未启用 offload 的常驻管道绝不动（搬下去没人搬回来 ⇒ 下次编码/解码设备不匹配）。
+    """
+    moved = []
+    for name in names:
+        mod = getattr(pipe, name, None)
+        if mod is None or not _hook_managed(mod):
+            continue
+        try:
+            p = next(mod.parameters())
+        except StopIteration:
+            continue
+        dev = str(p.device)
+        # 只处理“确实在卡上”的模块：已在 CPU 的不用管；sequential offload 下参数在
+        # meta（真权重在 cpu_state_dict），碰它会打乱钩子状态 ⇒ 一律跳过。
+        if "cuda" not in dev:
+            continue
+        mb = _module_mb(mod)
+        try:
+            mod.to("cpu")
+        except Exception:  # noqa: BLE001 - 搬不动就算了，不影响采样
+            continue
+        moved.append((name, mb))
+    if moved:
+        torch.cuda.empty_cache()
+        print("[sample] offload 大件下车（不参与采样循环）："
+              + ", ".join(f"{n} {mb:.0f}MB" for n, mb in moved), flush=True)
+    return moved
+
+
+def _module_mb(mod):
+    try:
+        return sum(x.numel() * x.element_size() for x in mod.parameters()) / 1024**2
+    except Exception:  # noqa: BLE001 - 诊断不抛
+        return 0.0
+
+
+def available_vram_bytes():
+    """当前可用显存（驱动余量 + 可回收缓存）——与 ModelManager._free_bytes 同口径。"""
+    if not torch.cuda.is_available():
+        return 0
+    try:
+        free, _total = torch.cuda.mem_get_info()
+    except Exception:  # pragma: no cover
+        return 0
+    cached = 0
+    try:
+        cached = max(0, torch.cuda.memory_reserved(0) - torch.cuda.memory_allocated(0))
+    except Exception:  # pragma: no cover
+        pass
+    return int(free + cached)
+
+
+def total_vram_bytes():
+    """物理显存总量（字节）；无 CUDA 返回 0。"""
+    if not torch.cuda.is_available():
+        return 0
+    try:
+        _free, total = torch.cuda.mem_get_info()
+        return int(total)
+    except Exception:  # pragma: no cover
+        return 0
+
+
+class ControlNetPlacement:
+    """ControlNet 驻留策略（B3）：装得下就常驻（每步零搬运），装不下就按次搬移。
+
+    为什么不能一律常驻（exec 795 现形）：SDXL ControlNet fp16 是 **2.5GB**
+    （`load_controlnet` 里无条件 `cn.to("cuda")`，注释里“~0.72GB”是按 SD1.5 写的），
+    它 + UNet 2.56 + CLIP 1.64 + VAE 0.34 就已经超过 8GB 卡。
+    为什么不能一律按次搬：每步 2×CN 体积的 PCIe（PCIe 3.0 x16 约 1~2s/步）
+    虽然比抖动快得多，但常驻时是零；所以按实测余量二选一，且**采样前定死**
+    （逐步改策略反而引入抖动）。
+    """
+
+    RESERVE_MB = 512   # 给 CN 前向的中间张量留的余量
+    FACTOR = 1.15
+
+    def __init__(self, cn, device, peers=()):
+        self.cn = cn
+        self.device = device
+        # 采样循环期间会**常驻上卡**的其它大件（通常就是 unet）：
+        # 判断“放不放得下 CN”时必须算上它们。
+        # 实测教训（exec 796，2026-10-16）：不算 peers 时 CN 看到“可用 4672MB ≥ 需要
+        # 3256MB”就决定常驻，随后 UNet 4897MB 也上卡 ⇒ 7383MB + 激活 > 物理 8192MB
+        # ⇒ 照样溢出（reserved 8988MB > 8192MB，80s/步）。
+        self.peers = [p for p in (peers or ()) if p is not None]
+        self.per_step = False
+        self.mb = _module_mb(cn) if cn is not None else 0.0
+
+    def _on_card(self, mod):
+        """是否已上卡（只有 cuda 算；meta=sequential offload 的占位设备，不算）。"""
+        try:
+            return "cuda" in str(next(mod.parameters()).device)
+        except StopIteration:
+            return False
+
+    def _peers_pending_mb(self):
+        """还未上卡、但采样循环期间会常驻的 peers 体积（估算放大同 FACTOR）。"""
+        return sum(_module_mb(p) * self.FACTOR for p in self.peers
+                   if not self._on_card(p))
+
+    def plan(self):
+        if self.cn is None:
+            return self
+        try:
+            cur = str(next(self.cn.parameters()).device)
+        except StopIteration:
+            return self
+        on_gpu = not cur.startswith("cpu")
+        need = (self.mb * self.FACTOR + self.RESERVE_MB
+                + self._peers_pending_mb())
+        avail = available_vram_bytes() / 1024**2
+        if on_gpu and avail + self.mb >= need:
+            print(f"[sample] controlnet 保持常驻（{self.mb:.0f}MB，可用 "
+                  f"{avail:.0f}MB，需为常驻 peers 预留 "
+                  f"{self._peers_pending_mb():.0f}MB）", flush=True)
+            self._warn_if_still_over()
+            return self
+        if on_gpu:
+            self.cn.to("cpu")
+            torch.cuda.empty_cache()
+            print(f"[sample] controlnet 卸载到 CPU（余量不足：可用 {avail:.0f}MB，"
+                  f"需要 {need:.0f}MB 含常驻 peers）", flush=True)
+        if avail >= need:
+            self.cn.to(self.device)
+            print(f"[sample] controlnet 常驻上卡（{self.mb:.0f}MB，可用 "
+                  f"{avail:.0f}MB）", flush=True)
+        else:
+            self.per_step = True
+            print(f"[sample] controlnet 按次搬移（每步 {self.mb:.0f}MB，可用 "
+                  f"{avail:.0f}MB 装不下常驻）", flush=True)
+        self._warn_if_still_over()
+        return self
+
+    def _warn_if_still_over(self):
+        """就算把 CN 停到 CPU，UNet+CN+激活也超物理显存时，把话说清楚。
+
+        为什么要这一条：8GB 卡跑 SDXL+CN 就是**容量不够**（实测 UNet fp16
+        4897MB + SDXL ControlNet fp16 2386MB + 激活 ≈ 7800~8300MB），任何驻留
+        策略都只能减少抖动、不能消灭它。真解：加载时 offload=sequential（逐层
+        搬移，峰值 < 1GB），或换 SD1.5/降分辨率。
+        """
+        total = total_vram_bytes()
+        if not total or not self.mb or not self.peers:
+            return
+        peak = (self.mb + self.RESERVE_MB
+                + sum(_module_mb(p) for p in self.peers))
+        if peak * 1024**2 > total:
+            print(f"[sample] WARNING: UNet+ControlNet+激活 ≈ {peak:.0f}MB 已达/超物理显存 "
+                  f"{total / 1024**2:.0f}MB（WSL2 溢出＝PCIe 颠簸，分钟级/步）。"
+                  f"建议：加载节点 offload 改 sequential（逐层搬移，峰值<1GB）、"
+                  f"或换 SD1.5/降分辨率", flush=True)
+
+    def run(self, *args, **kwargs):
+        """CN 前向（按次搬移模式下前后各自搬运一次）。"""
+        if self.cn is None:
+            raise ValueError("ControlNetPlacement.run: 无 ControlNet（调用方应先判空）")
+        if self.per_step:
+            self.cn.to(self.device)
+        try:
+            return self.cn(*args, **kwargs)
+        finally:
+            if self.per_step:
+                self.cn.to("cpu")
+                torch.cuda.empty_cache()
+
+
 def _enable_adapters(pipe, patches):
     """采样前启用补丁；无补丁时确保 LoRA 全部关闭（管道是常驻共享的）。"""
     if patches:
@@ -472,6 +672,14 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
 
     seed = seed if seed >= 0 else random.randint(0, 2**32 - 1)
     device = exec_device_of(pipe)
+    # B3：采样循环只跑 unet（+ controlnet），先把编码阶段留在卡上的 CLIP/VAE
+    # 送回 CPU（仅对受 offload 钩子管理的模块动手，见 park_idle_components）
+    if is_offloaded_pipe(pipe):
+        park_idle_components(pipe)
+    else:
+        # 常驻管道（offload=none）：组件本来就在卡上，不能动（搬下去没人搬回来）
+        print("[sample] 未检测到 offload 钩子（常驻管道）→ 不做大件下车；"
+              "若显存仍紧张，请把加载节点的 offload 设为 model/sequential", flush=True)
     sched = make_scheduler(sampler_name, scheduler, pipe.scheduler.config)
     print(f"[sample] sampler={sampler_name} scheduler={scheduler} "
           f"steps={steps} cfg={cfg}", flush=True)
@@ -558,6 +766,12 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
         print(f"[sample] controlnet hidden 覆写（InstantID）："
               f"tokens={tuple(cn_pos_tok.shape)}", flush=True)
 
+    # B3：CN 驻留策略（装得下常驻／装不下按次搬移）——采样前定死，避免逐步抖动。
+    # peers=unet：采样循环期间 unet 会常驻上卡，判断余量时必须算上它（实测 exec 796）。
+    cn_place = ControlNetPlacement(
+        control.controlnet if control is not None else None, device,
+        peers=(getattr(pipe, "unet", None),)).plan()
+
     def cn_residuals(i, inp, t, hidden, added=None, side=None):
         """当前步的 controlnet 残差（窗口外/无 control 返回 None）。
         inp/hidden 批数与 unet 输入一致（cat 拼批 2b 时 hint 复制两份）。
@@ -574,7 +788,7 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
                 if inp.shape[0] == 2 * b else \
                 (cn_neg_tok if side == "neg" else cn_pos_tok)
         kw = {"added_cond_kwargs": added} if added is not None else {}
-        down, mid = control.controlnet(
+        down, mid = cn_place.run(
             inp, t, encoder_hidden_states=hidden, controlnet_cond=h,
             conditioning_scale=control.strength, return_dict=False, **kw)
         return down, mid

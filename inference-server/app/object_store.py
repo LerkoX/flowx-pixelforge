@@ -13,18 +13,25 @@ import threading
 import time
 import uuid
 
+from . import lease as _lease
 from . import video
 
 
 class ObjectStore:
     def __init__(self, ttl_seconds: int = 3600, video_dir: str | None = None,
-                 video_encoder=None):
+                 video_encoder=None, lease_alive=None,
+                 orphan_ttl_seconds: int | None = None):
         self._items = {}
         self._lock = threading.Lock()
         self._ttl = ttl_seconds
         self._video_dir = video_dir
         # 可注入假编码器供无 imageio 环境测试
         self._video_encoder = video_encoder or video.encode_mp4
+        # 孤儿条目清理（B2）：条目标注了租约、租约已不活跃、且龄期超过
+        # orphan_ttl_seconds → 回收（见 _sweep）。lease_alive 由 main.py 注入
+        # （LeaseBook.is_active）；**未注入时本机制关闭**，保持既有语义（单测/脚本）。
+        self.lease_alive = lease_alive
+        self.orphan_ttl_seconds = orphan_ttl_seconds
 
     def put(self, kind: str, data, meta: dict | None = None) -> str:
         self._sweep()
@@ -41,6 +48,9 @@ class ObjectStore:
                 "data": data,
                 "meta": meta or {},
                 "created": time.time(),
+                # 归属租约（B2）：淘汰保护与孤儿清理都按它分账。
+                # 不带 X-FlowX-Lease 的调用方（脚本/验收）为 None ⇒ 旧语义不变。
+                "lease": _lease.current(),
             }
         return oid
 
@@ -85,11 +95,26 @@ class ObjectStore:
                 kinds[k] = kinds.get(k, 0) + 1
             return {"count": len(self._items), "kinds": kinds}
 
-    def referenced_data(self) -> list:
-        """仓库内所有条目的 data 列表（供模型淘汰保护：被仓库引用的管道
-        本体视同 pin，见 ModelManager.extra_pinned / main.py 注入）。"""
+    def referenced_data(self, lease_id=None) -> list:
+        """仓库内条目的 data 列表（供模型淘汰保护：被仓库引用的管道
+        本体视同 pin，见 ModelManager.extra_pinned / main.py 注入）。
+
+        lease_id=None（默认 / 无租约调用方）→ 全量：历史语义逐字节不变。
+        lease_id 非空 → 只返回**本租约**创建的条目。
+
+        为什么按租约收敛（B2，exec 795）：原先仓库条目不区分租约，extra_pinned
+        于是把**上一轮/另一条流水线**留下的 model/clip/vae 视图也当“不可淘汰”，
+        配上 OBJECT_TTL_SECONDS=86400（24h）就能把 7.4GB 常驻条目钉住一整天 —
+        实测 flux 四个条目（unet 6470MB + clip 477 + vae 381 + redux 123）
+        就这样赖在 8GB 卡上跟 SDXL+CN 挤，弄出 16.4GB 超订。
+        跨租约的保护不需要这一层：`lease.keys_of_others` 本来就会跳过
+        其它活跃租约的条目（两层职责不重叠）。
+        """
         with self._lock:
-            return [v.get("data") for v in self._items.values()]
+            if lease_id is None:
+                return [v.get("data") for v in self._items.values()]
+            return [v.get("data") for v in self._items.values()
+                    if v.get("lease") == lease_id]
 
     def clear(self) -> int:
         with self._lock:
@@ -100,12 +125,43 @@ class ObjectStore:
         return n
 
     def _sweep(self):
+        """过期清理：常规 TTL + **孤儿条目**（B2）。返回回收条数。
+
+        孤儿 = 条目标注了租约、该租约已不活跃（执行结束/租约 TTL 过期）、
+        且龄期超过 orphan_ttl_seconds。为什么要它：常规 TTL 是 86400s（24h，
+        实测环境变量），而条目标注的租约一结束，这些对象就再也没人会消费，
+        却仍钉着模型本体、占着主机内存（实测 5.3GB）—— 靠人工 model.unload
+        才能松开。长任务的安全网：jobs 进度心跳会续租（jobs.Job.set_progress），
+        所以“正在跑的 90 分钟采样”不会被误当孤儿。
+        """
         now = time.time()
+        dropped_orphans = []
         with self._lock:
-            expired = [k for k, v in self._items.items() if now - v["created"] > self._ttl]
+            expired = []
+            for k, v in self._items.items():
+                age = now - v["created"]
+                if age > self._ttl:
+                    expired.append(k)
+                    continue
+                lid = v.get("lease")
+                # orphan_ttl_seconds=None 表示关闭；0 表示“租约一结束就回收”
+                if (lid and self.orphan_ttl_seconds is not None
+                        and self.lease_alive is not None
+                        and age > self.orphan_ttl_seconds):
+                    try:
+                        alive = self.lease_alive(lid)
+                    except Exception:  # noqa: BLE001 - 回调故障不阻断清理
+                        alive = True
+                    if not alive:
+                        expired.append(k)
+                        dropped_orphans.append(k)
             for k in expired:
                 self._discard_file(self._items[k])
                 del self._items[k]
+        if dropped_orphans:
+            print(f"[object-store] 回收孤儿对象 {len(dropped_orphans)} 个"
+                  f"（租约已结束，B2）", flush=True)
+        return len(expired)
 
     def discard_where(self, pred) -> int:
         """按谓词删除条目，返回删除数。

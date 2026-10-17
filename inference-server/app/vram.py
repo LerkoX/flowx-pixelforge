@@ -9,6 +9,10 @@ model_manager 只负责取运行时数值（`torch.cuda.mem_get_info()`、已常
 体积/最近使用时间）并应用结果；决策逻辑放在这里，便于在没有 GPU 的环境单测。
 
 不假设卡型（dev-plan §9.6 纪律 #1）：只看运行时余量与 reserve 配置。
+
+另含**物理超订判定**（WSL2/WDDM host memory 兜底检测，exec 795 事故）：
+OOM 自愈护栏（engine._call_op）在 WSL2 上永远不触发（CUDA 走主机内存兜底而不报
+OOM），只能靠"分配额度 > 物理显存"这类物理口径提前发现。
 """
 import json
 import os
@@ -129,3 +133,76 @@ def plan_eviction(resident, free_bytes, need_bytes, reserve_bytes,
         evicted.append(key)
         freed += size
     return evicted
+
+
+# ---------- 物理超订判定（exec 795 事故：WSL2/WDDM host memory 兜底） ----------
+
+# 驱动余量为 0 且额度贴满物理量到这个比例，即视为兜底态
+_OVERSUB_DRIVER_FREE_RATIO = 0.98
+
+
+def oversub_ratio(reserved_bytes, total_bytes):
+    """分配器向驱动要过的额度 / 物理显存（>1.0 = 已超订）。算不出来返回 0.0。"""
+    try:
+        reserved = int(reserved_bytes or 0)
+        total = int(total_bytes or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if total <= 0:
+        return 0.0
+    return reserved / total
+
+
+def oversubscribed(reserved_bytes, total_bytes, slack_bytes=0):
+    """物理显存超订判定：**已经在借主机内存**（而不是"余量紧张"）。
+
+    判据只有一条硬证据：**分配器要过的额度 > 物理显存**（实测 9276MB > 8192MB）。
+    额度能超过物理量，超出的部分只可能躺在主机内存里——WSL2/Windows WDDM
+    下 CUDA 超订**不报 OOM**，正是这样静默退化成 170~210s/步的（干净态 40s/步），
+    而 OOM 自愈护栏（靠 torch.cuda.OutOfMemoryError）全程未触发、`/health` 还是 ok。
+
+    为什么不把"driver_free == 0 且额度贴满"也算进来：那在**健康态**下完全可能
+    出现（分配器把整卡缓存下来复用，`reserved` 自然贴近 `total`），当成兜底会
+    大批误报——需要它时用 `saturated()`（单独命名、仅作诊断/可选严格闸门）。
+
+    slack_bytes：允许的额度冗余（默认 0，严格判）。
+    """
+    try:
+        reserved = int(reserved_bytes or 0)
+        total = int(total_bytes or 0)
+    except (TypeError, ValueError):
+        return False
+    if total <= 0 or reserved <= 0:
+        return False
+    return reserved > total + max(0, int(slack_bytes or 0))
+
+
+def saturated(reserved_bytes, total_bytes, driver_free_bytes):
+    """物理上已无余量（driver_free≈0 且额度已贴满物理量）。
+
+    ⚠️ **不等于已在兜底**：健康态下分配器把整卡缓存下来也会长这样。
+    用途：诊断展示 + 可选严格闸门（想让流水线“必须留出余量”时才用）。
+    """
+    try:
+        reserved = int(reserved_bytes or 0)
+        total = int(total_bytes or 0)
+        driver_free = int(driver_free_bytes or 0)
+    except (TypeError, ValueError):
+        return False
+    if total <= 0 or reserved <= 0:
+        return False
+    return driver_free <= 0 and reserved >= total * _OVERSUB_DRIVER_FREE_RATIO
+
+
+def headroom_bytes(reserved_bytes, total_bytes):
+    """物理真余量（字节）= 物理显存 − 已要过的额度，下界 0。
+
+    闸门判断"还能不能再塞一个模型"要用这个口径：乐观口径
+    （driver_free + reclaimable）在兜底态下会给出虚假的余量。
+    """
+    try:
+        reserved = int(reserved_bytes or 0)
+        total = int(total_bytes or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, total - reserved)
