@@ -330,6 +330,7 @@ $("save-token").onclick = () => {
   localStorage.setItem(TOKEN_KEY, $("token").value.trim());
   poll();
   pollHistory();
+  reconnectWs();
 };
 
 function authHeaders(extra) {
@@ -1045,6 +1046,40 @@ async function pollHistory() {
 poll();
 pollHistory();
 setInterval(poll, POLL_MS);
+
+// ---------- WS 实时推送（P1-16）：事件驱动刷新，setInterval 轮询保留为兜底 ----------
+// WS 只作「变更通知」：任何 job 事件到达 → 节流触发一次 poll() 拉全量视图渲染。
+// 这样 WS 挂了/不支持（旧服务端）时页面行为与以前完全一致；WS 活着时进度即时。
+let wsConn = null, wsRetry = 0, wsLastPush = 0;
+function connectWs() {
+  const tok = localStorage.getItem(TOKEN_KEY) || "";
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  let ws;
+  try {
+    ws = new WebSocket(proto + "//" + location.host +
+                       "/ws?token=" + encodeURIComponent(tok));
+  } catch (e) { scheduleWsRetry(); return; }
+  wsConn = ws;
+  ws.onopen = () => { wsRetry = 0; };
+  ws.onmessage = (m) => {
+    let ev; try { ev = JSON.parse(m.data); } catch (e) { return; }
+    if (!ev || ev.type === "ping") return;
+    const now = Date.now();
+    if (now - wsLastPush >= 400) { wsLastPush = now; poll(); }  // 事件洪峰节流 ≤2.5 次/s
+  };
+  ws.onclose = () => { wsConn = null; scheduleWsRetry(); };
+  ws.onerror = () => { try { ws.close(); } catch (e) {} };
+}
+function scheduleWsRetry() {
+  wsRetry = Math.min(wsRetry + 1, 6);
+  setTimeout(connectWs, Math.min(30000, 1000 * 2 ** wsRetry));
+}
+function reconnectWs() {
+  wsRetry = 0;
+  if (wsConn) { try { wsConn.close(); } catch (e) {} }
+  connectWs();
+}
+connectWs();
 </script>
 </body>
 </html>

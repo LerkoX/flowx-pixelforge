@@ -16,6 +16,7 @@
 与插件机制本身。
 """
 import gc as _gc  # 别名：与下方 /gc 端点函数名冲突
+import asyncio
 import io
 import os
 import re
@@ -23,12 +24,12 @@ import sys
 import time
 
 import torch
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response
 from PIL import Image
 from pydantic import BaseModel, Field
 
-from . import engine, gpu_probe, lease, metrics_history, ops, plugins, policy, preview, sniff, sys_probe
+from . import engine, events, gpu_probe, lease, metrics_history, ops, plugins, policy, preview, sniff, sys_probe
 from . import model_manager as _mm
 from .jobs import JobManager
 from .model_manager import OFFLOAD_MODE, QUANTIZATION, ModelManager
@@ -700,6 +701,53 @@ def get_job(job_id: str, x_flowx_lease: str = Header(default="")):
         return jobman.get(job_id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.websocket("/ws")
+async def ws_jobs(websocket: WebSocket, token: str = "", job_id: str = ""):
+    """任务事件推送（P1-16）：订阅 job 状态/进度/阶段事件，替代轮询。
+
+    协议：
+    - 连接：`/ws?token=<INFERENCE_TOKEN>[&job_id=<id>]`；token 错误关 4401。
+      job_id 过滤单个任务；省略则订阅全部任务事件。
+    - 连接后立刻发 {"type":"snapshot","job":<当前视图>}（仅带 job_id 时，
+      让晚到的订阅者不错过订阅前的状态）。
+    - 事件：submitted / running / progress / stage / done / failed / cancelled，
+      字段见 jobs.py 发布点；done 带 result（同 GET /jobs/{id}）。
+    - 30s 无事件发 {"type":"ping"} 保活（隧道/NAT 空闲断连兜底）。
+
+    客户端纪律（flowx_client.wait_job）：WS 失败/断开/超时一律回退轮询，
+    旧服务端（无 /ws）+ 新节点、新服务端 + 旧节点两个方向都必须可用。
+    """
+    if TOKEN and token != TOKEN:
+        await websocket.close(code=4401)
+        return
+    await websocket.accept()
+    q = events.subscribe()
+    try:
+        if job_id:
+            try:
+                await websocket.send_json({"type": "snapshot",
+                                           "job": jobman.get(job_id)})
+            except KeyError:
+                await websocket.send_json({"type": "error",
+                                           "error": f"job '{job_id}' not found"})
+        while True:
+            try:
+                ev = await asyncio.wait_for(asyncio.to_thread(q.get),
+                                            timeout=30.0)
+            except asyncio.TimeoutError:
+                await websocket.send_json({"type": "ping"})
+                continue
+            if job_id and ev.get("job_id") not in (None, job_id):
+                continue
+            await websocket.send_json(ev)
+    except WebSocketDisconnect:
+        pass
+    except RuntimeError:
+        pass  # 连接已被对端关闭（send 抛 RuntimeError）
+    finally:
+        events.unsubscribe(q)
 
 
 @app.get("/leases", dependencies=[Depends(auth)])

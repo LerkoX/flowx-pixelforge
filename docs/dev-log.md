@@ -6024,3 +6024,62 @@ ROADMAP M10 删掉"G11 环境投影待做"（§56 已交付）。
   `flush`×10、`FLOWX_JOB_HEARTBEAT` 在 ⇒ §61.6/§61.7 修复确认随镜像生效。
 - **备注**：本隧道下 `docker run -a` 的 stdout 流不回传（空输出但退出码正确），
   需 `create + start + wait + logs` 分离取值——与 §48 记录的"新隧道长连接流被重置"同类。
+
+## 65. P1-16 WebSocket `/ws` 进度推送（2026-10-19 交付并真机验收）
+
+### 65.1 结构
+
+- **服务端**：新模块 `app/events.py`（进程内 pub-sub，`queue.Queue` 跨线程桥；
+  满队列丢事件——推送方绝不许影响任务执行）；`jobs.py` 七个发布点
+  （submitted/running/stage/progress/done/failed/cancelled，done 带 result）；
+  `main.py` 新增 `@app.websocket("/ws")`：`?token=` 鉴权（错则 4401）、`?job_id=` 过滤、
+  带 job_id 时先发 `snapshot`（晚到订阅者不错过既有状态）、30s 应用层 ping 保活、
+  finally 退订防队列泄漏。
+- **节点共享件**（纯 stdlib，零新依赖）：`_WsConn`（RFC 6455 握手 + 帧解析：
+  掩码 pong 回包、续帧拼接、close 检测、握手 leftover 字节不丢）；
+  `wait_job` 变分发器：**WS 优先**（事件驱动，REST 只在终态确认打 1 次），
+  任何通道问题抛 `_WsFallback` ⇒ 回退原轮询路径（剩余 timeout 传递）。
+  开关：`FLOWX_WS=0` 全关（一处 workaround 一个开关）。
+  心跳语义保留：加载阶段无 progress 事件，靠服务端 30s ping 驱动心跳日志
+  （docker exec 流保活，§61.6 教训不回退）。
+- **监控页**：WS 作「变更通知」——事件到达节流（≤2.5 次/s）触发一次 poll() 拉全量渲染；
+  `setInterval` 轮询保留为兜底（WS 挂了页面行为与以前完全一致）；断线指数退避重连；
+  保存 token 后重连。
+
+### 65.2 兼容性纪律（双向不炸）
+
+旧服务端（无 /ws）+ 新节点 = 握手 404 ⇒ 回退轮询；新服务端 + 旧节点 = 纯轮询照常。
+cpolar 隧道 WS 兼容性（开工第一问）：**实测兼容**（握手 + 事件帧 + TLS 全通）。
+
+### 65.3 验收
+
+- 服务端单测 `test_ws_events.py` 23 项（广播器 5 + 事件序列/失败/取消 6 +
+  静态约束 12）；既有测试回归：仅 8 个插件族测试失败，均为 HEAD 存量
+  （F1 版本化算子名 vs 本机断言，stash 验证与本次改动无关）。
+- 客户端真测 `test_ws_client.py` 11 项（内嵌 stdlib WS 服务器：事件驱动零轮询 /
+  握手被拒回退 / 中途断开回退 / **负例：无回退必败** / ping→pong / FLOWX_WS=0）。
+- 真机：重启推理服务后 `/health` 10s 恢复；WS 握手过隧道成功；
+  `image.upscale` 真 job 经 WS 通道完成（job 1db4a7b1，result 对象 id 正确）。
+- 门禁：`sync-common --check` ✓、`check-bundle` ✓（111 节点 / v1.19.5）、gate Q ✓。
+
+### 65.4 顺手的两个存量修复
+
+1. **31 个 widget-def.js 残留 `replay:` 声明**：fe08d69 移除重放按钮后声明没跟着删，
+   控件 DOM 回归门禁一直红着（存量）。已全部摘除 + 重建产物 ⇒ check-bundle 回绿。
+   （image-watermark 是多行声明，正则删首行留了孤儿续行导致语法错误——教训：
+   多行声明的批量清理必须逐文件验证语法。）
+2. **隧道大包断流**：裸 TCP 实测写 ~4MB 必被重置 ⇒ `docker build` 上下文（35MB）
+   过不了隧道。镜像 v1.19.5 走 **commit 路径**：v1.19.4 起临时容器 → 107 个目录逐个
+   `docker cp` 新的 `flowx_client.py`（单文件 30KB，远低于断流阈值）→ `docker commit`。
+   已实跑验证（vram-ops status 容器内 exit=0）。
+   **注意**：域名 `6.tcp.cpolar.cn` 的解析 IP 会变（198.18.0.9 失效 → 81.71.128.221），
+   本机 docker CLI 用域名解析失败时需先走 dns.alidns.com 拿当前 IP。
+
+### 65.5 部署清单（本次实际执行）
+
+| 件 | 路径 |
+|---|---|
+| 服务端 events.py/jobs.py/main.py | `docker cp` + `docker restart flowx-inference-server` |
+| 监控页 monitor.html | `docker cp`（静态文件免重启） |
+| 111 节点 | `reimport-nodes.py` 全量重导（142s，ok=111） |
+| 镜像 v1.19.5 | commit 路径（见 65.4-2），tag 已同步 111 个 flowx.json |

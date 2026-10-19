@@ -11,6 +11,7 @@ import threading
 import time
 import uuid
 
+from . import events
 from .execution import JobCancelled, bind, unbind
 from . import lease as _lease
 
@@ -65,6 +66,8 @@ class Job:
         同时续租：节点间切换也是长任务的活性心跳。"""
         self.stage = {"index": index, "total": total,
                       "node": node_id, "op": op_name}
+        events.publish("stage", self.id, index=index, total=total,
+                       node=node_id, op=op_name)
         self._touch_lease()
 
     def _touch_lease(self):
@@ -77,6 +80,8 @@ class Job:
 
     def set_progress(self, current, total):
         self.progress = {"current": current, "total": total}
+        events.publish("progress", self.id, current=current, total=total,
+                       percent=round(current / total * 100, 1) if total else None)
         # 进度心跳兼作**续租**（B2）：租约 TTL 默认 30min，而 30 步采样可能跑
         # 90 分钟（exec 795 实测 5425s）。不续租的后果有两个：① 本执行的常驻
         # 条目失去租约保护被别的执行淘汰；② 对象仓库把它创建的对象当孤儿回收
@@ -127,6 +132,8 @@ class JobManager:
         with self._lock:
             self._jobs[job.id] = job
         self._queue.put(job)
+        events.publish("submitted", job.id, kind=kind,
+                       title=job.summary["title"], nodes=job.summary["nodes"])
         return job.id
 
     def get(self, job_id) -> dict:
@@ -189,6 +196,8 @@ class JobManager:
                 job.status = "cancelled"
                 job.error = "cancelled before start"
                 job.finished_at = time.time()
+                events.publish("cancelled", job.id,
+                               error="cancelled before start")
         return {"interrupted": [j.id for j in targets]}
 
     def _worker(self):
@@ -198,17 +207,22 @@ class JobManager:
                 continue  # 排队期间被取消，直接跳过
             job.status = "running"
             job.started_at = time.time()
+            events.publish("running", job.id,
+                           wait_seconds=round(job.started_at - job.created_at, 1))
             bind(job)
             _lease.bind(job.lease)
             try:
                 job.result = self._run(job.kind, job.payload)
                 job.status = "done"
+                events.publish("done", job.id, result=job.result)
             except JobCancelled:
                 job.status = "cancelled"
                 job.error = "cancelled"
+                events.publish("cancelled", job.id, error="cancelled")
             except Exception as e:
                 job.status = "failed"
                 job.error = str(e)
+                events.publish("failed", job.id, error=job.error)
             finally:
                 _lease.unbind()
                 unbind()
