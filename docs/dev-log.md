@@ -6200,3 +6200,28 @@ def register_routes(add_route):
   固化；113 包全量重导 ok=113 fail=0；workflow 187（tripo-sr-e2e）已建。
 - 展示页 8899 挂 GLB 下载。⚠️ 画布侧实跑当时 cpolar HTTPS 隧道掉线（容器健康，
   docker 隧道正常），待宿主重启隧道后补画布验收。
+
+## 69. /ws 事件吞食事故（exec 824）+ 3D 画布验收（2026-10-19 晚）
+
+### 69.1 事故：收到 ping 却永远等不到 done
+
+3D 画布首跑时服务端任务 38s 已完成，节点却在 WS 里心跳了 10 分钟"running"。
+根因是经典的 **asyncio.to_thread 取消泄漏**：原实现
+`await asyncio.wait_for(asyncio.to_thread(q.get), 30.0)`——wait_for 超时取消不了
+已在跑的线程，被遗弃的读者线程仍阻塞在 q.get 上，会**抢走随后到达的事件**
+（done 在 ping 边界 0.1s 级窗口被吞；此后每 30s 泄漏一个新线程，每个都可能再吞一条）。
+P1-16 验收时任务完成时间没撞上 ping 边界，所以没暴露。
+
+**修复**：/ws 改单消费者泵线程（连接生命周期内唯一读者，超时产 ping），
+`call_soon_threadsafe` 转交 asyncio 队列；无并发读者 ⇒ 无吞事件。
+test_ws_events 静态检查加防回归断言（`wait_for(asyncio.to_thread` 模式不得复活）。
+教训：asyncio.to_thread/run_in_executor 配 wait_for/timeout 做"可取消等待"是反模式，
+取消语义是假的；阻塞队列读取要嘛单消费者泵、要嘛 queue.Queue(timeout)。
+
+### 69.2 3D 画布全链路验收（wf 187 / exec 825）
+
+Ensure（显存闸门）→ Load（上传 512² chair）→ Recon（ensure_plugin 自注册 +
+job 38s）→ Save（GLB 落盘 ~/flowx-output/triposr-chair_20261020_060230.glb，
+1,647,392B 与容器内实测**字节级一致**）；widget 取数路径实测：
+Studio service-proxy → /ext/meshes/{oid} → 200 + glTF 魔数。
+推理隧道 44e44576→55999db0 全量刷新（repo 25 文件 + Studio 56 快照）。
