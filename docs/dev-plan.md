@@ -158,9 +158,9 @@
 16. ~~**WebSocket `/ws` 进度推送**~~ ✅（2026-10-19 交付并真机验收，dev-log §65）：服务端
     `/ws` 事件推送 + 节点 `wait_job` WS 优先/断线回退轮询 + 监控页 WS 驱动刷新（轮询兜底保留）；
     **cpolar 隧道 WS 实测兼容**。镜像 1.19.4→1.19.5（隧道大包断流 ⇒ commit 路径建镜像）。
-17. **扫描类工作流容错**（dev-log §61.5-2 遗留）—— InstantID 扫参里 2 个 `Score*` 节点
-    fail-fast 把整跑判 failed（4 张图已全部产出）。打分节点应"可选/不致命"（生成器改
-    不阻塞落盘，或节点加 `optional` 语义；需先出方案）。
+17. ~~**扫描类工作流容错**~~ ✅（2026-10-19 交付并真机验收，dev-log §66）：`executor_base.run_op`
+    加 `soft` 容错出口（失败不炸节点、输出 soft_failed+error、退出码 0）；`face-similarity@1.2.0`
+    接入；扫参生成器 Score 节点带 `soft: true`。
 18. ~~**v1.19.4 镜像真机 e2e 确认**~~ ✅（2026-10-19，dev-log §64.6）：容器内经内网地址
     `172.17.0.1:8100` 跑 `vram-ops` status 成功；镜像内 grep 核验三个 client 修复齐全。
 19. ~~**`vram-ops` policy_get 活体验证**~~ ✅（2026-10-19，dev-log §64.6）：policy_get 读数与

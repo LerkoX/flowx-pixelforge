@@ -6083,3 +6083,38 @@ cpolar 隧道 WS 兼容性（开工第一问）：**实测兼容**（握手 + �
 | 监控页 monitor.html | `docker cp`（静态文件免重启） |
 | 111 节点 | `reimport-nodes.py` 全量重导（142s，ok=111） |
 | 镜像 v1.19.5 | commit 路径（见 65.4-2），tag 已同步 111 个 flowx.json |
+
+## 66. P1-17 扫描类工作流容错（2026-10-19 交付并真机验收）
+
+**问题**（§61.5-2）：扫参流水线里 `face-similarity` 打分节点遇「未检测到人脸」⇒
+节点非零退出 ⇒ 整跑判 failed，但图已全部落盘——数据没丢，状态冤枉。
+
+### 66.1 方案 A（通用容错出口，用户拍板）
+
+- `executor_base.run_op(..., soft=False)`：soft 时 job 失败/取消/超时不抛异常，
+  输出 `soft_failed: "true"` + `error`（消毒）+ emit_keys 置空，返回 {}、退出码 0
+  ⇒ Studio 判节点成功，整跑保持 success，失败留在输出里可查。
+  error 消毒：换行/反引号/`#` 全替换（纪律 #10：含这些会炸 Studio codec-block 解析）。
+- `face-similarity` 1.1.0→**1.2.0**：加 `soft` 参数（默认 false，向后兼容）+
+  输出 `soft_failed`/`error` + widget 加 check 控件。
+- 生成器 `gen-instantid-sweep.py`：Score 节点 `soft: true` + nodeRef → 1.2.0。
+
+### 66.2 验收
+
+- 单测 `_tools/test-soft-fail.py` 9 项：软失败返回 {} / 输出合法 / error 消毒 /
+  打分键置空 / **负例：soft=False 照常抛出** / soft 成功走正常路径。
+- 真机（无脸 8×8 图喂 face.similarity，soft=true）：
+  - 节点**退出码 0**，输出 `soft_failed: "true"` + `error: "...未检测到人脸"` +
+    `similarity: ""` ✓
+  - **意外收获**：第一次跑撞上 insightface 冷加载（服务端事件循环被堵，
+    WS 握手超时）⇒ **WS→轮询回退在真机上自发触发并生效**（`ws 不可用
+    （timed out），回退轮询` ⇒ 任务正常等到终态）。P1-16 设计的兜底场景被真机验证。
+  - 第二次跑（模型已热）WS 直通，零轮询。
+
+### 66.3 部署
+
+51 个用 executor_base 的节点经 sync-common 分发；镜像 v1.19.5 二次 commit
+（executor_base.py × 51 目录 + face-similarity/main.py）；111 节点全量重导（139s ok=111）。
+镜像内容 grep 核验：soft=False ✓ / main.py soft ✓。
+注意：docker exec 经隧道的 ls 输出带 `\r`（Windows Docker Desktop），
+`for d in $(docker exec ... ls)` 必须 `tr -d '\r'` 或落文件后 read——否则循环零迭代静默跳过。
