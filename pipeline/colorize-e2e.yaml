@@ -2,7 +2,7 @@ Name: colorize-e2e
 Description: B4/S1 G8 DDColor 上色 e2e（docker 执行器跑推理 + 手机侧落盘）：验证执行器无关（与 local 版逐字节一致）
 Param:
   service_url: "http://172.17.0.1:8100"
-  service_url_local: "http://749a0d06.r7.cpolar.cn"
+  service_url_local: "https://44e44576.r10.vip.cpolar.cn"
   service_token: "30e494999da13134808ee280aea6dffd"
   gray_path: "~/flowx-input/gray_person.png"
   faded_path: "~/flowx-input/faded.png"
@@ -36,7 +36,7 @@ Nodes:
   Ensure:
     name: 服务健康检查
     config:
-      nodeRef: inference-ensure@1.1.0
+      nodeRef: inference-ensure@1.3.0
       executor: local
       params:
         service_url: "{{ Param.service_url_local }}"

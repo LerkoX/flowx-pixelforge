@@ -15,9 +15,9 @@ Description: >-
   **执行器纪律**：只有"读本机文件/写本机文件/探活/手绘蒙版"的节点（mask-paint /
   mask-grow / mask-feather / save-image / inference-ensure）走 local，其余图像节点走 docker。
 Param:
-  service_url: "https://749a0d06.r7.cpolar.cn"          # local 节点用（Studio/手机可达）
+  service_url: "https://44e44576.r10.vip.cpolar.cn"          # local 节点用（Studio/手机可达）
   service_url_internal: "http://172.17.0.1:8100"         # docker 节点用（容器视角的宿主机）
-  service_url_host: "https://749a0d06.r7.cpolar.cn"      # docker 节点的画布预览/取消兜底
+  service_url_host: "https://44e44576.r10.vip.cpolar.cn"      # docker 节点的画布预览/取消兜底
   service_token: "30e494999da13134808ee280aea6dffd"
   ckpt_name: "ponyDiffusionV6XL_v6StartWithThisOne"
   image_path: "~/flowx-input/model_832x1216.png"
@@ -52,7 +52,7 @@ Nodes:
   Ensure:
     name: 服务健康检查
     config:
-      nodeRef: inference-ensure@1.1.0
+      nodeRef: inference-ensure@1.3.0
       executor: local
       params:
         service_url: "{{ Param.service_url }}"

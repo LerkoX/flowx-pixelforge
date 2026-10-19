@@ -1,8 +1,8 @@
 Name: ecom-white-bg
 Description: B4/S2 G11 电商模板①：白底主图 —— 抠图(BiRefNet main+去白边) → 白底合成 → 1:1 扩画布 → 水印 → 落盘
 Param:
-  service_url: "http://749a0d06.r7.cpolar.cn"
-  service_url_host: "http://749a0d06.r7.cpolar.cn"
+  service_url: "https://44e44576.r10.vip.cpolar.cn"
+  service_url_host: "https://44e44576.r10.vip.cpolar.cn"
   service_token: "30e494999da13134808ee280aea6dffd"
   image_path: "~/flowx-input/b3_person.png"
 Graph: |
@@ -28,7 +28,7 @@ Nodes:
   Ensure:
     name: Ensure
     config:
-      nodeRef: inference-ensure@1.1.0
+      nodeRef: inference-ensure@1.3.0
       executor: local
       params:
         service_url: "{{ Param.service_url }}"

@@ -5966,3 +5966,47 @@ cpolar 网站隧道重建后域名变更（`1bba08c4.r7.cpolar.cn` → **`749a0d
 
 **经验**：「取消 ≠ 释放显存」是服务端缓存设计，不是 bug；堵在首节点的阈值检查
 要能区分「为新加载预留」与「复用已有」，否则每次取消后都要手动 unload 才能再跑。
+
+## 64. 隧道地址刷新 + P1 收口批次（2026-10-19）
+
+**触发**：cpolar 隧道重建（网站 `749a0d06.r7.cpolar.cn` → **`44e44576.r10.vip.cpolar.cn`**；
+dockerApi → **`tcp://6.tcp.cpolar.cn:11748`**）。顺带把 dev-plan 里一批"实际已完成/实际已部署"
+的条目收口，并落实用户拍板。
+
+### 64.1 地址刷新（三处齐步，§61.10 的教训）
+
+| 位置 | 数量 | 方式 | 验证 |
+| --- | --- | --- | --- |
+| 仓库 `pipeline/*.yaml` + `gen-instantid-sweep.py` | 23 文件 42 处 | sed 统一替换（http/https 两种 scheme 都命中） | 残留 grep = 0 |
+| Studio 工作流快照 | **55 条**（wf170 含更旧的 `4ca9107a.r5.cpolar.top`，一并替换） | 读 sqlite `yaml_config` → 暂存 → `workflow update` 逐条推（节流 sleep 1s） | 55/55 Updated，全库残留 = 0 |
+| Studio docker 执行器 ×3（id 5/7/8） | 三个死地址 → `tcp://6.tcp.cpolar.cn:11748` | `executor update` + `executor test` | 连接 OK（docker 27.3.1，latency 212/60ms） |
+
+改前备份：`~/.flowx-studio/backups/studio-20261019-093021.db`。
+wf181 只含 "cpolar" 描述文字、无 URL，不需要改。
+**token `30e494…` 未变，仍有效**；docker 节点内网地址 `172.17.0.1:8100` 约定不变。
+
+### 64.2 探针实测推翻的两条"待办"（文档过期，不是工作没做）
+
+- **P1-15 docker 镜像重建**：远端 daemon 已有 `lerkobba/flowx-pixelforge-nodes:v1.19.4`
+  ⇒ 已重建过，§61.6/§61.7 修复随镜像生效。遗留 = 补一次 docker e2e 真机确认（P1-18）。
+- **P1-10 `/model/policy` 待部署**：`GET /model/policy` 已返回策略 JSON
+  （`max_resident_models=3 / vram_reserve_mb=1024 / lease_ttl=1800s …`）⇒ 服务端早就部署了。
+  遗留 = `vram-ops` policy_get 活体验证（P1-19）。
+
+### 64.3 用户拍板（2026-10-19）
+
+| 事项 | 决议 |
+| --- | --- |
+| CatVTON 换装 | **不做**（NC 许可，无商用需求）；节点/流水线代码保留不删 |
+| 引擎 lazy evaluation | **不做**（多分支场景少，全图执行代价可接受） |
+| WebSocket `/ws` 进度推送 | **做**（登记 P1-16，动手前先出方案；第一天先验 cpolar 隧道 WS 兼容性） |
+
+### 64.4 新登记待办
+
+P1-16 WS 进度推送 / P1-17 扫描类工作流容错（§61.5-2 遗留：Score 节点 fail-fast 拖垮整跑）/
+P1-18 v1.19.4 镜像 docker e2e 确认 / P1-19 vram-ops policy_get 活体验证。
+
+### 64.5 口径校正
+
+快照数字更新为实测值：**节点包 111 / 在线算子 118（`GET /ops`）/ 流水线 51 / 镜像 1.19.4**；
+ROADMAP M10 删掉"G11 环境投影待做"（§56 已交付）。
