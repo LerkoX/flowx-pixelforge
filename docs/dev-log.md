@@ -6010,3 +6010,17 @@ P1-18 v1.19.4 镜像 docker e2e 确认 / P1-19 vram-ops policy_get 活体验证�
 
 快照数字更新为实测值：**节点包 111 / 在线算子 118（`GET /ops`）/ 流水线 51 / 镜像 1.19.4**；
 ROADMAP M10 删掉"G11 环境投影待做"（§56 已交付）。
+
+### 64.6 P1-18 / P1-19 活体验证（2026-10-19）
+
+- **P1-19 `vram-ops` policy_get**：local 直跑（`SERVICE_URL=新隧道`）→
+  `max_resident_models=3, vram_reserve_mb=1024, lease_ttl=1800s, wait=300s`；
+  `status` 动作读到 `gpu=GTX 1080 vram_free=7185MB resident=[]`。
+- **P1-18 v1.19.4 镜像**：本机 docker CLI 走 `DOCKER_HOST=tcp://<6.tcp解析IP>:11748`
+  （域名 `6.tcp.cpolar.cn` 解析为 198.18.0.9，Termux 可用；Daemon 27.3.1）。
+  容器内跑 `vram-ops`：走隧道地址 **SSL EOF 失败**（cpolar 不回环自身宿主机，
+  三段地址约定再次验证）⇒ 改内网 `http://172.17.0.1:8100` 后 **exit=0**，
+  读数与 local 一致。镜像内 grep：`非 JSON 响应`×3（隧道错误页修复）、
+  `flush`×10、`FLOWX_JOB_HEARTBEAT` 在 ⇒ §61.6/§61.7 修复确认随镜像生效。
+- **备注**：本隧道下 `docker run -a` 的 stdout 流不回传（空输出但退出码正确），
+  需 `create + start + wait + logs` 分离取值——与 §48 记录的"新隧道长连接流被重置"同类。

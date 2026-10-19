@@ -162,9 +162,10 @@
 17. **扫描类工作流容错**（dev-log §61.5-2 遗留）—— InstantID 扫参里 2 个 `Score*` 节点
     fail-fast 把整跑判 failed（4 张图已全部产出）。打分节点应"可选/不致命"（生成器改
     不阻塞落盘，或节点加 `optional` 语义；需先出方案）。
-18. **v1.19.4 镜像真机 e2e 确认** —— docker 执行器跑一条短链，确认 §61.6/§61.7 修复在
-    容器内生效（隧道错误页→瞬态重试、timeout≥job_timeout）。
-19. **`vram-ops` policy_get 活体验证** —— 端点已在线，补一次真机调用确认读数正确（只读，安全）。
+18. ~~**v1.19.4 镜像真机 e2e 确认**~~ ✅（2026-10-19，dev-log §64.6）：容器内经内网地址
+    `172.17.0.1:8100` 跑 `vram-ops` status 成功；镜像内 grep 核验三个 client 修复齐全。
+19. ~~**`vram-ops` policy_get 活体验证**~~ ✅（2026-10-19，dev-log §64.6）：policy_get 读数与
+    `/health` 一致（max_resident=3 / reserve=1024MB / lease_ttl=1800s）。
 
 ### P2 / 大改：独立立项评估
 
