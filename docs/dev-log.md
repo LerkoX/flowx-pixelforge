@@ -5919,3 +5919,50 @@ cpolar 网站隧道重建后域名变更（`1bba08c4.r7.cpolar.cn` → **`749a0d
 - 只改 `app/static/monitor.html` ⇒ 重建镜像才生效；想免重启验证可以
   `docker cp app/static/monitor.html flowx-inference-server:/app/app/static/monitor.html`（静态文件每次请求现读）；
 - 改 `app/*.py`（jobs/engine/execution/main）⇒ 必须重建并重启容器（模块导入期装配）。
+
+## 63. `inference-ensure@1.3.0`：复用感知闸门（`expect_resident`）
+
+**触发**：8GB 卡上跑 wf186（sd-i2i-crop-repaint）。exec 810 在 `KSampler` 被取消后，
+服务端常驻模型（`ponyDiffusionV6XL` 6616MB est + `controlnet-canny-sdxl-1.0` 2386MB）
+按设计**不随取消卸载**（模型缓存属服务进程，不在 job 生命周期；wf186 的 `Unload`
+节点在末端，取消时跑不到）。紧接着 exec 811 在首节点就被拦：
+
+```
+[ensure] 显存闸门未通过：可用显存 2042MB < min_vram_mb=2500MB
+（常驻: ['cn:controlnet-canny-sdxl-1.0|dtype=fp16',
+        'ponyDiffusionV6XL_v6StartWithThisOne|dtype=fp16|offload=model|t5=0']）
+```
+
+而这两条**正是 wf186 要用的模型**，`sd.checkpoint.load` / `sd.controlnet.load`
+是幂等的（`model_manager.load()` 键命中直接 `return key, False`，连磁盘都不碰），
+根本不需要为加载预留显存 ⇒ 闸门误伤「复用」。
+
+### 63.1 改法（只动节点包，不动服务端）
+
+- `flowx.json` 新增参数 `expect_resident`（string，逗号分隔，可写裸模型名/文件名/
+  完整缓存键），env `EXPECT_RESIDENT`；输出新增 `expect_resident` /
+  `expect_resident_hit`（如 `2/2`）/ `min_vram_checked`（false = 按复用跳过）。
+- `main.py`：每轮 `/health` 后按 `resident_models` 逐个匹配；**全部命中** ⇒ 跳过
+  `min_vram_mb` 检查，`require_headroom_mb` 与 `vram_oversubscribed` 硬失败**照旧**
+  （复用不等于可以超订，采样 working set 仍需余量）。部分未命中 ⇒ 严格校验并在
+  报错里列出未命中项 + 旋钮提示。留空 = 完全 1.2.0 行为（向后兼容）。
+- 匹配语义（踩过的坑）：写**完整键**（含 `|dtype=..`）按精确比较——旋钮不同不算复用；
+  写**裸名字**才忽略旋钮/扩展名/`cn:`·`vae:` 前缀/大小写。因为同名模型不同
+  `dtype/offload/use_t5` 在服务端是**独立缓存条目**，宽松匹配会放过"以为复用其实会新建"。
+- widget-def 补齐 min_vram/headroom/expect_resident 三个字段并重建 bundle；
+  `--all --check` 109 个产物全部最新。
+
+### 63.2 验证
+
+- 单测式匹配用例 10 条全过（裸名/带扩展名/完整键命中；fp8、offload=none 不命中）。
+- 真机直跑（当前常驻正是这两个模型）：`期望模型已全部常驻 2/2 → 跳过 min_vram_mb=2500`
+  → `service ready`，`min_vram_checked=false`，物理余量 1660MB ≥ 1500 仍过闸。
+- 未命中路径：`expect_resident` 含 `controlnet-openpose` → 照旧失败并打印
+  `expect_resident 未命中: ['controlnet-openpose']` + 旋钮提示。
+- 门禁：`check-node-params.py` ✓；`test-main-smoke.py` SKIP（直连服务，无桩）。
+- `node import` → id 278 / 1.3.0；wf186 已改 `inference-ensure@1.3.0` +
+  `expect_resident: ponyDiffusionV6XL_v6StartWithThisOne,controlnet-canny-sdxl-1.0`
+  （`min_vram_mb: 2500` 保留，换模型时仍会生效）。
+
+**经验**：「取消 ≠ 释放显存」是服务端缓存设计，不是 bug；堵在首节点的阈值检查
+要能区分「为新加载预留」与「复用已有」，否则每次取消后都要手动 unload 才能再跑。
