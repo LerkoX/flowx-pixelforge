@@ -1,8 +1,8 @@
 Name: seg-text-e2e-local
 Description: B3/G2 文本提示分割 e2e（全 local）：加载图 → 装载 GroundingDINO → 文本检测（框/标签/置信度）→ 框喂 SAM 出像素级蒙版 → 落盘标注/蒙版/框并集
 Param:
-  service_url: "https://44e44576.r10.vip.cpolar.cn"
-  service_url_host: "https://44e44576.r10.vip.cpolar.cn"
+  service_url: "https://55999db0.r10.vip.cpolar.cn"
+  service_url_host: "https://55999db0.r10.vip.cpolar.cn"
   service_token: "30e494999da13134808ee280aea6dffd"
   image_path: "~/flowx-input/b3_person.png"
 Graph: |

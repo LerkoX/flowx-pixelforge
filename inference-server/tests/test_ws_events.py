@@ -136,8 +136,11 @@ def test_static_constraints():
     check("main.py 注册 /ws", '@app.websocket("/ws")' in src)
     check("/ws 鉴权失败关 4401", "4401" in src)
     check("/ws finally 退订（防队列泄漏）",
-          re.search(r"finally:\s*\n\s*events\.unsubscribe", src) is not None)
-    check("/ws 30s 应用层 ping", 'send_json({"type": "ping"})' in src)
+          re.search(r"finally:[\s\S]{0,160}?events\.unsubscribe", src) is not None)
+    check("/ws 30s 应用层 ping（泵线程超时生成）", '{"type": "ping"}' in src)
+    check("/ws 单消费者泵（防 wait_for 取消泄漏吞事件，exec 824 事故）",
+          "call_soon_threadsafe" in src
+          and "wait_for(asyncio.to_thread" not in src)
     check("/ws 带 job_id 时先发 snapshot", '"type": "snapshot"' in src)
     check("job_id 过滤（无关事件不推）",
           'ev.get("job_id") not in (None, job_id)' in src)

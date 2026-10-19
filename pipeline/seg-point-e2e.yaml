@@ -3,7 +3,7 @@ Description: B3/G2 SAM 点·框选分割 e2e（docker 执行器跑推理 + 手�
 Param:
   service_url: "http://172.17.0.1:8100"
   # save-image / load-image 等 local 执行器节点在手机侧跑，必须用手机可达地址
-  service_url_local: "https://44e44576.r10.vip.cpolar.cn"   # 手机侧可达（蜂窝网走 http 隧道，保留鉴权头）
+  service_url_local: "https://55999db0.r10.vip.cpolar.cn"   # 手机侧可达（蜂窝网走 http 隧道，保留鉴权头）
   service_token: "30e494999da13134808ee280aea6dffd"
   image_path: "~/flowx-input/b3_person.png"
 Graph: |

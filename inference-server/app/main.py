@@ -19,8 +19,10 @@ import gc as _gc  # 别名：与下方 /gc 端点函数名冲突
 import asyncio
 import io
 import os
+import queue
 import re
 import sys
+import threading
 import time
 
 import torch
@@ -758,6 +760,25 @@ async def ws_jobs(websocket: WebSocket, token: str = "", job_id: str = ""):
         return
     await websocket.accept()
     q = events.subscribe()
+    # 单消费者泵线程（2026-10-19 事故修复）：原实现 asyncio.wait_for(to_thread(q.get),
+    # 30s)——wait_for 超时取消不了线程，被遗弃的线程仍阻塞在 q.get 上，会**抢走**
+    # 随后到达的事件（done 在 ping 边界 0.1s 级窗口被吞，客户端收到 ping 却永远
+    # 等不到 done，真机事故 exec 824）。改为：连接生命周期内只有一个线程读队列，
+    # 经 call_soon_threadsafe 转交 asyncio 队列；不存在并发读者，事件不可能被吞。
+    loop = asyncio.get_running_loop()
+    aq = asyncio.Queue()
+    stop = threading.Event()
+
+    def _pump():
+        while not stop.is_set():
+            try:
+                ev = q.get(timeout=30.0)
+            except queue.Empty:
+                ev = {"type": "ping"}
+            loop.call_soon_threadsafe(aq.put_nowait, ev)
+
+    pump = threading.Thread(target=_pump, daemon=True)
+    pump.start()
     try:
         if job_id:
             try:
@@ -767,12 +788,7 @@ async def ws_jobs(websocket: WebSocket, token: str = "", job_id: str = ""):
                 await websocket.send_json({"type": "error",
                                            "error": f"job '{job_id}' not found"})
         while True:
-            try:
-                ev = await asyncio.wait_for(asyncio.to_thread(q.get),
-                                            timeout=30.0)
-            except asyncio.TimeoutError:
-                await websocket.send_json({"type": "ping"})
-                continue
+            ev = await aq.get()
             if job_id and ev.get("job_id") not in (None, job_id):
                 continue
             await websocket.send_json(ev)
@@ -781,6 +797,7 @@ async def ws_jobs(websocket: WebSocket, token: str = "", job_id: str = ""):
     except RuntimeError:
         pass  # 连接已被对端关闭（send 抛 RuntimeError）
     finally:
+        stop.set()
         events.unsubscribe(q)
 
 

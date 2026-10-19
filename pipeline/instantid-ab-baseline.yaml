@@ -2,7 +2,7 @@ Name: instantid-ab-baseline
 Description: B5/51.2 InstantID 量化基线（512²/12步快档）（A/B 受控对照）：同一 SDXL 底模、同一参考脸、同一 seed、同一提示词，
   只把身份强度 weight/cn_strength 从 0.8 换成 0.0（官方文档：0=关闭身份/姿态条件）⇒ 用 face.similarity 量身份相似度差
 Param:
-  service_url: "https://44e44576.r10.vip.cpolar.cn"
+  service_url: "https://55999db0.r10.vip.cpolar.cn"
   service_token: "30e494999da13134808ee280aea6dffd"
   ref_path: "~/flowx-output/test_person.jpg"
   seed: 20260926

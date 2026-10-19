@@ -5969,7 +5969,7 @@ cpolar 网站隧道重建后域名变更（`1bba08c4.r7.cpolar.cn` → **`749a0d
 
 ## 64. 隧道地址刷新 + P1 收口批次（2026-10-19）
 
-**触发**：cpolar 隧道重建（网站 `749a0d06.r7.cpolar.cn` → **`44e44576.r10.vip.cpolar.cn`**；
+**触发**：cpolar 隧道重建（网站 `749a0d06.r7.cpolar.cn` → **`55999db0.r10.vip.cpolar.cn`**；
 dockerApi → **`tcp://6.tcp.cpolar.cn:11748`**）。顺带把 dev-plan 里一批"实际已完成/实际已部署"
 的条目收口，并落实用户拍板。
 

@@ -1,8 +1,8 @@
 Name: tripo-sr-e2e
 Description: 3D 重建 e2e（dev-plan P2-11）：load-image → TripoSR 单图重建（IMAGE→MESH）→ save-mesh 落盘 GLB。算子与 /ext/meshes 下载端点由 tripo-sr 节点包经插件契约 v2 自注册。
 Param:
-  service_url: "https://44e44576.r10.vip.cpolar.cn"
-  service_url_host: "https://44e44576.r10.vip.cpolar.cn"
+  service_url: "https://55999db0.r10.vip.cpolar.cn"
+  service_url_host: "https://55999db0.r10.vip.cpolar.cn"
   service_token: "30e494999da13134808ee280aea6dffd"
   input_image: "~/flowx-input/chair.png"
 Graph: |
