@@ -34,6 +34,16 @@ RUN pip uninstall -y opencv-python || true
 RUN pip install --no-cache-dir --force-reinstall --no-deps opencv-python-headless==4.11.0.86
 RUN python -c "import importlib.metadata as im; import cv2, spandrel, controlnet_aux, insightface, onnxruntime, gguf, sentencepiece, huggingface_hub, timm, kornia, einops; print('deps smoke ok, cv2', cv2.__version__, 'ort', onnxruntime.__version__, 'gguf', im.version('gguf'), 'hf', huggingface_hub.__version__, 'timm', im.version('timm'), 'kornia', im.version('kornia'))"
 
+# ---- TripoSR（单图 3D 重建，MIT；算子在节点包 tripo-sr/server_op.py 自注册）----
+# 源码 vendor 进 /opt/triposr（tsr/ 目录，带两个本地补丁：torchmcubes→skimage
+# fallback、rembg 懒加载——补丁版源码由构建上下文 vendor/triposr/tsr 提供，
+# 上游：https://github.com/VAST-AI-Research/TripoSR）。权重不进镜像：
+# 首次构建后手工下载到宿主 /models/triposr（ModelScope 镜像源，1.68GB，
+# bind-mount 持久化；HF 官方 MIT 许可，api/models ... ?blobs=true 可查）。
+RUN pip install --no-cache-dir scikit-image einops omegaconf trimesh rembg
+COPY vendor/triposr/tsr/ /opt/triposr/tsr/
+RUN python -c "import skimage, einops, omegaconf, trimesh; print('triposr deps ok')"
+
 COPY app/ ./app/
 
 # Pascal 卡显存多为 8~11 GB（Tesla P40 为 24 GB），

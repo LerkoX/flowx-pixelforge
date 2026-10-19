@@ -6156,3 +6156,47 @@ def register_routes(add_route):
   ① 上传 → `routes: ["/ext/demo-hello"]`；② 无 token 访问 → **401**（auth 强制生效）；
   ③ 带 token → 200；④ DELETE → `routes_removed` 且路由立即 404；
   ⑤ 重传 + **重启容器** → 路由仍在（plugins.d 持久化 + 启动扫描重注册）。
+
+## 68. P2-11 3D 重建交付：TripoSR 节点 + MESH 对象类型（2026-10-19）
+
+**契约 v2 的首个真实用户**。单图 → 3D 网格（GLB/OBJ 带顶点色）。
+
+### 68.1 构成
+
+- **服务端核心**：仅 `registry.py` OBJ_TYPES += `MESH`（字节直存内存仓库，无特殊落盘）——
+  ROADMAP 允许的"新对象类型"核心变更，其余零改动。
+- **节点包 `tripo-sr`**：`server_op.py` 注册算子 `mesh.triposr`（懒加载 fp16，vram=keep/
+  after_op）+ `register_routes` 自带 `/ext/meshes/{oid}` 下载端点（GLB 魔数嗅探定
+  Content-Type/后缀，store 请求期才 import 避开装配期循环导入）；
+  `save-mesh`（local-only，对标 save-video，已入 LOCAL_ONLY 三处名单）。
+- **画布预览**：`ui/node-widget.js` = vendored three.js r128 UMD + GLTFLoader +
+  OrbitControls + 自研挂载逻辑（716KB 单文件，离线可用），经 Studio service-proxy
+  拉 GLB 字节流渲染（媒体不进 outputs，遵守媒体传递纪律），支持拖动旋转/滚轮缩放/
+  自动旋转/下载按钮。
+
+### 68.2 落地坑（全部固化进 Dockerfile.pascal / 补丁）
+
+1. **容器无 git** ⇒ TripoSR 源码 vendor 进 `inference-server/vendor/triposr/tsr`（MIT，
+   附 LICENSE+NOTICE），Dockerfile COPY 进 `/opt/triposr`。
+2. **三个源码补丁**（vendor 副本）：isosurface.py torchmcubes→skimage fallback（nvcc
+   编译不可用）；utils.py rembg 懒加载；nerf_renderer.py grid_sample fp16 dtype 对齐
+   （fp32 在 256 分辨率 OOM，fp16 实测峰值 ~10GB 稳定）。
+3. **HF CDN 大文件从该宿主基本拉不动**（1.1GB 卡死在 132K）⇒ 权重走 ModelScope
+   `AI-ModelScope/TripoSR` 断点续传（Content-Range 校验总大小=HF 官方 1677246742，
+   防截断假完成——第一次 urlretrieve 就下了个 68% 的残件，torch.load 才炸）。
+   权重落 `/models/triposr`（bind-mount）；DINOv2 编码器走 HF，HF_HOME/U2NET_HOME
+   由插件 setdefault 到 /models 持久化。
+4. **POST /images 会 convert("RGB") 丢 alpha** ⇒ 装 rembg（onnxruntime 镜像已有）
+   恢复服务端去背能力；u2net 权重 /models/u2net 持久化。
+5. **插件 op 内 import 顺序**：`tsr` 不在默认 sys.path，必须先 `_load_model()`
+   （内含 sys.path.insert）再 `from tsr.utils import ...`——1ms 假失败教训。
+
+### 68.3 验收
+
+- 单测：MESH 存取冒烟、插件契约加载（ops+routes）、check-bundle 门绿（113 包）。
+- 容器内全链路 E2E：POST /images → mesh.triposr job → MESH 对象 →
+  GET /ext/meshes/{oid} → GLB 魔数校验（41,085 顶点 / 82,420 面 / 1.6MB）。
+- 节点镜像 v1.19.6（docker commit：+tripo-sr +save-mesh）；推理镜像 pascal-partA6
+  固化；113 包全量重导 ok=113 fail=0；workflow 187（tripo-sr-e2e）已建。
+- 展示页 8899 挂 GLB 下载。⚠️ 画布侧实跑当时 cpolar HTTPS 隧道掉线（容器健康，
+  docker 隧道正常），待宿主重启隧道后补画布验收。
