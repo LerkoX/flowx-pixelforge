@@ -6118,3 +6118,41 @@ cpolar 隧道 WS 兼容性（开工第一问）：**实测兼容**（握手 + �
 镜像内容 grep 核验：soft=False ✓ / main.py soft ✓。
 注意：docker exec 经隧道的 ls 输出带 `\r`（Windows Docker Desktop），
 `for d in $(docker exec ... ls)` 必须 `tr -d '\r'` 或落文件后 read——否则循环零迭代静默跳过。
+
+## 67. 插件契约 v2：`register_routes` 路由自注册（2026-10-19 交付并真机验收）
+
+**动机**：讨论 3D 网格下载端点时的共识——每加一种文件型对象就在服务端抄一个
+per-type 下载端点不是长久之计；插件体系从「只能注册算子」扩展为「算子 + HTTP 端点」，
+新格式的端点由节点包自带，服务端核心不动。
+
+### 67.1 契约
+
+插件可选实现第二个钩子：
+
+```python
+def register_routes(add_route):
+    add_route("/ext/meshes/{oid}", handler, methods=("GET",))
+```
+
+`RouteRegistrar`（plugins.py，depends 注入保持无 fastapi 可单测）强制三条：
+1. 路径必须 `/ext/` 前缀（与核心端点命名空间隔离，抢不了 /health）；
+2. **自动挂 auth**（插件想漏挂鉴权都做不到）；
+3. 单插件半路失败 ⇒ 其路由整体 rollback（与算子的快照回滚对齐）。
+
+### 67.2 生命周期（与算子对齐）
+
+- 持久化：随插件文件在 plugins.d，重启扫描重新注册（scan_plugins 加
+  `route_registrar_factory`，每插件一个注册器——回滚不株连）；
+- 路由归属簿 `plugin_routes`：重传同文件「全摘旧、登全部新」（路由无 reconcile，
+  靠这个保证不残留）；DELETE 插件同时摘除其路由（响应带 routes_removed）；
+- 上传 409 冲突路径路由一并回滚；声明了 register_routes 但上下文无注册器
+  ⇒ 明确报错（不静默跳过，防节点侧假设落空）。
+
+### 67.3 验收
+
+- 单测 `test_plugin_routes.py` 13 项（含**负例**：摘掉前缀校验 ⇒ 裸路径被接受）；
+  既有 test_plugin_registry（18 项）/ test_plugin_hardening 回归全绿。
+- 真机四连（演示插件 ext_demo.py，验完即删）：
+  ① 上传 → `routes: ["/ext/demo-hello"]`；② 无 token 访问 → **401**（auth 强制生效）；
+  ③ 带 token → 200；④ DELETE → `routes_removed` 且路由立即 404；
+  ⑤ 重传 + **重启容器** → 路由仍在（plugins.d 持久化 + 启动扫描重注册）。

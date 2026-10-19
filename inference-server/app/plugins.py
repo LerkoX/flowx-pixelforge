@@ -5,6 +5,13 @@
 插件内部用 @registry.register(...) 声明一个或多个算子。插件可
 `from app import ops` 复用核心原语（sample / vae_encode / resolve_pipe 等）。
 
+**契约 v2（2026-10-19）**：插件可选实现 `register_routes(add_route)` 注册
+HTTP 端点（首个预期用户：3D 网格等新文件型对象的下载端点，不再 per-type
+抄服务端）。约束在 RouteRegistrar 强制：路径必须 /ext/ 前缀、自动挂 auth
+（插件想漏挂鉴权都做不到）、单插件失败时其路由整体回滚。路由与算子同生命周期：
+随插件文件持久化、重启扫描时重新注册；DELETE 插件文件只删盘上的文件，
+已注册的路由/算子重启后才消失（与算子语义一致）。
+
 安全约束（在 main.py 端点层强制）：INFERENCE_TOKEN 为空时 /admin/* 一律 404；
 上传需 sha256 校验 + ast.parse 语法检查 + 原子落盘 + 加载失败回滚。
 """
@@ -66,7 +73,45 @@ def drop_bytecode_cache(path: str) -> int:
     return n
 
 
-def load_plugin(path: str, registry):
+class RouteRegistrar:
+    """插件路由注册器（契约 v2）：`register_routes(add_route)` 收到的实参。
+
+    三条硬约束集中在这里（插件想绕过都做不到）：
+    1. 路径必须 `/ext/` 前缀（与核心端点命名空间隔离，插件抢不了 /health）；
+    2. 自动挂 auth 依赖（漏挂鉴权的插件路由 = 裸奔端点，直接不给机会）；
+    3. 记录本次新增，插件加载失败时 rollback() 整体摘除（算子有快照回滚，
+       路由不能比算子差）。
+    depends 由调用方注入（生产=fastapi.Depends；测试=记录桩）——本模块不 import
+    fastapi，保持无 torch/fastapi 环境可单测的项目惯例。
+    """
+
+    PREFIX = "/ext/"
+
+    def __init__(self, app, auth_dep, depends):
+        self._app = app
+        self._auth = auth_dep
+        self._depends = depends
+        self.added = []
+
+    def __call__(self, path, endpoint, methods=("GET",), **kw):
+        if not isinstance(path, str) or not path.startswith(self.PREFIX):
+            raise ValueError(
+                f"插件路由必须以 {self.PREFIX} 开头: {path!r}")
+        self._app.add_api_route(path, endpoint, methods=list(methods),
+                                dependencies=[self._depends(self._auth)], **kw)
+        self.added.append(self._app.router.routes[-1])
+        return endpoint
+
+    def rollback(self):
+        for r in self.added:
+            try:
+                self._app.router.routes.remove(r)
+            except (ValueError, AttributeError):
+                pass
+        self.added.clear()
+
+
+def load_plugin(path: str, registry, route_registrar=None):
     """加载单个插件文件，返回该插件声明注册的**全部**算子名（含覆盖既有名）。
 
     registry.register 是覆盖语义（后注册生效），因此"该文件声明了哪些算子"
@@ -95,6 +140,19 @@ def load_plugin(path: str, registry):
             raise ValueError(
                 f"plugin {os.path.basename(path)}: 缺少 register(registry) 函数")
         reg(registry)
+        # 契约 v2：可选的路由注册钩子。声明了就必须有注册器可用——静默跳过会让
+        # 节点侧“端点已注册”的假设落空，宁可加载失败喊出来。
+        rr = getattr(mod, "register_routes", None)
+        if callable(rr):
+            if route_registrar is None:
+                raise ValueError(
+                    f"plugin {os.path.basename(path)}: 声明了 register_routes "
+                    f"但加载上下文未提供路由注册器")
+            try:
+                rr(route_registrar)
+            except Exception:
+                route_registrar.rollback()  # 半路失败：本插件已加的路由整体摘除
+                raise
     finally:
         del registry.register  # 摘除实例属性，恢复类方法
     return sorted(set(recorded))
@@ -163,12 +221,14 @@ def reconcile(claiming_file: str, claimed, registry, plugin_ops: dict,
     return {"stale_removed": stale, "claimed": sorted(claimed_set)}
 
 
-def scan_plugins(plugins_dir: str, registry, reserved=()):
+def scan_plugins(plugins_dir: str, registry, reserved=(),
+                 route_registrar_factory=None):
     """启动时扫描插件目录，逐个加载。单个失败只记日志，不拖垮服务。
     返回 {文件名: [算子名]}（算子名为该文件声明的全部名，含覆盖名）。
 
     reserved: 核心算子名集合——插件遮蔽核心算子是 ERROR（register 覆盖语义
     下仍会生效，但必须喊出来）。跨文件重名同样 ERROR（后加载者生效）。
+    route_registrar_factory: 每个插件一个全新 RouteRegistrar（回滚只影响自己）。
     """
     loaded = {}
     owners = {}  # op -> 首个声明文件（仅用于日志）
@@ -179,7 +239,11 @@ def scan_plugins(plugins_dir: str, registry, reserved=()):
             continue
         path = os.path.join(plugins_dir, fn)
         try:
-            op_names = load_plugin(path, registry)
+            rr = route_registrar_factory() if route_registrar_factory else None
+            op_names = load_plugin(path, registry, route_registrar=rr)
+            if rr is not None and rr.added:
+                paths = [getattr(r, "path", "?") for r in rr.added]
+                print(f"[plugins] {fn} routes -> {paths}", flush=True)
             for n in op_names:
                 if n in reserved:
                     print(f"[plugins] ERROR: {fn} 遮蔽核心算子 '{n}'（覆盖语义下"

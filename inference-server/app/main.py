@@ -58,6 +58,9 @@ PLUGINS_DIR = os.environ.get("PLUGINS_DIR", "/models/plugins.d")
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 # 插件算子名 -> {"file": 文件名, "sha256": 内容哈希}；/ops 透出供客户端版本比对
 plugin_ops = {}
+# 路由归属簿（契约 v2）：文件名 → 该插件已注册的路由对象列表。
+# 与 plugin_ops 同理：重传删减路由时摘旧、DELETE 插件时摘除。
+plugin_routes = {}
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_MB", "32")) * 1024 * 1024
 # 视频上传另有体积上限（原片动辄数百 MB，不宜与图片共用 32MB 闸门）
 MAX_VIDEO_UPLOAD_BYTES = int(os.environ.get("MAX_VIDEO_UPLOAD_MB", "512")) * 1024 * 1024
@@ -97,6 +100,12 @@ def auth(authorization: str = Header(default="")):
         raise HTTPException(status_code=401, detail="invalid token")
 
 
+def _route_registrar():
+    """插件契约 v2：register_routes(add_route) 的实参工厂（每个插件一个，
+    回滚只影响自己）。/ext/ 前缀与 auth 挂接在 RouteRegistrar 里强制。"""
+    return plugins.RouteRegistrar(app, auth, Depends)
+
+
 def admin_auth(authorization: str = Header(default="")):
     """管理接口闸门：TOKEN 未配置时整个 /admin/* 不可用（404 而非 401，
     避免暴露能力存在性）；配置后与 auth 同规则。代码上传=远程执行能力，
@@ -123,8 +132,9 @@ def _bind_lease(x_flowx_lease: str):
 # 启动扫描：plugins.d 下既有插件全量注册（核心不再内置算子，reserved 恒为空集，
 # 保留参数位防未来重新引入核心算子时失去防遮蔽告警）
 _core_ops = set(registry._ops)
-for _fn, _op_names in plugins.scan_plugins(PLUGINS_DIR, registry,
-                                           reserved=_core_ops).items():
+for _fn, _op_names in plugins.scan_plugins(
+        PLUGINS_DIR, registry, reserved=_core_ops,
+        route_registrar_factory=_route_registrar).items():
     _p = os.path.join(PLUGINS_DIR, _fn)
     with open(_p, "rb") as _f:
         _h = plugins.sha256_of(_f.read())
@@ -162,8 +172,9 @@ def upload_plugin(p: PluginUpload):
         f.write(content)
     os.replace(tmp, path)
     before = dict(registry._ops)  # 注册表快照（Op 对象不可变，浅拷贝足够）
+    rr = _route_registrar()
     try:
-        claimed = plugins.load_plugin(path, registry)
+        claimed = plugins.load_plugin(path, registry, route_registrar=rr)
     except Exception as e:
         # 回滚：恢复旧文件或删除；注册表全量恢复快照
         registry._ops.clear()
@@ -188,9 +199,10 @@ def upload_plugin(p: PluginUpload):
     before_view = {k: v for k, v in before.items() if k not in stale_set}
     conflicts = plugins.detect_conflicts(claimed, p.filename, owner_view, before_view)
     if conflicts and not p.force:
-        # 冲突拒绝：注册表 + 文件 + 模块缓存全量回滚，409 报明归属
+        # 冲突拒绝：注册表 + 路由 + 文件 + 模块缓存全量回滚，409 报明归属
         registry._ops.clear()
         registry._ops.update(before)
+        rr.rollback()
         sys.modules.pop(plugins.plugin_module_name(p.filename), None)
         if backup is not None:
             with open(path, "wb") as f:
@@ -213,6 +225,14 @@ def upload_plugin(p: PluginUpload):
     rep = plugins.reconcile(p.filename, claimed, registry, plugin_ops, sha256=h)
     if rep["stale_removed"]:
         print(f"[plugins] {p.filename} 摘除陈旧算子 {rep['stale_removed']}", flush=True)
+    # 路由归属簿对账：重传同文件时先摘旧路由再登记本次新增（路由无 reconcile，
+    # 全靠这里的“全摘旧、登全部新”保证不残留）
+    for _r in plugin_routes.pop(p.filename, []):
+        try:
+            app.router.routes.remove(_r)
+        except ValueError:
+            pass
+    plugin_routes[p.filename] = list(rr.added)
     # 幽灵条目：文件已不在盘上；本次没接着声明的名字，注册表里也要摘掉（避免无主算子）
     adopted = []
     for n in stale:
@@ -222,7 +242,11 @@ def upload_plugin(p: PluginUpload):
             registry._ops.pop(n, None)
             plugin_ops.pop(n, None)
     print(f"[plugins] uploaded {p.filename} -> {claimed}", flush=True)
+    routes_added = [getattr(r, "path", "?") for r in rr.added]
+    if routes_added:
+        print(f"[plugins] {p.filename} routes -> {routes_added}", flush=True)
     return {"plugin": p.filename, "ops": claimed, "sha256": h,
+            "routes": routes_added,
             "took_over": took_over, "stale_removed": rep["stale_removed"],
             "adopted_stale": sorted(adopted)}
 
@@ -252,8 +276,18 @@ def delete_plugin(filename: str):
     for n in removed:
         registry._ops.pop(n, None)
         plugin_ops.pop(n, None)
+    old = plugin_routes.pop(filename, [])
+    removed_routes = [getattr(r, "path", "?") for r in old]
+    for r in old:
+        try:
+            app.router.routes.remove(r)
+        except ValueError:
+            pass
     os.unlink(path)
-    return {"deleted": filename, "unregistered": removed}
+    out = {"deleted": filename, "unregistered": removed}
+    if removed_routes:
+        out["routes_removed"] = removed_routes
+    return out
 
 
 # ---------- schemas ----------
