@@ -6225,3 +6225,41 @@ job 38s）→ Save（GLB 落盘 ~/flowx-output/triposr-chair_20261020_060230.glb
 1,647,392B 与容器内实测**字节级一致**）；widget 取数路径实测：
 Studio service-proxy → /ext/meshes/{oid} → 200 + glTF 魔数。
 推理隧道 44e44576→55999db0 全量刷新（repo 25 文件 + Studio 56 快照）。
+
+## 70. FLUX 采样器预览永远退化成进度卡片（wf 188 / exec 826，2026-10-20）
+
+**现象**：wf 188（flux-txt2img-white-drink）执行中画布采样器只有一张不动的深色
+`sampling 1/4` 卡片，"FLUX 采样器支持预览吗"被反复质疑。
+
+**定位**（Studio 媒体缓存 + 推理服务对照）：`executions/826/Sampler/frame.jpg` 与
+服务端 `/preview/{job}` 都是 **256×144** = `progress_card()` 的固定尺寸；
+latent 投影帧本该是 256×256（768px → 96×96 放大）。即每一步都走了 `except`
+降级分支，且 `except Exception` **没有 print**，整场采样静默降级无人察觉。
+
+**根因**：`_flux_latent_preview_pil` 把像素尺寸预除了 `vae_scale_factor*2` 再喂给
+`FluxPipeline._unpack_latents`，而该函数内部**自己会再除一次**：
+旧调用 `unpack(96,96)` → `view(1,6,6,16,2,2)` 需 2304 = 4×4×16×4 个元素，
+实际 packed latent 是 2304×64 = 147456 ⇒ `RuntimeError: shape '[1, 6, 6, 16, 2, 2]'
+is invalid for input of size 147456`。（768/512/1024/768×1280 全部同样命中）
+
+**修复**：传像素尺寸 `_unpack_latents(latents, int(height), int(width), vsf)`；
+`except` 补 `print`（降级必须留痕）。族版本 `f2447596b467 → 09e2c3f5c479`。
+
+**验证**（推理容器内真 torch 2.3.1 / diffusers 0.35.2，CPU、不占卡）：
+
+| 分辨率 | packed | 新帧 | 旧实现 |
+|---|---|---|---|
+| 512×512 | (1,1024,64) | (256,256) | RuntimeError size 65536 |
+| 768×768 | (1,2304,64) | (256,256) | RuntimeError size 147456 |
+| 1024×1024 | (1,4096,64) | (256,256) | RuntimeError size 262144 |
+| 768×1280 | (1,3840,64) | (256,154) | RuntimeError size 245760 |
+
+**部署**：镜像 v1.19.7 走 commit 路径（v1.19.6 临时容器 `docker cp` 9 个
+`server_op.py` → `docker commit`；隧道仍扛不住 31MB build context）。
+`BUNDLE_VERSION` 1.19.6→1.19.7 + `sync-flowx-json.py`（116 个 flowx.json）+
+`reimport-nodes.py` 全量重导（114/114，145s），`--check` 无漂移。
+镜像内 `flux-sampler/server_op.py` 经 `docker cp` 回读确认。
+
+**顺带记录（未处理）**：exec 826 的节点 stdout 流在 01:21 断（metadata
+`Sampler.__stream_truncated=true`），服务端 job 01:58 已完成，Studio 端执行
+永远 running —— 与预览无关，另案。
