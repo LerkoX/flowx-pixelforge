@@ -93,6 +93,15 @@ def test_job_event_sequence():
     check("progress 带 percent", prog and prog[-1].get("percent") == 100.0)
 
 
+def test_find_returns_job_with_lease():
+    jm = make_manager(lambda kind, payload: {})
+    jid = jm.submit("op", {"name": "op.x", "inputs": {}}, lease="exec-1")
+    job = jm.find(jid)
+    check("find 返回 Job 对象且带 lease", job is not None and job.lease == "exec-1")
+    check("find 未知 id 返回 None", jm.find("nope") is None)
+    check("get 返回视图（不含对象本体）", isinstance(jm.get(jid), dict))
+
+
 def test_failed_and_cancelled_events():
     def boom(kind, payload):
         raise ValueError("炸了")
@@ -144,6 +153,11 @@ def test_static_constraints():
     check("/ws 带 job_id 时先发 snapshot", '"type": "snapshot"' in src)
     check("job_id 过滤（无关事件不推）",
           'ev.get("job_id") not in (None, job_id)' in src)
+    check("/ws 泵循环内续租（WS 等待无轮询，防加载期租约静止过期）",
+          "def _renew_lease" in src and "models.leases.touch" in src
+          and "jobman.find" in src)
+    check("/ws 续租用 job 自身 lease（非客户端传入，防伪造）",
+          "ws_lease[0] = job.lease" in src)
 
     html = open(MONITOR, encoding="utf-8").read()
     check("监控页建立 WS 连接", "new WebSocket(" in html and "/ws?token=" in html)
@@ -156,6 +170,7 @@ def test_static_constraints():
 def main():
     test_broadcaster()
     test_job_event_sequence()
+    test_find_returns_job_with_lease()
     test_failed_and_cancelled_events()
     test_static_constraints()
     print()

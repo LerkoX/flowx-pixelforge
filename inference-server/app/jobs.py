@@ -143,6 +143,12 @@ class JobManager:
             raise KeyError(f"job '{job_id}' not found")
         return job.view()
 
+    def find(self, job_id):
+        """返回 Job 对象本身（/ws 续租等内部用途，需要读 job.lease）；
+        不存在返回 None。外部视图用 get()。"""
+        with self._lock:
+            return self._jobs.get(job_id)
+
     def list(self):
         with self._lock:
             jobs = sorted(self._jobs.values(), key=lambda j: j.created_at)

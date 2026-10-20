@@ -751,6 +751,10 @@ async def ws_jobs(websocket: WebSocket, token: str = "", job_id: str = ""):
     - 事件：submitted / running / progress / stage / done / failed / cancelled，
       字段见 jobs.py 发布点；done 带 result（同 GET /jobs/{id}）。
     - 30s 无事件发 {"type":"ping"} 保活（隧道/NAT 空闲断连兜底）。
+    - 续租：订阅单个 job_id 时，用 job 自身记录的 lease 随泵循环周期续租
+      （WS 等待期间客户端不再轮询 GET /jobs/{id}，加载等无进度阶段租约
+      会静止过期——TTL 默认 30min < 冷加载实测 31min+）；全局订阅
+      （监控页，无 job_id）不续租。
 
     客户端纪律（flowx_client.wait_job）：WS 失败/断开/超时一律回退轮询，
     旧服务端（无 /ws）+ 新节点、新服务端 + 旧节点两个方向都必须可用。
@@ -769,12 +773,28 @@ async def ws_jobs(websocket: WebSocket, token: str = "", job_id: str = ""):
     aq = asyncio.Queue()
     stop = threading.Event()
 
+    # WS 续租：用 job 记录的 lease（非客户端传入，防伪造）；惰性解析——
+    # 订阅瞬间 job 可能尚未入库（submit 返回后客户端才连 WS，竞态窗口极小
+    # 但存在），解析不到就下一轮泵循环再试。
+    ws_lease = [None]
+
+    def _renew_lease():
+        if not job_id:
+            return
+        if ws_lease[0] is None:
+            job = jobman.find(job_id)
+            if job is not None:
+                ws_lease[0] = job.lease or ""
+        if ws_lease[0]:
+            models.leases.touch(ws_lease[0])
+
     def _pump():
         while not stop.is_set():
             try:
                 ev = q.get(timeout=30.0)
             except queue.Empty:
                 ev = {"type": "ping"}
+            _renew_lease()
             loop.call_soon_threadsafe(aq.put_nowait, ev)
 
     pump = threading.Thread(target=_pump, daemon=True)
