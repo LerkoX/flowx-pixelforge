@@ -7,7 +7,7 @@ Description: >-
   ⚠️ 逐帧重绘耗时 = 帧数 × 单帧耗时：先用 max_frames=8 小样验证效果再放开全片。
   ⚠️ 形态判据：验收务必抽帧看图（视频管线只验状态不算过）。
 Param:
-  service_url: "http://192.168.5.60:8100"              # Studio 宿主机/公网可达（local 节点 + 画布侧读取）
+  service_url: "http://55999db0.r10.vip.cpolar.cn"              # Studio 宿主机/公网可达（local 节点 + 画布侧读取）
   service_url_internal: "http://172.17.0.1:8100"       # docker 节点容器内网地址
   service_token: "30e494999da13134808ee280aea6dffd"   # 服务端 INFERENCE_TOKEN（已启用鉴权；换部署改这里）
   source_video: "~/flowx-input/uploads/dance.mp4"       # 源视频（FlowX 本机路径）
@@ -36,7 +36,7 @@ Nodes:
   Ensure:
     name: 服务健康检查
     config:
-      nodeRef: inference-ensure@1.3.0
+      nodeRef: inference-ensure@1.4.0
       executor: local
       params:
         service_url: "{{ Param.service_url }}"

@@ -511,18 +511,28 @@ def checkpoint_load(models, ckpt, dtype="auto", offload="auto", use_t5="auto"):
     return {"model": pipe, "clip": pipe, "vae": pipe}
 
 
-def model_unload(models, target=""):
+def model_unload(models, target="", keep=None):
     """显式卸载常驻模型（Unload Model，对标 ComfyUI 的 free/unload 操作）。
 
     target：空 / all / * = 卸载全部；否则按名字或缓存键匹配（可省略扩展名，
     支持 vae:/cn:/motion 组合键的前缀形式）。返回 unloaded/resident 两个逗号分隔
     字符串（node 输出端口只能传字符串，便于在画布/日志里看结果）。
+    keep：保留清单（仅 target=全部时生效）——淘汰除 keep 命中外的所有常驻
+    （inference-ensure 清场：新流水线进来时淘汰它不需要的模型）；
+    pinned/其它租约持有的条目即使不在 keep 里也会跳过。响应带 kept（keep
+    实际命中的常驻键）。
     走与加载一致的淘汰路径：断对象仓库视图 → gc.collect → empty_cache。
     """
-    done, skipped = models.unload_detail(target)
+    keep = [str(t).strip() for t in (keep or []) if str(t).strip()]
+    kept_keys = set()
+    for t in keep:
+        kept_keys.update(models.find_keys(t))
+    done, skipped = models.unload_detail(target, keep=keep)
     resident = models.resident()
     out = {"unloaded": ",".join(done) if done else "(none)",
            "resident": ",".join(resident) if resident else "(empty)"}
+    if keep:
+        out["kept"] = ",".join(sorted(kept_keys)) if kept_keys else "(none)"
     # 跳过明细：节点输出只传字符串（skipped），端点/监控页另给结构化 skipped_detail
     if skipped:
         out["skipped"] = ",".join(s["key"] for s in skipped)

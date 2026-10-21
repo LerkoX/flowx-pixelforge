@@ -6,7 +6,7 @@ Description: >-
 Param:
   service_url: "http://172.17.0.1:8100"
   # save-image 等 local 执行器节点在手机侧跑，必须用手机可达地址
-  service_url_local: "http://192.168.5.60:8100"
+  service_url_local: "http://55999db0.r10.vip.cpolar.cn"
   service_token: "30e494999da13134808ee280aea6dffd"   # 服务端 INFERENCE_TOKEN（docker 执行器直连内网，不经隧道）
   input_image: "b4d217d20b0940ac9f59723bd1fc346a"
 Graph: |
@@ -35,7 +35,7 @@ Nodes:
   Ensure:
     name: 服务健康检查
     config:
-      nodeRef: inference-ensure@1.3.0
+      nodeRef: inference-ensure@1.4.0
       params:
         service_url: "{{ Param.service_url }}"
         service_token: "{{ Param.service_token }}"

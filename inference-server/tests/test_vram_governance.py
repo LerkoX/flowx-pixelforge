@@ -202,6 +202,45 @@ def test_unload_skips_pinned():
     assert m.resident() == ["busy"]
 
 
+def test_unload_keep_except():
+    """keep 保留清单（Ensure 清场）：target=全部 + keep ⇒ 只卸 keep 未命中的。"""
+    m = make_manager([("flux-unet:flux1-schnell-Q4_K_S.gguf", GB, 1.0),
+                      ("majicmixRealistic_v7|dtype=fp16", GB, 2.0),
+                      ("cn:control_v11p_sd15_canny|dtype=fp16", GB // 2, 3.0)])
+    # keep 命中 majicmix 与 cn（find_keys 语义：可省略扩展名/组件前缀）
+    done, skipped = m.unload_detail("all", keep=["majicmixRealistic_v7",
+                                                 "control_v11p_sd15_canny"])
+    assert done == ["flux-unet:flux1-schnell-Q4_K_S.gguf"]
+    assert skipped == []
+    assert sorted(m.resident()) == ["cn:control_v11p_sd15_canny|dtype=fp16",
+                                    "majicmixRealistic_v7|dtype=fp16"]
+    # keep 空列表 = 不启用保留 ⇒ 全卸（与旧行为一致）
+    assert len(m.unload_detail("all", keep=[])[0]) == 2
+    assert m.resident() == []
+
+
+def test_unload_keep_pinned_still_skipped():
+    """pinned/leased 保护优先于 keep：keep 未列出的 pinned 条目照样跳过。"""
+    m = make_manager([("busy", GB, 1.0), ("idle", GB, 2.0)])
+    m.pin("busy")
+    done, skipped = m.unload_detail("all", keep=["nonexistent"])
+    assert done == ["idle"]
+    assert [s["key"] for s in skipped] == ["busy"]
+    assert m.resident() == ["busy"]
+
+
+def test_model_unload_keep_response():
+    """ops 层：keep 声明时响应带 kept（keep 实际命中的常驻键）。"""
+    m = make_manager([("a|dtype=fp16", GB, 1.0), ("b", GB, 2.0)])
+    out = model_unload(m, "all", keep=["a"])
+    assert out["unloaded"] == "b"
+    assert out["kept"] == "a|dtype=fp16"
+    assert out["resident"] == "a|dtype=fp16"
+    # 不带 keep ⇒ 响应无 kept 键（旧调用方契约不变）
+    out = model_unload(m, "all")
+    assert "kept" not in out and out["unloaded"] == "a|dtype=fp16"
+
+
 def test_evict_idle_oom_helper():
     m = make_manager([("a", GB, 1.0), ("b", GB, 2.0), ("c", GB, 3.0)])
     m.pin("a")

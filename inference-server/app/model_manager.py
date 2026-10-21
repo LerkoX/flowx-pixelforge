@@ -929,22 +929,31 @@ class ModelManager:
                 hits.append(key)
         return hits
 
-    def unload(self, target) -> list:
+    def unload(self, target, keep=None) -> list:
         """显式卸载：返回实际卸载的 key 列表（保持既有调用契约）。
-        需要跳过原因时用 unload_detail()。"""
-        done, _skipped = self.unload_detail(target)
+        需要跳过原因时用 unload_detail()。keep 语义见 unload_detail。"""
+        done, _skipped = self.unload_detail(target, keep=keep)
         return done
 
-    def unload_detail(self, target):
+    def unload_detail(self, target, keep=None):
         """显式卸载（带跳过明细）：target 为空/all/* = 全部；否则按 find_keys 匹配。
+        keep：保留清单（模型名/缓存键列表，匹配语义同 find_keys），仅在 target
+        为全部时生效——候选 = 全部 − keep 命中（inference-ensure 清场用：
+        新流水线进来时淘汰它不需要的常驻模型）。
         走与其他加载完全一致的淘汰路径（断对象仓库视图 → gc → empty_cache）。
-        跳过：执行中 pin 的条目 + 其它活跃租约持有的条目（本租约可卸自己的）。
+        跳过：执行中 pin 的条目 + 其它活跃租约持有的条目（本租约可卸自己的）——
+        pinned/leased 保护**优先于 keep 语义**（keep 没列的租约条目照样跳过）。
         返回 (done, skipped)：done 为实际卸载的 key 列表；skipped 为
         [{"key", "reason"(pinned|leased), "reason_text", "holders"(租约 id 列表)}]
         ——监控页「点了没反应」的排查依据（此前只打服务端日志，响应里看不到）。"""
         with self._lock:
             if str(target or "").strip().lower() in ("", "all", "*"):
                 keys = list(self._pipes.keys())
+                if keep:
+                    kept = set()
+                    for t in keep:
+                        kept.update(self.find_keys(t))
+                    keys = [k for k in keys if k not in kept]
             else:
                 keys = self.find_keys(target)
             # 执行中在用（pin）或其它租约持有的条目不动：

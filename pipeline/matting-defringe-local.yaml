@@ -8,7 +8,7 @@ Description: >-
   再各自换到**纯绿色底**（#00B050）上，白边残留会被放大成可见的浅色环。
   全 local 执行器；末端全部落盘便于本机复核。
 Param:
-  service_url_local: "http://192.168.5.60:8100"
+  service_url_local: "http://55999db0.r10.vip.cpolar.cn"
   service_token: "30e494999da13134808ee280aea6dffd"
   # 白底商品图对象（exec 633 的 comp_white 产物）
   white_bg_image: "82d11445107f42138a5424711acc7d7d"

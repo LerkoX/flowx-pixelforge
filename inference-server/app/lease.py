@@ -19,6 +19,10 @@
 - 排队：加载需腾地方但可淘汰条目都被其它租约占着时，阻塞等待
   （LEASE_WAIT_TIMEOUT，默认 300s）周期重查；超时失败带 oom_help 风格
   指引。等待期间持模型锁＝后来的加载自然排队。
+- 串行化闸门（FIFO，GateQueue）：inference-ensure 经 POST /leases/acquire
+  排队，只有队首且服务空闲（无其它活跃租约、无其它租约的 running/pending
+  任务）时获得闸门；空闲自动释放（IDLE_RELEASE_SECONDS，默认 300s 无活动
+  且无任务即摘除）让"流水线结束"不必等 TTL（1800s）才交还闸门。
 """
 import os
 import threading
@@ -26,6 +30,13 @@ import time
 
 LEASE_TTL = float(os.environ.get("LEASE_TTL_SECONDS", "1800"))
 LEASE_WAIT_TIMEOUT = float(os.environ.get("LEASE_WAIT_TIMEOUT", "300"))
+# 租约空闲自动释放（R3）：无 running/pending 任务且超过该秒数无活动的租约，
+# 在闸门 acquire 判定时摘除——流水线结束后 300s 即交还闸门，不必等 TTL。
+# /model/policy 旋钮 lease_idle_release_seconds 可热改。
+IDLE_RELEASE_SECONDS = float(os.environ.get("LEASE_IDLE_RELEASE_SECONDS", "300"))
+# 闸门等待者条目 TTL：等待方停止轮询（流水线被取消/进程被杀）超过该秒数，
+# 其排队条目自动作废，防堵死队列。须远大于轮询周期（ensure queue_poll=5s）。
+GATE_ENTRY_TTL = float(os.environ.get("GATE_ENTRY_TTL_SECONDS", "120"))
 # 租约标识合法性上限（防畸形头撑爆内存；execution_id 是 uuid/短串）
 MAX_LEASE_ID_LEN = 128
 
@@ -152,6 +163,64 @@ class LeaseBook:
                      "keys": sorted(e["keys"]),
                      "idle_seconds": round(now - e["seen"], 1)}
                     for l, e in sorted(self._leases.items())]
+
+
+class GateQueue:
+    """流水线串行化闸门（FIFO）：inference-ensure 排队等待 "轮到本执行" 的依据。
+
+    纪律：只有队首能获得闸门——后来者即使看到服务空闲也只能先入队，
+    排到队首并通过占用检查（busy_fn）才放行。两个完全同时到达的请求由锁
+    串行化决定先后，此后顺序严格保持（FIFO 保证）。
+    等待者每次 acquire 轮询刷新时间戳；停止轮询超过 entry_ttl 的条目
+    自动作废（等待中的流水线被取消/杀死后不会堵死队列）。
+    """
+
+    def __init__(self, entry_ttl=GATE_ENTRY_TTL):
+        self._ttl = float(entry_ttl)
+        self._queue = []  # [{"id": lease_id, "seen": 最近轮询, "since": 入队时刻}]
+        self._lock = threading.Lock()
+
+    def acquire(self, lease_id, busy_fn):
+        """FIFO 原子判定。busy_fn() -> (busy: bool, detail: dict)，仅在
+        本调用者排到头时调用（占用检查可以放模型/任务簿记等重逻辑）。
+        返回 (granted, info)：granted=True 时已出队并获得闸门；
+        False 时 info 带 position/ahead（未到队首）或 position=0 +
+        占用明细（队首但服务忙）。"""
+        lid = sanitize(lease_id)
+        if lid is None:
+            # 无租约标识的调用方（命令行直跑）无法排队：直接按占用判定，
+            # 不进 FIFO（排队语义要求身份，否则每次调用都是一个新队尾条目）
+            busy, detail = busy_fn()
+            return (not busy), (detail if busy else {})
+        now = time.time()
+        with self._lock:
+            self._queue = [e for e in self._queue
+                           if now - e["seen"] < self._ttl]
+            for e in self._queue:
+                if e["id"] == lid:
+                    e["seen"] = now
+                    break
+            else:
+                self._queue.append({"id": lid, "seen": now, "since": now})
+            pos = next(i for i, e in enumerate(self._queue) if e["id"] == lid)
+            if pos > 0:
+                ahead = [e["id"] for e in self._queue[:pos]]
+                return False, {"position": pos, "ahead": ahead}
+            busy, detail = busy_fn()
+            if busy:
+                return False, {"position": 0, **detail}
+            self._queue.pop(0)
+            return True, {}
+
+    def view(self):
+        """观测视图（GET /leases 附带）：队列中的等待者（队首在前）。"""
+        now = time.time()
+        with self._lock:
+            self._queue = [e for e in self._queue
+                           if now - e["seen"] < self._ttl]
+            return [{"lease": e["id"],
+                     "waiting_seconds": round(now - e["since"], 1)}
+                    for e in self._queue]
 
 
 def wait_help(others, waited):

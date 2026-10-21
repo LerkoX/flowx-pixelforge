@@ -377,6 +377,71 @@ def test_job_binds_lease():
     print("[ok] job 记录租约 + worker 绑定；无租约 job 行为不变")
 
 
+# ---------------------------------------------------------------------------
+# 2. GateQueue（FIFO 串行化闸门）
+# ---------------------------------------------------------------------------
+
+def test_gate_queue_fifo():
+    """FIFO 保证：只有队首能获得闸门；服务空闲时后来者也必须先排队。"""
+    q = lease.GateQueue(entry_ttl=60)
+    free = lambda: (False, {})
+    busy = lambda: (True, {"holders": ["x"]})
+    # 服务空闲：A 立即获得（队首出队）
+    granted, _ = q.acquire("a", free)
+    assert granted
+    assert q.view() == []
+    # 服务被占：B/C 排队，顺序固定
+    granted, info = q.acquire("b", busy)
+    assert not granted and info["position"] == 0
+    granted, info = q.acquire("c", busy)
+    assert not granted and info["position"] == 1 and info["ahead"] == ["b"]
+    # 关键：服务已空闲，但 C 不是队首 ⇒ 连占用检查都不执行，不能插队
+    called = []
+
+    def probe():
+        called.append(1)
+        return (False, {})
+
+    granted, info = q.acquire("c", probe)
+    assert not granted and info["position"] == 1 and called == []
+    # B（队首）获得，C 顶上队首后获得
+    granted, _ = q.acquire("b", free)
+    assert granted
+    granted, _ = q.acquire("c", free)
+    assert granted
+    assert q.view() == []
+    print("[ok] GateQueue FIFO：队首才能获得，后来者不插队")
+
+
+def test_gate_queue_stale_entry_expires():
+    """等待方停止轮询（流水线被杀/取消）超过 entry_ttl ⇒ 排队条目作废。"""
+    q = lease.GateQueue(entry_ttl=0.2)
+    busy = lambda: (True, {"holders": ["x"]})
+    free = lambda: (False, {})
+    granted, info = q.acquire("a", busy)
+    assert not granted and info["position"] == 0
+    granted, info = q.acquire("b", busy)
+    assert not granted and info["position"] == 1
+    # A 停止轮询：条目过期后 B 顶上队首
+    time.sleep(0.25)
+    granted, info = q.acquire("b", busy)
+    assert not granted and info["position"] == 0
+    granted, _ = q.acquire("b", free)
+    assert granted
+    print("[ok] GateQueue 等待者过期清扫（不堵死队列）")
+
+
+def test_gate_queue_without_lease_id():
+    """无租约标识（命令行直跑）：不参与排队，直接按占用判定，不留队列条目。"""
+    q = lease.GateQueue(entry_ttl=60)
+    granted, _ = q.acquire("", lambda: (False, {}))
+    assert granted
+    granted, info = q.acquire(None, lambda: (True, {"holders": ["x"]}))
+    assert not granted and info["holders"] == ["x"]
+    assert q.view() == []
+    print("[ok] GateQueue 无租约调用方：直判占用、不进队")
+
+
 def main():
     test_sanitize_and_bind()
     test_leasebook_touch_expiry()
@@ -394,6 +459,9 @@ def main():
     test_unload_detail_skipped_reasons()
     test_leasebook_release()
     test_job_binds_lease()
+    test_gate_queue_fifo()
+    test_gate_queue_stale_entry_expires()
+    test_gate_queue_without_lease_id()
     print("\n✓ 执行租约 pin 测试全部通过")
 
 

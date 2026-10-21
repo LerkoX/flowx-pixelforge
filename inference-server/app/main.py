@@ -518,8 +518,13 @@ def get_video(video_id: str):
 
 
 class UnloadReq(BaseModel):
-    """target 空 = 全部（便于 curl -X POST .../model/unload -d '{}'）。"""
+    """target 空 = 全部（便于 curl -X POST .../model/unload -d '{}'）。
+    keep：保留清单（仅 target=全部时生效）——卸载除 keep 命中外的所有常驻，
+    inference-ensure 清场用（新流水线淘汰它不需要的模型）；匹配语义同
+    find_keys（可省略扩展名，支持 vae:/cn: 前缀）；pinned/其它租约持有的
+    条目即使不在 keep 里也会跳过。"""
     target: str = ""
+    keep: list[str] | None = None
 
 
 @app.get("/model/policy", dependencies=[Depends(auth)])
@@ -543,12 +548,14 @@ class PolicyReq(BaseModel):
     B1/B2/B4 新增（exec 795）：vram_strict / offload_floor_mb /
     object_ttl_orphan_seconds —— 容器是手工 docker run 的，env 改不了，
     这三个旋钮必须能热改（沿用现有的 /model/policy 通道）。
+    lease_idle_release_seconds（FIFO 闸门）：租约空闲自动释放秒数。
     """
     max_resident_models: int | None = None
     vram_reserve_mb: int | None = None
     vram_strict: int | None = None
     offload_floor_mb: int | None = None
     object_ttl_orphan_seconds: int | None = None
+    lease_idle_release_seconds: int | None = None
 
 
 @app.post("/model/policy", dependencies=[Depends(auth)])
@@ -582,7 +589,9 @@ def _attach_policy():
                  "vram_strict": lambda: int(_mm.KNOBS.get("vram_strict", 0)),
                  "offload_floor_mb": lambda: int(_mm.KNOBS.get("offload_floor_mb", 0)),
                  "object_ttl_orphan_seconds": lambda: int(
-                     store.orphan_ttl_seconds or 0)},
+                     store.orphan_ttl_seconds or 0),
+                 "lease_idle_release_seconds": lambda: int(
+                     lease.IDLE_RELEASE_SECONDS)},
         writers={"max_resident_models": lambda v: setattr(_mm, "MAX_RESIDENT", v),
                  "vram_reserve_mb": lambda v: setattr(_mm, "VRAM_RESERVE_MB", v),
                  "vram_strict": lambda v: _mm.KNOBS.__setitem__(
@@ -590,7 +599,9 @@ def _attach_policy():
                  "offload_floor_mb": lambda v: _mm.KNOBS.__setitem__(
                      "offload_floor_mb", int(v)),
                  "object_ttl_orphan_seconds": lambda v: setattr(
-                     store, "orphan_ttl_seconds", int(v))},
+                     store, "orphan_ttl_seconds", int(v)),
+                 "lease_idle_release_seconds": lambda v: setattr(
+                     lease, "IDLE_RELEASE_SECONDS", float(v))},
     )
 
 
@@ -604,7 +615,8 @@ def model_unload(req: UnloadReq | None = None,
     _bind_lease(x_flowx_lease)
     try:
         target = (req.target if req is not None else "") or ""
-        return ops.model_unload(models, target)
+        keep = (req.keep if req is not None else None) or None
+        return ops.model_unload(models, target, keep=keep)
     finally:
         lease.unbind()
 
@@ -821,12 +833,80 @@ async def ws_jobs(websocket: WebSocket, token: str = "", job_id: str = ""):
         events.unsubscribe(q)
 
 
+# FIFO 串行化闸门：inference-ensure 排队用（见 lease.GateQueue 注释）
+gate = lease.GateQueue()
+
+
+def _gate_busy(my_lid):
+    """闸门占用判定（acquire 的 busy_fn，只在调用者排到队首时执行）。
+
+    1) 先做租约空闲自动释放（R3）：无 running/pending 任务且超过
+       IDLE_RELEASE_SECONDS 无活动的租约摘除——流水线结束后 300s 即交还
+       闸门，不必等租约 TTL（1800s）；job 的进度心跳会续租，长采样任务
+       不会被误判空闲。
+    2) 仍有其它活跃租约 → busy；
+    3) 其它租约（含无租约脚本）的 running/pending 任务 → busy。
+    返回 (busy, detail)。
+    """
+    active_jobs = [j for j in jobman.list()
+                   if j.get("status") in ("pending", "running")]
+    busy_job_leases = {j.get("lease") for j in active_jobs} - {None, my_lid}
+    idle_limit = float(lease.IDLE_RELEASE_SECONDS)
+    for e in models.leases.view():  # view() 先清扫 TTL 过期租约
+        lid = e["lease"]
+        if lid == my_lid or lid in busy_job_leases:
+            continue  # 自己的 / 有活任务的租约不放
+        if idle_limit > 0 and e["idle_seconds"] > idle_limit:
+            if models.leases.release(lid):
+                print(f"[lease] idle-released '{lid}'（空闲 "
+                      f"{e['idle_seconds']:.0f}s 无任务，闸门判定）", flush=True)
+    others = [e for e in models.leases.view() if e["lease"] != my_lid]
+    other_jobs = [j for j in active_jobs if j.get("lease") != my_lid]
+    if not others and not other_jobs:
+        return False, {}
+    return True, {
+        "holders": [{"lease": e["lease"], "idle_seconds": e["idle_seconds"],
+                     "keys": e["keys"]} for e in others],
+        "active_jobs": [{"id": j["id"], "lease": j.get("lease") or "",
+                         "status": j["status"], "title": j.get("title", "")}
+                        for j in other_jobs],
+    }
+
+
+@app.post("/leases/acquire", dependencies=[Depends(auth)])
+def acquire_gate(x_flowx_lease: str = Header(default="")):
+    """流水线串行化闸门（FIFO 排队）：inference-ensure 进入流水线前轮询本端点，
+    直到 acquired=true 才放行后续节点。
+
+    - 只有队首能获得闸门（后来者即使看到空闲也先入队，FIFO 严格保持）；
+    - 获得条件：无其它活跃租约 且 无其它租约的 running/pending 任务
+      （判定时顺带做空闲自动释放，见 _gate_busy）；
+    - 等待方停止轮询超过 GATE_ENTRY_TTL（默认 120s）其排队条目自动作废；
+    - 获得闸门后本执行租约登记入册，后续加载/淘汰受其保护。
+    响应：acquired=true；或 acquired=false + position（0=队首等服务空闲，
+    >0=前面还有 position 条流水线）+ ahead/holders/active_jobs 明细。"""
+    lid = _bind_lease(x_flowx_lease)
+    try:
+        if lid is None:
+            raise HTTPException(
+                status_code=400,
+                detail="缺少合法 X-FlowX-Lease 头：排队需要执行标识"
+                       "（Studio 注入 FLOWX_EXECUTION_ID；命令行直跑请自行保证串行）")
+        granted, info = gate.acquire(lid, lambda: _gate_busy(lid))
+        return {"acquired": granted, "lease": lid, **info}
+    finally:
+        lease.unbind()
+
+
 @app.get("/leases", dependencies=[Depends(auth)])
 def list_leases():
-    """执行租约观测（dev-plan §43.2）：活跃租约及其持有的常驻条目/空闲时长。"""
+    """执行租约观测（dev-plan §43.2）：活跃租约及其持有的常驻条目/空闲时长。
+    gate_queue：FIFO 闸门等待队列（队首在前）。"""
     return {"leases": models.leases.view(),
+            "gate_queue": gate.view(),
             "lease_ttl_seconds": lease.LEASE_TTL,
-            "lease_wait_timeout_seconds": lease.LEASE_WAIT_TIMEOUT}
+            "lease_wait_timeout_seconds": lease.LEASE_WAIT_TIMEOUT,
+            "lease_idle_release_seconds": lease.IDLE_RELEASE_SECONDS}
 
 
 @app.delete("/leases/{lease_id}", dependencies=[Depends(auth)])

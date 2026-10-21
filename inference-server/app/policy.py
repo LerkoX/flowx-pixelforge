@@ -27,6 +27,8 @@ LIMITS = {
     "vram_strict": (0, 1),
     "offload_floor_mb": (0, 8192),
     "object_ttl_orphan_seconds": (0, 86400),
+    # FIFO 闸门：租约空闲自动释放秒数（0 = 关闭，回到仅 TTL 释放）
+    "lease_idle_release_seconds": (0, 86400),
 }
 
 

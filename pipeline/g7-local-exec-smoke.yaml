@@ -1,10 +1,10 @@
 Name: g7-local-exec-smoke
 Description: >-
   G7 本地执行器冒烟：node executor=local（Termux 侧直跑），service_url 用宿主机
-  局域网地址 http://192.168.5.60:8100（手机与宿主同网段，鉴权头不被剥离——
+  局域网地址 http://55999db0.r10.vip.cpolar.cn（手机与宿主同网段，鉴权头不被剥离——
   对比公网 HTTPS 隧道会剥 Authorization 头导致 401）。验证 local 执行器链路可用。
 Param:
-  service_url: "http://192.168.5.60:8100"
+  service_url: "http://55999db0.r10.vip.cpolar.cn"
   service_token: "30e494999da13134808ee280aea6dffd"
   input_image: "b4d217d20b0940ac9f59723bd1fc346a"
 Graph: |
