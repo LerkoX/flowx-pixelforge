@@ -71,12 +71,19 @@ class Job:
         self._touch_lease()
 
     def _touch_lease(self):
-        """续租（B2）：租约 TTL 默认 30min，而 30 步采样可能跑 90 分钟。"""
+        """续租（B2）：租约 TTL 默认 30min，而 30 步采样可能跑 90 分钟。
+        回调返回 False = 租约已被释放（客户端取消/执行已结束）⇒ 自杀：
+        置取消标志，下一个检查点（interrupt_check）生效，防止僵尸任务继续
+        占卡（exec 886 进程崩溃事故）。"""
         if self.lease and self._lease_touch is not None:
             try:
-                self._lease_touch(self.lease)
+                alive = self._lease_touch(self.lease)
             except Exception:  # noqa: BLE001 - 续租失败不阻断任务
-                pass
+                return
+            if alive is False and not self.cancel_event.is_set():
+                print(f"[jobs] {self.id[:12]} 租约 {self.lease} 已释放 ⇒ 任务自杀",
+                      flush=True)
+                self.cancel_event.set()
 
     def set_progress(self, current, total):
         self.progress = {"current": current, "total": total}

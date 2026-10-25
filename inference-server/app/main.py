@@ -25,6 +25,11 @@ import sys
 import threading
 import time
 
+# 显存分配器换 expandable_segments：虚拟内存映射让空闲段可原地扩展/合并，
+# 根治长跑服务的碎片化 OOM（"已淘汰全部可淘汰仍不足"但空闲总量够的假性 OOM，
+# exec 880 的 1152x2016 VAE 解码事故）。必须在 import torch 之前设置——
+# 分配器配置在首次 CUDA 初始化时锁定，之后改环境变量无效。
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import torch
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response
@@ -688,7 +693,7 @@ def _execute_job(kind, payload):
 # 否则租约 TTL 一到就“看似执行结束”，导致本执行的模型失去并发保护、
 # 对象仓库把它的对象当孤儿回收（exec 795 采样跑了 5425s，TTL 只有 1800s）。
 jobman = JobManager(_execute_job,
-                    lease_touch=lambda lid: models.leases.touch(lid))
+                    lease_touch=lambda lid: models.leases.touch_existing(lid))
 
 # 指标历史采样：服务端后台线程（2s/帧，环形缓冲 6h），监控页图表数据源；
 # 依赖在此装配（对象仓库统计 + 任务队列 + 模型盘占用）
@@ -793,10 +798,18 @@ async def ws_jobs(websocket: WebSocket, token: str = "", job_id: str = ""):
     def _renew_lease():
         if not job_id:
             return
+        job = jobman.find(job_id)
+        if job is None:
+            return
+        # 只在任务存活期续租：续租的本义是保护执行中的长任务（TTL 30min <
+        # 冷加载/长采样实测，exec 795）。任务到终态后必须停——客户端断开的
+        # 检测有一个 ping 周期（30s，隧道下更久）的延迟，这段时间里保活循环
+        # 会把已被 lease-release 显式释放的租约重新 touch 复活，排队的执行
+        # 被迫白等一轮 idle-release（300s）才能进场（exec 860→861 事故）。
+        if job.status not in ("pending", "running"):
+            return
         if ws_lease[0] is None:
-            job = jobman.find(job_id)
-            if job is not None:
-                ws_lease[0] = job.lease or ""
+            ws_lease[0] = job.lease or ""
         if ws_lease[0]:
             models.leases.touch(ws_lease[0])
 

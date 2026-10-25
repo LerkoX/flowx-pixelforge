@@ -89,6 +89,24 @@ class LeaseBook:
             if keys:
                 e["keys"].update(k for k in keys if k)
 
+    def touch_existing(self, lease_id) -> bool:
+        """仅当租约存在时续期；不存在（已被 release/TTL 清除）返回 False 且不复活。
+
+        任务心跳专用（jobs.py）：任务运行中租约被显式释放 = 客户端已放弃本次
+        执行（取消/Studio 侧结束），任务应在下一个检查点自杀——否则僵尸任务
+        继续占卡，其租约又被自身心跳复活失去门禁作用，后续执行进场双份显存
+        叠加把服务打崩（exec 886 事故：无 CN 僵尸采样 + 886 KSampler 并发
+        ⇒ driver OOM ⇒ 进程崩溃）。"""
+        lid = sanitize(lease_id)
+        if lid is None:
+            return True  # 无租约任务不受此约束
+        with self._lock:
+            e = self._leases.get(lid)
+            if e is None:
+                return False
+            e["seen"] = time.time()
+            return True
+
     def forget_keys(self, keys):
         """条目被淘汰/卸载后从所有租约名下摘除（簿记卫生，防虚保护）。"""
         if not keys:

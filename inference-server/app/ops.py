@@ -4,6 +4,7 @@
 import os
 import random
 import time
+import contextlib
 
 import torch
 from PIL import Image
@@ -134,11 +135,14 @@ class ControlBundle:
 
 
 def controlnet_apply(control_net, image, strength=1.0,
-                     start_percent=0.0, end_percent=1.0):
+                     start_percent=0.0, end_percent=1.0, control=None):
     """ControlNet Apply：把 ControlNetModel 与 hint 图（边缘/姿态等线稿）捆绑，
     输出 CONTROL 对象喂 sample 的 control 端口（对标 ComfyUI ControlNetApply）。
     strength=残差强度（0 ≡ 关闭）；start/end_percent 为生效步窗口
-    （按 sample 实际执行步数计，[start,end)），ComfyUI 同名参数语义。"""
+    （按 sample 实际执行步数计，[start,end)），ComfyUI 同名参数语义。
+    control（可选）：上一个 controlnet.apply 的 CONTROL 产物——给出时把新捆绑
+    追加成 CONTROL 链（list[ControlBundle]），sample 内逐个前向、残差求和，
+    对标 ComfyUI 多 ControlNet 串联（每个 CN 各自的 strength/步窗口独立生效）。"""
     if not hasattr(control_net, "forward") or not hasattr(control_net, "dtype"):
         raise ValueError(
             f"controlnet.apply: control_net 需为 ControlNetModel，"
@@ -159,10 +163,19 @@ def controlnet_apply(control_net, image, strength=1.0,
     if end_percent <= start_percent:
         raise ValueError(
             f"步窗口为空：[{start_percent},{end_percent})")
+    bundle = ControlBundle(control_net, image, float(strength),
+                           float(start_percent), float(end_percent))
+    if control is None:
+        print(f"[controlnet.apply] strength={strength} "
+              f"window=[{start_percent},{end_percent}) hint={image.size}",
+              flush=True)
+        return {"control": bundle}
+    chain = list(control) if isinstance(control, list) else [control]
+    chain.append(bundle)
     print(f"[controlnet.apply] strength={strength} "
-          f"window=[{start_percent},{end_percent}) hint={image.size}", flush=True)
-    return {"control": ControlBundle(control_net, image, float(strength),
-                                     float(start_percent), float(end_percent))}
+          f"window=[{start_percent},{end_percent}) hint={image.size} "
+          f"（串接为 {len(chain)} 路 ControlNet）", flush=True)
+    return {"control": chain}
 
 
 def as_cond_segments(cond, name="cond"):
@@ -742,66 +755,95 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
         and pos_segs[0][2] == 1.0
     neg_plain = len(neg_segs) == 1 and neg_segs[0][1] is None \
         and neg_segs[0][2] == 1.0
-    if control is not None and not (pos_plain and neg_plain):
+    # control 归一化为 ControlBundle 列表：单 CONTROL（旧行为）与多 CONTROL
+    # 链（controlnet.apply 串接产物）统一处理，多 CN 时残差求和（ComfyUI 同款）。
+    controls = None
+    if control is not None:
+        controls = [c for c in (control if isinstance(control, list)
+                                else [control]) if c is not None] or None
+
+    if controls is not None and not (pos_plain and neg_plain):
         raise ValueError(
             "controlnet 暂不与 cond.set_area 组合（每段都要跑 controlnet，"
             "成本×N）；请仅用整图 cond 或先去掉 control")
 
-    # ControlNet 预准备：hint 按采样分辨率转张量 + 步窗口
-    hint = None
-    win_lo = win_hi = 0
-    if control is not None:
+    # ControlNet 预准备：每路各自的 hint（按采样分辨率转张量）、步窗口、
+    # InstantID 覆写对与驻留策略
+    cn_ctrls = []
+    if controls is not None:
         import numpy as np  # 懒加载：模块级保持纯 torch 面（无 GPU 单测可导入）
         hp, wp = latents.shape[2] * 8, latents.shape[3] * 8
-        img = control.image
-        if img.size != (wp, hp):
-            img = img.resize((wp, hp), Image.BILINEAR)
-        arr = np.asarray(img.convert("RGB"), dtype=np.float32) / 255.0
-        hint = torch.from_numpy(arr).permute(2, 0, 1)[None]
-        hint = hint.to(device=device, dtype=pipe.unet.dtype)
-        hint = hint.expand(b, -1, -1, -1)
-        win_lo = round(control.start_percent * len(ts))
-        win_hi = round(control.end_percent * len(ts))
-        print(f"[sample] controlnet strength={control.strength} "
-              f"window=[{win_lo},{win_hi}) of {len(ts)} steps", flush=True)
-    # InstantID 覆写对（hidden_neg/hidden_pos 非 None 时）：搬到执行设备
-    cn_neg_tok = cn_pos_tok = None
-    if control is not None and control.hidden_pos is not None:
-        cn_neg_tok = control.hidden_neg.to(device=device,
-                                           dtype=pipe.unet.dtype).expand(
-                                               b, -1, -1)
-        cn_pos_tok = control.hidden_pos.to(device=device,
-                                           dtype=pipe.unet.dtype).expand(
-                                               b, -1, -1)
-        print(f"[sample] controlnet hidden 覆写（InstantID）："
-              f"tokens={tuple(cn_pos_tok.shape)}", flush=True)
-
-    # B3：CN 驻留策略（装得下常驻／装不下按次搬移）——采样前定死，避免逐步抖动。
-    # peers=unet：采样循环期间 unet 会常驻上卡，判断余量时必须算上它（实测 exec 796）。
-    cn_place = ControlNetPlacement(
-        control.controlnet if control is not None else None, device,
-        peers=(getattr(pipe, "unet", None),)).plan()
+        for ci, c in enumerate(controls):
+            img = c.image
+            if img.size != (wp, hp):
+                img = img.resize((wp, hp), Image.BILINEAR)
+            arr = np.asarray(img.convert("RGB"), dtype=np.float32) / 255.0
+            hint = torch.from_numpy(arr).permute(2, 0, 1)[None]
+            hint = hint.to(device=device, dtype=pipe.unet.dtype)
+            hint = hint.expand(b, -1, -1, -1)
+            win_lo = round(c.start_percent * len(ts))
+            win_hi = round(c.end_percent * len(ts))
+            # InstantID 覆写对（hidden_neg/hidden_pos 非 None 时）：搬到执行设备
+            neg_tok = pos_tok = None
+            if c.hidden_pos is not None:
+                neg_tok = c.hidden_neg.to(device=device,
+                                          dtype=pipe.unet.dtype).expand(
+                                              b, -1, -1)
+                pos_tok = c.hidden_pos.to(device=device,
+                                          dtype=pipe.unet.dtype).expand(
+                                              b, -1, -1)
+                print(f"[sample] controlnet[{ci}] hidden 覆写（InstantID）："
+                      f"tokens={tuple(pos_tok.shape)}", flush=True)
+            # B3：CN 驻留策略（装得下常驻／装不下按次搬移）——采样前定死。
+            # peers=unet + 其余 CN：判断余量时必须算上同期限驻的大件
+            # （实测 exec 796）。
+            place = ControlNetPlacement(
+                c.controlnet, device,
+                peers=(getattr(pipe, "unet", None),
+                       *(x.controlnet for j, x in enumerate(controls)
+                         if j != ci))).plan()
+            cn_ctrls.append({"bundle": c, "hint": hint, "win_lo": win_lo,
+                             "win_hi": win_hi, "neg_tok": neg_tok,
+                             "pos_tok": pos_tok, "place": place})
+            print(f"[sample] controlnet[{ci}] strength={c.strength} "
+                  f"window=[{win_lo},{win_hi}) of {len(ts)} steps", flush=True)
 
     def cn_residuals(i, inp, t, hidden, added=None, side=None):
-        """当前步的 controlnet 残差（窗口外/无 control 返回 None）。
+        """当前步的 controlnet 残差求和（窗口外/无 control 返回 None）。
+        多 CN：窗口内的每路各自前向（残差已乘各自 strength），down 逐块、
+        mid 相加——ComfyUI 多 ControlNet 同款求和语义。
         inp/hidden 批数与 unet 输入一致（cat 拼批 2b 时 hint 复制两份）。
         side：split 模式下告知当前是 neg/pos 侧（InstantID 覆写对选边用，
         cat 模式 None——按批数拼 [neg,pos]）。
         added：SDXL ControlNet 必需（text_embeds/time_ids），SD1.x 传 None。"""
-        if control is None or not (win_lo <= i < win_hi):
+        if not cn_ctrls:
             return None
-        h = hint if inp.shape[0] == b else torch.cat([hint, hint])
-        if cn_pos_tok is not None:
-            # InstantID：CN cross-attention 吃投影后的人脸 token（官方语义：
-            # 文本 hidden 整体被覆写，负向 = resampler(零特征)）
-            hidden = torch.cat([cn_neg_tok, cn_pos_tok]) \
-                if inp.shape[0] == 2 * b else \
-                (cn_neg_tok if side == "neg" else cn_pos_tok)
-        kw = {"added_cond_kwargs": added} if added is not None else {}
-        down, mid = cn_place.run(
-            inp, t, encoder_hidden_states=hidden, controlnet_cond=h,
-            conditioning_scale=control.strength, return_dict=False, **kw)
-        return down, mid
+        acc_down = acc_mid = None
+        for c in cn_ctrls:
+            if not (c["win_lo"] <= i < c["win_hi"]):
+                continue
+            h = c["hint"] if inp.shape[0] == b else torch.cat(
+                [c["hint"], c["hint"]])
+            hid = hidden
+            if c["pos_tok"] is not None:
+                # InstantID：CN cross-attention 吃投影后的人脸 token（官方语义：
+                # 文本 hidden 整体被覆写，负向 = resampler(零特征)）
+                hid = torch.cat([c["neg_tok"], c["pos_tok"]]) \
+                    if inp.shape[0] == 2 * b else \
+                    (c["neg_tok"] if side == "neg" else c["pos_tok"])
+            kw = {"added_cond_kwargs": added} if added is not None else {}
+            down, mid = c["place"].run(
+                inp, t, encoder_hidden_states=hid, controlnet_cond=h,
+                conditioning_scale=c["bundle"].strength, return_dict=False,
+                **kw)
+            if acc_down is None:
+                acc_down, acc_mid = list(down), mid
+            else:
+                acc_down = [a + d for a, d in zip(acc_down, down)]
+                acc_mid = acc_mid + mid
+        if acc_down is None:
+            return None
+        return acc_down, acc_mid
 
     # IPAdapter 装配（ipadapter.apply 产物，nodes/_common/server_ops/ipadapter.py）：
     # 临时换装 IPAdapter 注意力处理器 + image 投影层，采样后 try/finally
@@ -942,7 +984,7 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
 
     t0 = time.time()
     try:
-        with torch.no_grad():
+        with torch.no_grad(), _sdpa_priority_ctx():
             for i, t in enumerate(ts):
                 if interrupt_check is not None:
                     interrupt_check()  # 取消检查点：抛异常即中断采样
@@ -1032,12 +1074,48 @@ def motion_load(models, ckpt, motion, dtype="auto", offload="auto"):
     return {"model": ad_pipe, "clip": ad_pipe, "vae": ad_pipe}
 
 
+def _sdpa_priority_ctx():
+    """SDPA 注意力后端优先级旋钮（env SDPA_BACKENDS，逗号分隔，如
+    'mem_efficient,math'）：默认空 = PyTorch 自动（flash > mem_efficient > math）。
+    老卡（Pascal）上若实测 mem_efficient 可用且更快，可设 SDPA_BACKENDS 锁定；
+    名字非法/硬件不支持时 sdpa_kernel 会自动回退到列表内可用后端，安全。
+    """
+    spec = os.environ.get("SDPA_BACKENDS", "").strip()
+    if not spec:
+        return contextlib.nullcontext()
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+    table = {"flash": SDPBackend.FLASH_ATTENTION,
+             "mem_efficient": SDPBackend.EFFICIENT_ATTENTION,
+             "math": SDPBackend.MATH,
+             "cudnn": SDPBackend.CUDNN_ATTENTION}
+    bes = [table[s] for s in (x.strip().lower() for x in spec.split(",")) if s in table]
+    if not bes:
+        return contextlib.nullcontext()
+    print(f"[sample] SDPA 后端优先级锁定: {spec}", flush=True)
+    return sdpa_kernel(bes)
+
+
+def _vae_maybe_tile(pipe, image_pixels):
+    """大分辨率 VAE 编/解码切 tiling：分块重叠处理，峰值显存降一个数量级
+    （画质无损，tile 间有重叠混合）。阈值约 1130x1430：普通出图不引入
+    tiling 开销，精修大图（1152x2016 类）必开——8GB 卡上 pipe 常驻时
+    整帧解码的瞬时分配（2GB+ 单块）碎片化后必然 OOM（exec 880）。"""
+    vae = getattr(pipe, "vae", None)
+    if vae is None or not hasattr(vae, "enable_tiling"):
+        return
+    if image_pixels >= 1_300_000:
+        vae.enable_tiling()
+    else:
+        vae.disable_tiling()
+
+
 def vae_decode(pipe, latents):
     """VAE Decode：latent → PIL 图像（batch>1 时为列表）。
     latent 按 VAE 实际 dtype 转换（M3：VAE 可能已独立转 fp32 防黑图，
     而采样链路 latent 保持 fp16）。LatentBundle（带 noise_mask）取 samples
     解码——mask 仅作用于采样。"""
     latents, _mask = resolve_latent(latents)
+    _vae_maybe_tile(pipe, latents.shape[-2] * latents.shape[-1] * 64)
     with torch.no_grad():
         img = pipe.vae.decode(
             latents.to(dtype=pipe.vae.dtype) / pipe.vae.config.scaling_factor,
@@ -1053,6 +1131,7 @@ def vae_encode(pipe, image):
     images = image if isinstance(image, list) else [image]
     tensors = [pipe.image_processor.preprocess(img) for img in images]
     img_t = torch.cat(tensors).to(device=exec_device_of(pipe), dtype=pipe.vae.dtype)
+    _vae_maybe_tile(pipe, img_t.shape[-2] * img_t.shape[-1])
     with torch.no_grad():
         latent = pipe.vae.encode(img_t).latent_dist.sample()
     return {"latent": (latent * pipe.vae.config.scaling_factor).to(torch.float16)}

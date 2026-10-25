@@ -158,6 +158,8 @@ def test_static_constraints():
           and "jobman.find" in src)
     check("/ws 续租用 job 自身 lease（非客户端传入，防伪造）",
           "ws_lease[0] = job.lease" in src)
+    check("/ws 终态任务不再续租（防 lease-release 后被保活复活，exec 860→861 事故）",
+          'job.status not in ("pending", "running")' in src)
 
     html = open(MONITOR, encoding="utf-8").read()
     check("监控页建立 WS 连接", "new WebSocket(" in html and "/ws?token=" in html)
