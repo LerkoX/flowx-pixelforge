@@ -413,6 +413,28 @@ def test_gate_queue_fifo():
     print("[ok] GateQueue FIFO：队首才能获得，后来者不插队")
 
 
+def test_gate_queue_behind_excludes_waiters():
+    """behind()：排在后面的等待者必须被排除在占用判定之外。
+
+    回归场景（exec 1130/1131）：两条流水线几乎同时进入 inference-ensure，
+    都注册了租约并排队。队首的 _gate_busy 把**队列中排在后面的**那条也算
+    作「其它活跃租约」⇒ 队首等它释放、它等队首过闸门，互相等待卡死 30min。
+    修复后队首用 behind() 剔除这些「还没拿到闸门」的等待者。
+    """
+    q = lease.GateQueue(entry_ttl=60)
+    busy = lambda: (True, {"holders": ["x"]})
+    q.acquire("a", busy)          # a 未获闸门，入队队首
+    q.acquire("b", busy)          # b 排队第二
+    # 队首 a 视角：b 排在后面 ⇒ 不构成占用
+    assert q.behind("a") == {"b"}
+    # 队尾 b 视角：没有排在它后面的
+    assert q.behind("b") == set()
+    # 不在队列里的 id 不报错
+    assert q.behind("zzz") == set()
+    assert q.behind(None) == set()
+    print("[ok] GateQueue.behind：队首可排除排在后面的等待者（解死锁）")
+
+
 def test_gate_queue_stale_entry_expires():
     """等待方停止轮询（流水线被杀/取消）超过 entry_ttl ⇒ 排队条目作废。"""
     q = lease.GateQueue(entry_ttl=0.2)
@@ -460,6 +482,7 @@ def main():
     test_leasebook_release()
     test_job_binds_lease()
     test_gate_queue_fifo()
+    test_gate_queue_behind_excludes_waiters()
     test_gate_queue_stale_entry_expires()
     test_gate_queue_without_lease_id()
     print("\n✓ 执行租约 pin 测试全部通过")

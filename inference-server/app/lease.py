@@ -240,6 +240,22 @@ class GateQueue:
                      "waiting_seconds": round(now - e["since"], 1)}
                     for e in self._queue]
 
+    def behind(self, lease_id):
+        """返回排在 lease_id **之后**的等待者 id 集合。
+
+        用于占用判定（busy_fn）：这些执行还没拿到闸门，不可能跑任何任务、
+        不会加载模型，因此不能算作「服务被占用」。否则队首等后面的人释放
+        租约、后面的人等队首过闸门 ⇒ 互相等待死锁（exec 1130/1131 实测：
+        两条流水线同时进入 ensure 后卡死 30 分钟，holders 互为对方）。"""
+        lid = sanitize(lease_id)
+        if lid is None:
+            return set()
+        with self._lock:
+            ids = [e["id"] for e in self._queue]
+        if lid not in ids:
+            return set()
+        return set(ids[ids.index(lid) + 1:])
+
 
 def wait_help(others, waited):
     """租约等待超时的可执行指引（oom_help 风格）。"""

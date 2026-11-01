@@ -864,16 +864,21 @@ def _gate_busy(my_lid):
     active_jobs = [j for j in jobman.list()
                    if j.get("status") in ("pending", "running")]
     busy_job_leases = {j.get("lease") for j in active_jobs} - {None, my_lid}
+    # 排在闸门队列本执行之后的等待者：还没拿到闸门，不可能跑任务/加载模型，
+    # 不算占用。不排除它们就会死锁——队首等后面的人释放租约，而后面的人
+    # 正等队首过闸门（exec 1130/1131 实测：两条流水线互相当 holders，卡 30min）。
+    parked = gate.behind(my_lid) - busy_job_leases
     idle_limit = float(lease.IDLE_RELEASE_SECONDS)
     for e in models.leases.view():  # view() 先清扫 TTL 过期租约
         lid = e["lease"]
-        if lid == my_lid or lid in busy_job_leases:
-            continue  # 自己的 / 有活任务的租约不放
+        if lid == my_lid or lid in busy_job_leases or lid in parked:
+            continue  # 自己的 / 有活任务的 / 在队列后面排队的
         if idle_limit > 0 and e["idle_seconds"] > idle_limit:
             if models.leases.release(lid):
                 print(f"[lease] idle-released '{lid}'（空闲 "
                       f"{e['idle_seconds']:.0f}s 无任务，闸门判定）", flush=True)
-    others = [e for e in models.leases.view() if e["lease"] != my_lid]
+    others = [e for e in models.leases.view()
+              if e["lease"] != my_lid and e["lease"] not in parked]
     other_jobs = [j for j in active_jobs if j.get("lease") != my_lid]
     if not others and not other_jobs:
         return False, {}
