@@ -6263,3 +6263,63 @@ is invalid for input of size 147456`。（768/512/1024/768×1280 全部同样命
 **顺带记录（未处理）**：exec 826 的节点 stdout 流在 01:21 断（metadata
 `Sampler.__stream_truncated=true`），服务端 job 01:58 已完成，Studio 端执行
 永远 running —— 与预览无关，另案。
+
+## 71. 局部重绘流线全链路调试与节点/系统反哺（wf 198，exec 1107-1116，2026-11-01）
+
+一条「蒙版圈定目标区域 → ControlNet 引导重绘」的 SD1.5 流水线（750×1442 竖幅人像，
+目标：仅重绘衣物覆盖区、其余部位保留原图）。连跑 8 次执行迭代出的问题，逐层反哺到
+节点包与运行时。要点如下（措辞统一为中性技术语言）。
+
+### 71.1 节点层反哺
+
+- **flowx_client 超时语义改为「无进展预算」**：原 `wait_job` 的 timeout 是总时长，
+  WS 断线回退轮询时扣减已耗时，剩几百秒就把健康的服务端任务误判超时打断
+  （exec 1107 连炸两次，各耗数小时）。现改为 status/progress 每推进即重置计时，
+  回退轮询给足全额预算；文案从 `timeout (interrupted)` 拆成
+  `stalled: no progress for Xs`（语义与 job 真实状态对齐）。已 sync 到全部节点。
+- **grounding-detect 新增 `negative_box_only`**（v1.2.0）：负类排除原本走
+  GD+SAM 出蒙版再扣除，负类是大目标/易误检词（如肢体部位名）时 SAM 会把整片
+  相连区域圈走、正向蒙版被过度侵蚀。置 1 后负类只按矩形检测框扣除，范围可控。
+- **新增 seg.mask_ops 算子 + mask-ops 节点包**（v1.0.0）：蒙版布尔运算
+  union/subtract/intersect/xor——从正向蒙版中扣除无需处理部位的蒙版成为标准解法。
+- **detail-refine 新增 `bbox` 手动框**（v1.4.0）：检测器认不出已变形目标
+  （越坏越检不到）时的兜底——非空则跳过 YOLO 直接精修指定框。
+- **mask-paint 新增 `mask` 输入**（v1.6.0）：在既有蒙版上增删（brush/rect 增、
+  erase 减），替代「只能新建蒙版」的旧行为。
+- **inpaint 节点 description 标注 checkpoint 前置**：ksampler-inpaint 需要
+  inpaint 专用 9ch UNet + mask_processor，普通 checkpoint 会在服务端失败
+  （「需要 inpaint 管道」）——参数描述与包描述补明。
+
+### 71.2 系统层（flowx 运行时 + Studio CLI）反哺
+
+- **快照 `Param` 允许更新**（runtime_graph.go）：快照是独立执行个体，Param 模板
+  在未运行节点里惰性解析（success 节点早已按旧值终结）。典型场景：服务地址/
+  令牌切换后续跑剩余节点，不必整炉重跑。
+- **执行器条目允许删除「无引用」项**：新增 `executorReferenced()` 检查节点级
+  Executor 与编写态 Config.executor（string / {type,ref}）；被引用仍禁删、已有
+  条目仍禁改。避免节点重写为编写态后物化残留的 docker 条目堵死快照更新。
+- **纯删除节点的关联边不再复活**：原 ModifyGraph 只对「替换节点」（同时
+  RemoveNodes+AddNodes）恢复边，纯删除节点的边会悬空报 `source node not found
+  for preserved edge`，逼出「改写成透传节点」的黑魔法。现纯删除节点的边随之消亡。
+- **续跑计划分三类**（Studio CLI）：跳过（success）/ 重跑（failed/cancelled）/
+  **新增**（快照有但无执行记录）——新增节点此前被误显示成「重跑 0 个」。
+- **`yaml add-node` 新增 `--executor`**：直接写入新节点 config.executor，避免
+  追加节点默认解析到 docker 后报 `cd: /opt/flowx-nodes/...` 的天书错误。
+
+### 71.3 编排经验（并入 skill 纪律）
+
+- **重绘蒙版边界铁律**：要么整裹一个语义部位，要么不碰。蒙版切在部位中间
+  （如一条腿只圈上半段）→ 模型脑补上半段 + 原图保留下半段，拼接处必拧
+  （exec 1115 腿姿不一致的根因）。
+- **target_long_side 按原图定**：原图 800px 时放大到 1536 是「虚假分辨率」，
+  无信息增益却使采样耗时翻倍；取与原图同档（1024）提速 4-5 倍且贴回无缩放损失。
+- **DepthCoreBlur 甜点**：radius 8 漏边缘线、16 过度模糊丢结构、12 折中刚好
+  ——具体数值随图而定，但「漏线→加压模糊→丢结构→回调」的振荡路径值得记入参数描述。
+- **局部重绘提示词纪律**：别写场景化/带动作描述（易画出整体人或错乱结构），
+  用纯部位词或直接复用主管线 conditioning。
+
+### 71.4 部署
+
+节点 4+1 全部 `node import` 并存（旧版不顶掉）；flowx/flowx-studio 两库
+`go build ./...` 通过、相关测试全绿（flowx 有 2 个时序 flaky 用例
+PauseResume/IsModifiable 与本次无关）；Studio 二进制重编安装 + server 重启。
