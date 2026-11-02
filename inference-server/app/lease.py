@@ -196,7 +196,11 @@ class GateQueue:
     def __init__(self, entry_ttl=GATE_ENTRY_TTL):
         self._ttl = float(entry_ttl)
         self._queue = []  # [{"id": lease_id, "seen": 最近轮询, "since": 入队时刻}]
-        self._lock = threading.Lock()
+        # RLock（可重入）而非 Lock：acquire() 在持锁状态下调用 busy_fn，
+        # 而 busy_fn（main._gate_busy）要调 behind() 读队列——非可重入锁会
+        # 同线程自死锁，/leases/acquire 永久阻塞（exec 1138 实测：端点挂死，
+        # ensure 连续 90s 不可达）
+        self._lock = threading.RLock()
 
     def acquire(self, lease_id, busy_fn):
         """FIFO 原子判定。busy_fn() -> (busy: bool, detail: dict)，仅在

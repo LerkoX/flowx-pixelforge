@@ -435,6 +435,28 @@ def test_gate_queue_behind_excludes_waiters():
     print("[ok] GateQueue.behind：队首可排除排在后面的等待者（解死锁）")
 
 
+def test_gate_queue_busy_fn_can_read_queue():
+    """busy_fn 内部读队列不得自死锁（acquire 持锁时回调）。
+
+    回归场景（exec 1138）：_gate_busy 为避免并发死锁需调 gate.behind()，
+    而 acquire() 是「持锁 → 调 busy_fn」。若锁不可重入，同线程二次获取
+    直接挂死，/leases/acquire 永久阻塞、ensure 报「服务不可达」。"""
+    q = lease.GateQueue(entry_ttl=60)
+    seen = {}
+
+    def busy_reading_queue():
+        # 模拟 _gate_busy：判定过程中要读队列（behind / view）
+        seen["behind"] = q.behind("a")
+        seen["view"] = q.view()
+        return (False, {})
+
+    # 若锁不可重入，这里会永久阻塞（测试超时即失败）
+    granted, _ = q.acquire("a", busy_reading_queue)
+    assert granted, "busy_fn 内读队列后应正常授予闸门"
+    assert seen["behind"] == set()
+    print("[ok] GateQueue busy_fn 内可重入读队列（不自死锁）")
+
+
 def test_gate_queue_stale_entry_expires():
     """等待方停止轮询（流水线被杀/取消）超过 entry_ttl ⇒ 排队条目作废。"""
     q = lease.GateQueue(entry_ttl=0.2)
@@ -483,6 +505,7 @@ def main():
     test_job_binds_lease()
     test_gate_queue_fifo()
     test_gate_queue_behind_excludes_waiters()
+    test_gate_queue_busy_fn_can_read_queue()
     test_gate_queue_stale_entry_expires()
     test_gate_queue_without_lease_id()
     print("\n✓ 执行租约 pin 测试全部通过")
