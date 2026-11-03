@@ -17,6 +17,8 @@ import tempfile
 import types
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # tests/（_nodes 助手）
+from _nodes import require  # noqa: E402  (节点仓定位：FLOWX_NODES_DIR 或 ../flowx-pixelforge-nodes)
 
 # app.ops 顶层 import torch + diffusers：本机（Termux）没有，桩掉后仍走真实加载链路
 sys.modules.setdefault("torch", types.ModuleType("torch"))
@@ -33,8 +35,7 @@ from app.object_store import ObjectStore  # noqa: E402
 from app.plugins import check_plugin_source, load_plugin  # noqa: E402
 from app.registry import Registry  # noqa: E402
 
-PLUGIN = os.path.join(os.path.dirname(__file__), "..", "..", "nodes", "_common",
-                      "server_ops", "video_flow.py")
+PLUGIN = str(require() / "_common" / "server_ops" / "video_flow.py")
 
 EXPECTED = {
     "video.load": (

@@ -46,12 +46,13 @@ for _n in ("DDIMScheduler", "DPMSolverMultistepScheduler",
 sys.modules.setdefault("diffusers", _fake_diffusers)
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # tests/（_nodes 助手）
+from _nodes import require  # noqa: E402  (节点仓定位：FLOWX_NODES_DIR 或 ../flowx-pixelforge-nodes)
 
 from app.plugins import check_plugin_source, load_plugin, sha256_of
 from app.registry import Registry
 
-PLUGIN = os.path.join(os.path.dirname(__file__), "..", "..", "nodes",
-                     "flux-sampler", "server_op.py")
+PLUGIN = str(require() / "flux-sampler" / "server_op.py")
 
 EXPECTED = {
     "flux.unet_load": ({"transformer": "STRING", "dtype": "STRING"},

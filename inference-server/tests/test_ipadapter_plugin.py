@@ -23,6 +23,8 @@ for _n in ("DDIMScheduler", "DPMSolverMultistepScheduler",
 sys.modules.setdefault("diffusers", _fake_diffusers)
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # tests/（_nodes 助手）
+from _nodes import require  # noqa: E402  (节点仓定位：FLOWX_NODES_DIR 或 ../flowx-pixelforge-nodes)
 
 from PIL import Image
 
@@ -30,9 +32,7 @@ from app.plugins import check_plugin_source, load_plugin, sha256_of
 from app.registry import Registry
 from app.sniff import list_model_files
 
-PLUGIN = os.path.join(os.path.dirname(__file__), "..", "..", "nodes",
-                     "_common", "server_ops",
-                      "ipadapter.py")
+PLUGIN = str(require() / "_common" / "server_ops" / "ipadapter.py")
 
 EXPECTED = {
     "clip_vision.load": ({"name": "STRING", "dtype": "STRING"},

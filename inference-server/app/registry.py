@@ -4,10 +4,10 @@
 / UPSCALE_MODEL / CLIP_VISION / IPADAPTER / FACE / MESH ——
 以对象仓库 UUID 引用传递（VIDEO 落盘 mp4，仓库内为 {"path", "fps", "num_frames"} 元数据，
 见 app/video.py；CONTROL_NET = ControlNetModel，CONTROL = controlnet.apply 的捆绑产物，见 app/ops.py；
-UPSCALE_MODEL = spandrel 加载的像素放大模型句柄，见 nodes/_common/server_ops/upscale.py；
-CLIP_VISION = CLIP 图像编码器，IPADAPTER = 适配器权重 state dict，见 nodes/_common/server_ops/ipadapter.py；
+UPSCALE_MODEL = spandrel 加载的像素放大模型句柄，见节点仓 flowx-pixelforge-nodes 的 _common/server_ops/upscale.py；
+CLIP_VISION = CLIP 图像编码器，IPADAPTER = 适配器权重 state dict，见节点仓 _common/server_ops/ipadapter.py；
 MESH = 3D 网格文件字节（GLB/OBJ），内存中裸 bytes 持有，meta 记 filename/format，
-下载端点由节点插件经插件契约 v2 register_routes 自注册，见 nodes/tripo-sr/server_op.py）
+下载端点由节点插件经插件契约 v2 register_routes 自注册，见节点仓 tripo-sr/server_op.py）
 字面量类型：INT / FLOAT / STRING / BOOL —— 直接传值
 """
 import json

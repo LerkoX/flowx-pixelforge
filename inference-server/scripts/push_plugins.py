@@ -10,7 +10,7 @@
   python3 scripts/push_plugins.py --base ... --token ... --nodes ksampler vae-decode
   python3 scripts/push_plugins.py --base ... --token ... --list   # 只看会推什么
 
-默认推送 nodes/ 下所有含 server_op.py 的节点包（重复内容自动去重——
+默认推送节点仓（flowx-pixelforge-nodes）下所有含 server_op.py 的节点包（重复内容自动去重——
 flux 家族 9 节点共享同一文件，只推一次）。
 """
 import argparse
@@ -21,8 +21,11 @@ import pathlib
 import sys
 import urllib.request
 
-ROOT = pathlib.Path(__file__).resolve().parent.parent.parent  # flowx-pixelforge/
-NODES = ROOT / "nodes"
+ROOT = pathlib.Path(__file__).resolve().parent.parent  # inference-server/
+# 节点包在独立仓库 flowx-pixelforge-nodes（2026-11 拆分）；默认取与其并列的同级目录，
+# 可用 FLOWX_NODES_DIR 指向任意位置。
+NODES = pathlib.Path(os.environ.get("FLOWX_NODES_DIR")
+                     or ROOT.parent.parent / "flowx-pixelforge-nodes")
 
 
 def post(base, path, payload, tok):

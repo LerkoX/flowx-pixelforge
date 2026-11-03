@@ -12,7 +12,7 @@
   POST /interrupt 取消；视频等分钟级任务走此通道（同步 HTTP 会超时）
 
 新增能力不再动本文件：算子全部由节点包携带 server_op.py 经 POST /admin/plugins
-自注册（见 nodes/*/server_op.py）；本服务只保留引擎/对象仓库/任务体系/模型管理
+自注册（见节点仓 flowx-pixelforge-nodes 的 */server_op.py）；本服务只保留引擎/对象仓库/任务体系/模型管理
 与插件机制本身。
 """
 import gc as _gc  # 别名：与下方 /gc 端点函数名冲突

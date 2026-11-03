@@ -1,6 +1,13 @@
-# flowx-txt2img
+# flowx-pixelforge（推理服务）
 
-FlowX Studio 上的 ComfyUI 风格文生图/图生图方案：真实推理（diffusers）+ 常驻推理服务。
+FlowX Studio 上的 ComfyUI 风格文生图/图生图/视频方案：真实推理（diffusers）+ 常驻推理服务。
+
+> **仓库边界（2026-11 拆分）**：节点包（原 `nodes/`，127 个）已迁到独立仓库
+> [`flowx-pixelforge-nodes`](../flowx-pixelforge-nodes)；`pipeline/` 历史 yaml 已移除。
+> 本仓只保留推理服务本体（`inference-server/`）。节点侧的算子族单一事实源
+> （`_common/server_ops/`）、共享镜像、参数面板 UI 全部在新仓。
+> `docs/dev-log.md` / `docs/dev-plan.md` 是拆分前的历史记录，其中 `nodes/…`、`pipeline/…`
+> 路径指当时的同仓位置，已不再存在于本仓。
 
 ```
 文生图：Checkpoint Loader → CLIP Text Encode(正/反) → Empty Latent → KSampler → VAE Decode → Save Image
@@ -11,7 +18,7 @@ FlowX Studio 上的 ComfyUI 风格文生图/图生图方案：真实推理（dif
 
 ```
 Termux (FlowX Server, 本地 executor)
-  └─ 13 个节点 = Python 瘦客户端（stdlib HTTP，零依赖）
+  └─ 127 个节点 = Python 瘦客户端（stdlib HTTP，零依赖）—— 见节点仓 flowx-pixelforge-nodes
           │ HTTP（节点间只传对象 ID，张量驻留 GPU 内存；分钟级任务走异步 /jobs）
 远程 GPU 机器
   └─ Docker: flowx-inference-server (FastAPI + diffusers)
@@ -26,11 +33,9 @@ Termux (FlowX Server, 本地 executor)
 | 路径 | 说明 |
 | --- | --- |
 | `inference-server/` | 推理服务 = 远程能力运行时（FastAPI + diffusers），含 Dockerfile / docker-compose.yml，部署见 [inference-server/DEPLOY.md](inference-server/DEPLOY.md) |
-| `nodes/` | 13 个 FlowX 节点包：`inference-ensure` / `checkpoint-loader` / `lora-loader` / `clip-text-encode` / `empty-latent` / `load-image` / `vae-encode` / `ksampler` / `vae-decode` / `save-image` / `video-gen`（文/图生视频，异步任务） / `save-video`（mp4 下载） / `inference-op`（通用算子调用） |
-| `pipeline/txt2img.yaml` | 文生图 workflow |
-| `pipeline/i2i.yaml` | 图生图 workflow（LoadImage → VAEEncode → KSampler denoise<1） |
-| `pipeline/video-ti2v.yaml` | 文/图生视频 workflow（Wan TI2V 系，异步 job + 进度卡片） |
-| `pipeline/txt2img-lora.yaml` | 文生图 + LoRA workflow（LoadCheckpoint → LoraLoader → 后续链路） |
+| `../flowx-pixelforge-nodes/` | **独立仓库**：127 个 FlowX 节点包 + 算子族单一事实源（`_common/server_ops/`）+ 共享镜像（`Dockerfile`/`BUNDLE_VERSION`/`check-bundle.py`）+ 节点参数面板 UI（`_common/widget-base.js`） |
+| `docs/dev-log.md`、`docs/dev-plan.md` | 开发日志与规划（历史记录，含拆分前的 `nodes/`、`pipeline/` 路径） |
+| `inference-server/ROADMAP.md`、`UPGRADE-MULTI-ARCH.md`、`DEPLOY.md` | 路线图 / 多架构升级 / 部署运维 |
 
 ## GPU 机器部署
 
@@ -55,19 +60,17 @@ docker compose -f docker-compose.yml -f docker-compose.pascal.yml up -d --build
 ## FlowX 侧操作（本仓库 Termux 环境已完成）
 
 ```bash
-# 节点导入（改代码后重新 import 同名同版本需 --overwrite）
-flowx-studio node import --type folder --path nodes/<name> [--overwrite]
+# 节点导入（节点仓；改代码后重新 import 同名同版本需 --overwrite）
+flowx-studio node import --type folder --path ../flowx-pixelforge-nodes/<name> [--overwrite]
 flowx-studio node mock --id <N>          # 单节点 mock 测试（无需 GPU）
 
-# workflow
-flowx-studio workflow create --name sd-txt2img --file pipeline/txt2img.yaml
+# workflow（`pipeline/` 已移除；流水线在 Studio 画布上维护，或用 workflow list --json 导出 yaml）
 flowx-studio workflow run --id <N> --follow
 # 图像输出在 SaveImage 节点日志/metadata 的 file_path（默认 ~/flowx-output/）
 ```
 
-运行前编辑 `pipeline/txt2img.yaml`（图生图用 `pipeline/i2i.yaml`）的
-`Param.service_url` / `ckpt_name` 指向你的 GPU 机器与模型
-（改 Param 后需 `workflow update --id <N> --file pipeline/txt2img.yaml`）。
+运行前确认流水线节点 Param 的 `service_url` / `ckpt_name` 指向你的 GPU 机器与模型
+（改 Param 后需 `workflow update --id <N> --file <改好的 yaml>`）。
 
 ## 能力运行时（远程 ComfyUI 公共能力层）
 
@@ -90,10 +93,13 @@ FlowX 侧用通用节点 `inference-op` 即可立即使用，无需新增节点�
 
 算子全面插件化（v1.7.0 起）：服务端核心不内置任何算子，全部由节点包携带
 `server_op.py` 经 `POST /admin/plugins` 自注册（hash 幂等，PLUGINS_DIR 持久化）。
-族文件单一事实源在 `nodes/_common/server_ops/`（cond_latent / preprocess /
-ipadapter / instantid / upscale / video_sample 六族），由 `nodes/_tools/sync-common.py`
-分发为成员节点的 `server_op.py`。直接调 `/op` 的验收脚本需先
-`python3 inference-server/scripts/push_plugins.py --base ... --token ...` 预热。
+族文件单一事实源在**节点仓** `flowx-pixelforge-nodes` 的 `_common/server_ops/`
+（cond_latent / preprocess / preprocess_g7 / ipadapter / instantid / upscale / seg /
+tiled / colorize / iclight / vton / matting / face_restore / flux / video_sample /
+video_flow 十六族），由节点仓的 `_tools/sync-common.py` 分发为成员节点的
+`server_op.py`。直接调 `/op` 的验收脚本需先
+`python3 inference-server/scripts/push_plugins.py --base ... --token ...` 预热
+（脚本按 `FLOWX_NODES_DIR` 或并列同级目录 `../flowx-pixelforge-nodes` 定位节点包）。
 
 主要算子族：`sd.*`（SD1.x/SDXL：checkpoint.load/clip.encode/latent.empty/sample/
 vae.*/lora.apply/controlnet.*/embedding.load/motion.load）、`sd3.*`、`flux.*`、
@@ -114,4 +120,4 @@ vae.*/lora.apply/controlnet.*/embedding.load/motion.load）、`sd3.*`、`flux.*`
 
 - 多模型：服务端已内置 LRU 常驻缓存，sd.checkpoint.load 换 ckpt 名即可
 - 多机器：在节点前加一层按 model 名路由的反向代理，节点零改动
-- 新增能力：节点包加 `server_op.py` 自注册（参考 `nodes/detail-refine/`），不动服务端
+- 新增能力：节点包加 `server_op.py` 自注册（参考节点仓的 `detail-refine/`），不动服务端

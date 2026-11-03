@@ -84,7 +84,7 @@ peek 1.5s 窗口检出哨兵则关闭重试。
 ## 5. 文档
 
 - 面向用户的行为变更，请同步更新 `README.md`
-- 节点清单与元数据变更请同步更新 `nodes/BUNDLE_VERSION`
+- 节点清单与元数据变更请同步更新节点仓 `flowx-pixelforge-nodes` 的 `BUNDLE_VERSION`
 - 有意义的变更请追加到 `docs/dev-log.md`
 
 ## 6. 报告 Bug

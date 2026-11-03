@@ -43,6 +43,9 @@ OUT_DIR = os.environ.get("OUT_DIR", os.path.join(os.path.dirname(__file__),
                                                  "accept-m6-out"))
 BASELINE_T1 = os.path.join(os.path.dirname(__file__),
                            "accept-m2-out", "t4_euler_normal.png")
+# 节点包在独立仓库 flowx-pixelforge-nodes（2026-11 拆分）
+NODES = os.environ.get("FLOWX_NODES_DIR") or os.path.join(
+    os.path.dirname(__file__), "..", "..", "..", "flowx-pixelforge-nodes")
 STEPS = 20
 SEED = 424242
 PROMPT = "a cat sitting on a windowsill, warm sunset light, high quality"
@@ -230,8 +233,8 @@ def main():
     if spec.get("plugin_file") != "zz_accept_fake_canny.py":
         failures.append(f"t5: 归属未转移 {spec.get('plugin_file')}")
     # force 传回真身恢复
-    with open(os.path.join(os.path.dirname(__file__), "..", "..", "nodes",
-                           "_common", "server_ops", "preprocess.py"), encoding="utf-8") as f:
+    with open(os.path.join(NODES, "_common", "server_ops", "preprocess.py"),
+              encoding="utf-8") as f:
         real_src = f.read()
     code, body = upload_plugin("preprocess_canny.py", real_src, force=True)
     if code != 200 or "preprocess.canny" not in body.get("took_over", []):

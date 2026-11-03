@@ -20,6 +20,8 @@ import time
 import types
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # tests/（_nodes 助手）
+from _nodes import require  # noqa: E402  (节点仓定位：FLOWX_NODES_DIR 或 ../flowx-pixelforge-nodes)
 
 from test_vram_governance import install_stubs  # noqa: E402  (torch stub 先行)
 
@@ -33,7 +35,7 @@ from app import ops as core_ops  # noqa: E402
 from app.plugins import load_plugin  # noqa: E402
 from app.registry import Registry  # noqa: E402
 
-NODES = os.path.join(os.path.dirname(__file__), "..", "..", "nodes")
+NODES = str(require())
 
 
 # ---------------------------------------------------------------------------
