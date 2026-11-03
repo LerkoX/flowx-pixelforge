@@ -44,6 +44,20 @@ case "$1" in
         --local-dir '/models/$DIR'
     "
     ;;
+  zero123)
+    # Stable Zero123 单图新视角合成（zero123 节点，novelview.zero123 算子）。
+    # ashawkey/stable-zero123-diffusers 是公开 diffusers 目录（含自带 pipeline 代码
+    # clip_camera_projection/zero123.py——diffusers 主包已移除 StableZero123Pipeline）。
+    # 完整下载（含 .py/.json/.safetensors，不能只用 *.fp16 过滤器）。
+    REPO="ashawkey/stable-zero123-diffusers"
+    DIR="stable-zero123"
+    echo ">> [hf-mirror] $REPO -> $TARGET/$DIR (完整 diffusers 目录)"
+    docker run --rm -v "$TARGET":/models python:3.11-slim sh -c "
+      pip install -q huggingface_hub &&
+      HF_ENDPOINT=https://hf-mirror.com hf download '$REPO' \
+        --local-dir '/models/$DIR'
+    "
+    ;;
   sdxl)
     # 官方 SDXL base 1.0：ModelScope 镜像同时含单文件权重与 diffusers 目录结构。
     # 单文件落在 models/ 顶层（供 checkpoint.load + from_single_file，社区模型
