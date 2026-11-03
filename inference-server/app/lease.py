@@ -77,6 +77,12 @@ class LeaseBook:
         self._ttl = float(ttl)
         self._leases = {}
         self._lock = threading.Lock()
+        # 活跃任务判定回调 fn(lease_id) -> bool（装配层注入 jobs.active_leases）。
+        # 为空时退化为"只看空闲时长"——生产环境必须注入：没有它就无法区分
+        # "流水线结束了" 与 "长算子正在跑但没有进度心跳"（VAE 解码/CN 加载
+        # 动辄 200~300s 没有 progress），盲放会误杀在跑的执行（job 心跳
+        # 检测到租约消失 ⇒ 任务自杀）。
+        self.job_active = None
 
     def touch(self, lease_id, keys=()):
         """租约活动：刷新活跃时间（滑动过期），并把 keys 归入该租约名下。"""
@@ -116,8 +122,34 @@ class LeaseBook:
                 e["keys"].difference_update(keys)
 
     def _sweep_locked(self, now):
+        """清扫租约：TTL 过期 + **空闲自动释放**（R3）。
+
+        空闲释放为什么必须在这里（exec 1188 实测事故）：原实现只在闸门判定
+        `_gate_busy()` 里做 idle 释放，于是——执行结束后若没有下一条流水线调
+        `/leases/acquire`，租约就一直挂到 TTL（1800s）。期间
+        `POST /model/unload` 与加载淘汰路径看到的都是"被其它活跃租约持有"，
+        逐个 skipped，**连手动 unload 都清不掉**（逐条 \"被其它活跃租约持有：
+        1188\"），显存里的 ControlNet/SAM 只能靠重启容器释放。
+
+        R3 语义：无活跃任务（job_active 回调）+ 超过 IDLE_RELEASE_SECONDS
+        无活动 ⇒ 摘除登记（不卸模型，模型由随后的淘汰/unload 自行回收）。
+        回调只读 jobs 的活跃租约快照（无锁），避免 lease 锁 ⇄ jobman 锁嵌套。
+        """
         expired = [l for l, e in self._leases.items()
                    if now - e["seen"] > self._ttl]
+        limit = float(IDLE_RELEASE_SECONDS)
+        # 未注入活任务回调时**保守不释放**（旧 TTL 语义）：没能力区分「流水线
+        # 结束了」与「长算子没心跳但在跑」，盲放会把正在跑的任务杀掉。
+        if limit > 0 and self.job_active is not None:
+            for l, e in self._leases.items():
+                if now - e["seen"] <= limit or l in expired:
+                    continue
+                try:
+                    if self.job_active(l):
+                        continue  # 有 pending/running 任务：长算子不算空闲
+                except Exception:
+                    continue  # 回调故障时保守保留（宁可不释放）
+                expired.append(l)
         for l in expired:
             del self._leases[l]
         return expired

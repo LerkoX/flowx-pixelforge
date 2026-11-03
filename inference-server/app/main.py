@@ -695,6 +695,12 @@ def _execute_job(kind, payload):
 jobman = JobManager(_execute_job,
                     lease_touch=lambda lid: models.leases.touch_existing(lid))
 
+# 空闲租约自动释放（R3）的“是否有活任务”回调：下沉到 LeaseBook._sweep_locked，
+# 让 /model/unload、加载淘汰、闸门判定**所有**路径都能释放僵尸租约。
+# 只在闸门判定里做（旧实现）会让执行结束后残留的租约卡住 unload 到 TTL 1800s
+# （exec 1188 实测：执行结束 1003s 后手动 unload 仍逐条 skipped）。
+models.leases.job_active = jobman.active_leases
+
 # 指标历史采样：服务端后台线程（2s/帧，环形缓冲 6h），监控页图表数据源；
 # 依赖在此装配（对象仓库统计 + 任务队列 + 模型盘占用）
 metrics_history.start(store=store, jobman=jobman,

@@ -150,6 +150,27 @@ class JobManager:
             raise KeyError(f"job '{job_id}' not found")
         return job.view()
 
+    def active_leases(self):
+        """有 pending/running 任务的租约集合快照（**无锁读**）。
+
+        供给 lease.LeaseBook.job_active 回调（R3 空闲释放）：那条路径在
+        LeaseBook 锁内被调用，若这里再拿 self._lock 就是两把锁嵌套——而
+        worker/set_progress 是 jobman 锁 → lease 锁（touch_lease），反方向
+        嵌套必死锁。因此本方法只做无锁快照：dict 并发扩容时 list() 可能
+        报 RuntimeError，重试一次即可（快照用途，丢掉一帧不影响正确性——
+        漏判只会让租约多活一轮 sweep）。
+        """
+        for _ in range(2):
+            try:
+                jobs = list(self._jobs.values())
+                break
+            except RuntimeError:  # dict changed size during iteration
+                continue
+        else:
+            return set()
+        return {j.lease for j in jobs
+                if j.lease and j.status in ("pending", "running")}
+
     def find(self, job_id):
         """返回 Job 对象本身（/ws 续租等内部用途，需要读 job.lease）；
         不存在返回 None。外部视图用 get()。"""

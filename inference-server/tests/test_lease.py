@@ -345,6 +345,53 @@ def test_leasebook_release():
     print("[ok] LeaseBook.release 显式摘除/幂等/非法拒绝")
 
 
+def test_leasebook_idle_release():
+    """空闲自动释放（R3）：下沉到 _sweep_locked，让 unload/淘汰/闸门全部路径生效。
+
+    事故背景（exec 1188）：执行结束后 1003s，手动 POST /model/unload 仍逐条
+    "被其它活跃租约持有" skipped —— 旧实现只在 _gate_busy 里做 idle 释放，
+    没有下一条流水线调 /leases/acquire 就永远不释放，只能等 TTL 1800s 或重启容器。
+    """
+    old_idle = lease.IDLE_RELEASE_SECONDS
+    try:
+        lease.IDLE_RELEASE_SECONDS = 0.2
+        book = lease.LeaseBook(ttl=60)
+
+        # 1) 有活任务 ⇒ 不清（长算子没有进度心跳也不能误杀）
+        book.touch("busy", ["k1"])
+        book.job_active = lambda lid: lid in {"busy"}
+        time.sleep(0.25)
+        assert book.keys_of_others(None) == {"k1"}, "有活任务的租约被误杀"
+
+        # 2) 无活任务 ⇒ 空闲超阈值即摘（哪怕 TTL 60s 远未到）
+        book.job_active = lambda lid: False
+        assert book.keys_of_others(None) == set()
+        assert book.view() == []
+
+        # 3) 回调抛异常 ⇒ 保守保留（宁可不释放）
+        book.touch("z", ["k2"])
+        book.job_active = lambda lid: (_ for _ in ()).throw(RuntimeError("boom"))
+        time.sleep(0.25)
+        assert book.keys_of_others(None) == {"k2"}, "回调故障时不应释放"
+
+        # 4) 未注入回调（纯 TTL 语义，单测/离线场景）⇒ 不按空闲释放
+        book2 = lease.LeaseBook(ttl=60)
+        book2.touch("a", ["k3"])
+        time.sleep(0.25)
+        assert book2.keys_of_others(None) == {"k3"}
+
+        # 5) 旋钮为 0 ⇒ 关闭空闲释放
+        lease.IDLE_RELEASE_SECONDS = 0
+        book3 = lease.LeaseBook(ttl=60)
+        book3.touch("b", ["k4"])
+        book3.job_active = lambda lid: False
+        time.sleep(0.25)
+        assert book3.keys_of_others(None) == {"k4"}
+    finally:
+        lease.IDLE_RELEASE_SECONDS = old_idle
+    print("[ok] LeaseBook 空闲自动释放（活任务/回调故障/未注入/旋钮=0 均不误杀）")
+
+
 def test_job_binds_lease():
     seen = {}
 
@@ -502,6 +549,7 @@ def main():
     test_no_wait_without_leases()
     test_unload_detail_skipped_reasons()
     test_leasebook_release()
+    test_leasebook_idle_release()
     test_job_binds_lease()
     test_gate_queue_fifo()
     test_gate_queue_behind_excludes_waiters()
