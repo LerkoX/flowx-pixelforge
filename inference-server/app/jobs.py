@@ -150,6 +150,16 @@ class JobManager:
             raise KeyError(f"job '{job_id}' not found")
         return job.view()
 
+    def is_lease_active(self, lease_id) -> bool:
+        """该租约名下是否还有 pending/running 任务（lease.LeaseBook.job_active 回调）。
+
+        注意签名：LeaseBook 的回调约定是 fn(lease_id) -> bool。曾直接挂
+        `jobman.active_leases`（无参、返回集合），调用时 TypeError 被 sweep 的
+        `except Exception: continue` 静默吞掉 ⇒ 空闲自动释放整条链路形同虚设，
+        表现为「执行结束 900s 后租约仍挡着 /model/unload」（exec 1194~1207 实测）。
+        """
+        return lease_id in self.active_leases()
+
     def active_leases(self):
         """有 pending/running 任务的租约集合快照（**无锁读**）。
 

@@ -145,10 +145,17 @@ class LeaseBook:
                 if now - e["seen"] <= limit or l in expired:
                     continue
                 try:
-                    if self.job_active(l):
-                        continue  # 有 pending/running 任务：长算子不算空闲
-                except Exception:
-                    continue  # 回调故障时保守保留（宁可不释放）
+                    busy = bool(self.job_active(l))
+                except Exception as e:  # noqa: BLE001
+                    # 静默 continue 会让「回调坏了」表现成「租约永不释放」，排障时
+                    # 完全看不出线索（exec 1194~1207 实测踩过这一条）。宁可刷一行日志。
+                    print(f"[lease] job_active({l}) 回调异常，保守保留: {e}",
+                          flush=True)
+                    continue
+                if busy:
+                    continue  # 有 pending/running 任务：长算子不算空闲
+                print(f"[lease] idle-released '{l}'（空闲 {now - e['seen']:.0f}s"
+                      f" 且无活跃任务）", flush=True)
                 expired.append(l)
         for l in expired:
             del self._leases[l]

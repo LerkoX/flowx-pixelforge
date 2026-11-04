@@ -699,7 +699,7 @@ jobman = JobManager(_execute_job,
 # 让 /model/unload、加载淘汰、闸门判定**所有**路径都能释放僵尸租约。
 # 只在闸门判定里做（旧实现）会让执行结束后残留的租约卡住 unload 到 TTL 1800s
 # （exec 1188 实测：执行结束 1003s 后手动 unload 仍逐条 skipped）。
-models.leases.job_active = jobman.active_leases
+models.leases.job_active = jobman.is_lease_active
 
 # 指标历史采样：服务端后台线程（2s/帧，环形缓冲 6h），监控页图表数据源；
 # 依赖在此装配（对象仓库统计 + 任务队列 + 模型盘占用）
@@ -927,6 +927,9 @@ def list_leases():
     """执行租约观测（dev-plan §43.2）：活跃租约及其持有的常驻条目/空闲时长。
     gate_queue：FIFO 闸门等待队列（队首在前）。"""
     return {"leases": models.leases.view(),
+            # 诊断：空闲自动释放是否装上了「是否有活任务」回调（None 时退化为纯 TTL 语义）
+            "job_active_hook": models.leases.job_active is not None,
+            "active_job_leases": sorted(jobman.active_leases()),
             "gate_queue": gate.view(),
             "lease_ttl_seconds": lease.LEASE_TTL,
             "lease_wait_timeout_seconds": lease.LEASE_WAIT_TIMEOUT,
