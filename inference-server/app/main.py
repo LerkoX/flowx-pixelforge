@@ -81,8 +81,10 @@ store = ObjectStore(ttl_seconds=int(os.environ.get("OBJECT_TTL_SECONDS", "3600")
                     # 上一轮流水线留下的 model/clip/vae 视图能把 7.4GB 常驻条目
                     # 钉一整天（exec 795：靠人工 model.unload 才松开）。
                     lease_alive=lambda lid: models.leases.is_active(lid),
+                    # 300s：配合 _auto_reclaim 后台线程，执行结束后 ~5 分钟即归还显存。
+                    # 太短会削掉"续跑窗口"（execution continue 依赖 success 节点的输出对象）。
                     orphan_ttl_seconds=int(os.environ.get(
-                        "OBJECT_TTL_ORPHAN_SECONDS", "1800")))
+                        "OBJECT_TTL_ORPHAN_SECONDS", "300")))
 # 模型淘汰联动：LRU 顶掉的管道仍被对象仓库的 model/clip/vae 视图钉住，
 # 必须在 evict 时按对象身份断开引用（先断引用后 GC，见 ModelManager._evict_if_needed）
 models.on_evict = lambda pipe: store.discard_where(lambda d: d is pipe)
@@ -700,6 +702,42 @@ jobman = JobManager(_execute_job,
 # 只在闸门判定里做（旧实现）会让执行结束后残留的租约卡住 unload 到 TTL 1800s
 # （exec 1188 实测：执行结束 1003s 后手动 unload 仍逐条 skipped）。
 models.leases.job_active = jobman.is_lease_active
+
+def _auto_reclaim():
+    """空闲自动回收（后台线程，60s 一次）：无活跃任务/租约时回收孤儿对象并归还显存。
+
+    为什么需要（exec 1194~1216 实测）：孤儿对象（带租约、租约已结束）只会在
+    `ObjectStore.put()` 顺带清扫时回收 —— 流水线跑完若没有新对象写入，它们就一直
+    钉着管道组件与中间张量：unload 后 allocated 仍有 3100MB、reserved 3108MB，
+    `del pipe + empty_cache` 收不回（对象仓库还持有引用）。连续几轮后 free 到
+    628MB ⇒ 下一轮 VAEEncode 直接 `CUDA driver error: out of memory`，只能重启容器。
+    手动 POST /gc 能立刻归零（reserved 99MB），说明**不是真碎片，是没回收的对象**。
+
+    安全边界：有 running/pending 任务或任何活跃租约时**完全不动**（正在跑的执行
+    还需要它的对象）；孤儿判定本身也依赖 lease_alive，双保险。
+    """
+    while True:
+        time.sleep(60)
+        try:
+            if jobman.active_leases() or models.leases.view():
+                continue
+            n = store.sweep()
+            if not n:
+                continue
+            engine.clear_cache()
+            _gc.collect()
+            torch.cuda.empty_cache()
+            occ = models.occupancy()
+            print(f"[auto-reclaim] 回收 {n} 个孤儿对象 → reserved "
+                  f"{(occ.get('reserved_bytes') or 0) / 1024**2:.0f}MB / "
+                  f"driver_free {(occ.get('driver_free_bytes') or 0) / 1024**2:.0f}MB",
+                  flush=True)
+        except Exception as e:  # noqa: BLE001 - 后台线程绝不能因单次异常退出
+            print(f"[auto-reclaim] 跳过一轮: {e}", flush=True)
+
+
+threading.Thread(target=_auto_reclaim, daemon=True, name="auto-reclaim").start()
+
 
 # 指标历史采样：服务端后台线程（2s/帧，环形缓冲 6h），监控页图表数据源；
 # 依赖在此装配（对象仓库统计 + 任务队列 + 模型盘占用）

@@ -116,6 +116,16 @@ class ObjectStore:
             return [v.get("data") for v in self._items.values()
                     if v.get("lease") == lease_id]
 
+    def sweep(self) -> int:
+        """公开的过期/孤儿清扫（后台自动回收线程调用）。
+
+        与 `put()` 里顺带调的 `_sweep()` 同一实现；单独暴露是因为**没有新对象写入时
+        孤儿永远不会被回收**（实测 exec 1194~1216：连续跑几轮后，42 个孤儿对象钉着
+        3.1GB 显存，unload 后 allocated 仍 3100MB、free 只剩 628MB ⇒ VAEEncode OOM，
+        只能重启容器）。返回回收条数。
+        """
+        return self._sweep()
+
     def clear(self) -> int:
         with self._lock:
             n = len(self._items)
