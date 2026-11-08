@@ -14,7 +14,8 @@ import json
 
 OBJ_TYPES = ("MODEL", "CLIP", "VAE", "COND", "LATENT", "IMAGE", "VIDEO",
              "CONTROL_NET", "CONTROL", "UPSCALE_MODEL", "CLIP_VISION",
-             "IPADAPTER", "FACE", "MESH")
+             "IPADAPTER", "FACE", "MESH", "TRANSFORMER", "TEXT_ENCODER",
+             "AUDIO")
 LIT_TYPES = ("INT", "FLOAT", "STRING", "BOOL")
 
 
