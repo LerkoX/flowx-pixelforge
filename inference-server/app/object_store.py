@@ -40,7 +40,16 @@ class ObjectStore:
             path = os.path.join(self._video_dir, oid + ".mp4")
             if isinstance(data, dict) and "frames" not in data and data.get("path"):
                 data = self._adopt_video_file(data, path)
+            elif isinstance(data, dict) and data.get("audio") is not None:
+                # 带音轨契约（minimax.h3.gen 产出）：新签名 encode_mp4，
+                # PCM16 临时 wav + ffmpeg mux AAC 落盘。
+                data = self._video_encoder(
+                    data["frames"], data.get("fps", 24), path,
+                    audio=data.get("audio"),
+                    sample_rate=data.get("sample_rate"))
             else:
+                # 无声契约（video.sample 等）：旧 3 参签名，
+                # 外部注入的 encoder（测试 fake 等）零影响。
                 data = self._video_encoder(data["frames"], data.get("fps", 24), path)
         with self._lock:
             self._items[oid] = {

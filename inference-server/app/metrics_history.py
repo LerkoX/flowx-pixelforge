@@ -135,6 +135,7 @@ def _sample(now=None):
                 "swap_pct": s.get("swap_percent"),
                 "swap_used_mb": s.get("swap_used_mb"),
                 "proc_rss_mb": s.get("proc_rss_mb"),
+                "env_label": s.get("env_label"),
             })
             if s.get("disks"):
                 d = s["disks"][0]

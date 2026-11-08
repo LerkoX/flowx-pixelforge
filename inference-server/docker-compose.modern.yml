@@ -1,0 +1,24 @@
+# modern 栈 compose override（20/30/40/50 系）
+#
+# 用法：
+#   docker compose -f docker-compose.yml -f docker-compose.modern.yml up -d
+#   或直接用预构建镜像（无需 build）：
+#   docker compose -f docker-compose.modern.yml up -d
+#
+# 与 pascal override 的分工见 Dockerfile.modern 顶部注释：CUDA 13 移除 Pascal/Volta，
+# 10 系与 V100 必须用 docker-compose.pascal.yml。
+#
+# 一键安装请优先用 install.sh（自动探卡选栈、生成令牌、灌显存参数、跑健康验收）。
+services:
+  inference:
+    image: lerkobba/flowx-inference:m-2.13.0-cu132
+    build:
+      context: .
+      dockerfile: Dockerfile.modern
+    container_name: flowx-inference-server-modern
+    environment:
+      # modern 栈的卡显存普遍 >= 12GB，且淘汰已是显存预算式，条目数只作兜底
+      MAX_RESIDENT_MODELS: "2"
+      # 40/50 系可用 bf16；fp8 需原生 sm_89 kernel，本镜像 arch 只到 sm_86/sm_120，
+      # 因此 fp8 在 40 系上不可用（见 Dockerfile.modern 注释）
+      OFFLOAD_MODE: "none"

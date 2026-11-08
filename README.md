@@ -32,26 +32,35 @@ Termux (FlowX Server, 本地 executor)
 
 | 路径 | 说明 |
 | --- | --- |
-| `inference-server/` | 推理服务 = 远程能力运行时（FastAPI + diffusers），含 Dockerfile / docker-compose.yml，部署见 [inference-server/DEPLOY.md](inference-server/DEPLOY.md) |
+| `inference-server/` | 推理服务 = 远程能力运行时（FastAPI + diffusers），含 `install.sh` 一键安装、两个栈的 Dockerfile/compose，部署见 [inference-server/DEPLOY.md](inference-server/DEPLOY.md) |
 | `../flowx-pixelforge-nodes/` | **独立仓库**：127 个 FlowX 节点包 + 算子族单一事实源（`_common/server_ops/`）+ 共享镜像（`Dockerfile`/`BUNDLE_VERSION`/`check-bundle.py`）+ 节点参数面板 UI（`_common/widget-base.js`） |
 | `docs/dev-log.md`、`docs/dev-plan.md` | 开发日志与规划（历史记录，含拆分前的 `nodes/`、`pipeline/` 路径） |
 | `inference-server/ROADMAP.md`、`UPGRADE-MULTI-ARCH.md`、`DEPLOY.md` | 路线图 / 多架构升级 / 部署运维 |
 
-## GPU 机器部署
+## GPU 机器部署（一键，支持 10/20/30/40/50 全系）
 
 ```bash
 cd inference-server
-mkdir -p models loras && cp /path/to/v1-5-pruned-emaonly.safetensors models/
-# LoRA 文件放 loras/（可选），在 workflow 里用 lora_name 引用
-# 可选：编辑 docker-compose.yml 设置 INFERENCE_TOKEN
-docker compose up -d --build
-curl http://127.0.0.1:8100/health   # 确认 status=ok, cuda_available=true
+bash install.sh --dry-run    # 先看判定：检测到什么卡 → 选哪个栈 → 将执行什么
+bash install.sh              # 容器模式；GPU 在别的机器加 --docker-host tcp://<host>:2375
+sudo bash install.sh --mode native   # 裸机模式（micromamba + systemd，不动系统 python）
 ```
 
-Pascal 显卡（GTX 10xx / Tesla P 系列）改用兼容镜像（见 DEPLOY.md 2.1 节）：
+脚本按 **compute capability + 驱动版本**自动分栈（CUDA 13 已移除 Pascal/Volta，
+故 10 系走旧栈、20~50 系走 modern 栈），起服务后跑 `/health` 断言装对了栈：
+
+| 栈 | 显卡 | torch / CUDA / Python | 最低驱动 |
+| --- | --- | --- | --- |
+| P | 10 系、P4/P40/P100、V100 | 2.3.1 / 12.1 / 3.10 | ≥530 |
+| M | 20/30/40/50 系、T4、A100、H100 | 2.13.0 / 13.2 / 3.12 | ≥580 |
+
+手动 compose 部署（等价路径）仍可用：
 
 ```bash
+# P 栈（10 系）
 docker compose -f docker-compose.yml -f docker-compose.pascal.yml up -d --build
+# M 栈（20/30/40/50 系）
+docker compose -f docker-compose.modern.yml up -d
 ```
 
 前置要求：NVIDIA 驱动 + nvidia-container-toolkit；防火墙开放 8100 端口（或走 SSH tunnel：

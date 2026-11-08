@@ -1,9 +1,40 @@
 # 多架构（多代显卡）支持方案
 
-> 状态：**已定稿**（2026-10-18 起草；同日用户确认五项决议，见 §十）
-> 范围：含 fp8（阶段 4 为本次范围内，非可选）
-> 本文件只回答一个问题：如何让**一份代码**同时支持 10/20/30/40/50 系显卡，并让 20/30/40/50 吃到各自的精度优势。
-> 相关文档：`ROADMAP.md`（阶段与不做清单）、`DEPLOY.md`（部署运维）、`../docs/dev-plan.md`（待办/已关闭）。
+> 状态：**已实施（2026-11）**——本文档正文是 2026-10 的规划稿；**落地版本与结论以下面
+> `实施记录` 为准**（规划里的 torch 2.7/cu128、diffusers 0.41 已被用户指定的更新组合替代）。
+>
+> ## 实施记录（2026-11，实测）
+>
+> | 项 | 规划值（2026-10） | **实际落地值** |
+> | --- | --- | --- |
+> | modern 基础镜像 | `pytorch/pytorch:2.7.x-cuda12.8` | **`pytorch/pytorch:2.13.0-cuda13.2-cudnn9-runtime`** |
+> | modern Python | 3.12 | **3.12.3**（镜像自带，Ubuntu 24.04） |
+> | modern torch | 2.7.x（cu128） | **2.13.0+cu132** |
+> | CUDA / cuDNN | 12.8 / 9 | **13.2 / 9.20** |
+> | modern diffusers | 0.41.0 | **0.42.1**（实测依赖：`huggingface-hub>=1.32,<3.0`、`safetensors>=0.8`） |
+> | modern transformers | 4.5x | **5.22.2**（代次跳跃，已实测 SD 管道跑通） |
+> | pascal 栈 | py3.10 / torch 2.3.1 / cu12.1 | **不变**（10 系唯一可行栈） |
+> | 驱动门槛 | 未定 | **modern ≥580（cu13.x）、pascal ≥530（cu12.1）、cu11.8 ≥450** |
+>
+> **实测 `torch.cuda.get_arch_list()`（modern）= `['sm_75','sm_80','sm_86','sm_90','sm_100','sm_120']`**
+>
+> 由此修正本文两处规划结论：
+>
+> 1. **40 系拿不到 fp8**（原 §4.3 计划让 40 系吃 fp8）：arch 列表里**没有 `sm_89`**，
+>    40 系是靠 `sm_86` cubin 的 minor 版本兼容运行的，不会生成 fp8 kernel。
+>    要 fp8 必须换 cu128 变体（其 arch 含 sm_89）或自编译 torch —— 本次不做。
+> 2. **50 系（sm_120）只有 CUDA 13 支持**，因此 modern 栈必须是 cu13.2，这同时意味着
+>    **Pascal/Volta 永远回不到 modern 栈**（CUDA 13 release notes 明确移除 pre-Turing）。
+>    两栈并存不再是「过渡方案」，而是**长期结构**。
+>
+> 已落地的产物：
+> - `Dockerfile.modern` / `requirements-modern.txt` / `docker-compose.modern.yml`
+> - `install.sh`（一键安装，docker + native 双模式，自动探卡选栈并做 /health 验收）
+> - `scripts/detect.sh`（栈决策，带 `tests/test-detect.sh` 门禁：覆盖 10~50 系 + 驱动边界）
+> - 镜像：`lerkobba/flowx-inference:m-2.13.0-cu132`（modern）、`:p-2.3.1-cu121`（pascal）
+>
+> 仍未做：`app/model_manager.py` 的 `dtype=auto` 按算力分档（§4.2）与 `enable_gqa` shim
+> 门控（§4.1）——这两项是 modern 栈跑 FLUX 系列算子的前置条件，待 40/50 系真机回归时一并处理。
 
 > **仓库边界（2026-11 拆分）**：节点包（`nodes/`）已迁到独立仓库
 > [`flowx-pixelforge-nodes`](../flowx-pixelforge-nodes)；本仓只保留推理服务

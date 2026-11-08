@@ -1,0 +1,69 @@
+# inference-server — modern 镜像（20/30/40/50 系，sm_75 ~ sm_120）
+#
+# 与 Dockerfile.pascal 的分工（为什么必须两套）：
+#   CUDA 13.x release notes：「Dropped support for pre-Turing architectures
+#   (Maxwell, Volta, and Pascal)」——sm_60/61/70 在 CUDA 13 上完全无 kernel。
+#   所以 10 系与 V100 只能走 pascal 镜像（py3.10 + torch 2.3.1 + CUDA 12.1），
+#   而 50 系（sm_120）只存在于 CUDA 13 —— 两者无法用一份依赖清单覆盖。
+#
+# 基础镜像实测（2026-11 取证）：
+#   python 3.12.3 / torch 2.13.0+cu132 / CUDA 13.2 / cuDNN 9.20 / Ubuntu 24.04
+#   torch.cuda.get_arch_list() = ['sm_75','sm_80','sm_86','sm_90','sm_100','sm_120']
+#   · 无 sm_89：40 系（Ada）靠 sm_86 cubin 的 minor 兼容运行 ⇒ 本栈拿不到 fp8
+#   · 无 sm_60/61/70：Pascal/Volta 不可用（见上）
+FROM pytorch/pytorch:2.13.0-cuda13.2-cudnn9-runtime
+
+WORKDIR /app
+
+COPY requirements-modern.txt .
+# 坑 1：Ubuntu 24.04 的 python 标记为 externally-managed（PEP 668），
+#       基础镜像的 torch 装在 /usr/local，但 pip 默认拒绝安装 ⇒ 必须 --break-system-packages。
+# 坑 2（构建期即暴露，不留给运行时）：controlnet_aux / insightface 会拉入非 headless 的
+#       opencv-python，它覆盖同名 cv2/ 目录并链接 libGL/libxcb/glib —— 容器没有这些库，
+#       import cv2 直接崩（实测：ImportError: libxcb.so.1）。故装完依赖后卸载
+#       opencv-python 并 **强制重装** headless（卸载会连带删掉共享的 cv2 文件，
+#       所以必须 --force-reinstall，且 --no-deps 防它把 numpy 顶到别的版本）。
+RUN pip install --break-system-packages --no-cache-dir -r requirements-modern.txt \
+ && pip uninstall --break-system-packages -y opencv-python \
+ && pip install --break-system-packages --no-cache-dir --force-reinstall --no-deps \
+      opencv-python-headless==5.0.0.93
+
+# 构建期 import 冒烟门禁：依赖破损在构建期炸，不放进运行时。
+# 负例自检：删掉上面的 opencv 修正块后，本 RUN 必须以 libxcb.so.1 报错失败。
+RUN python -c "import importlib, torch, cv2, diffusers, transformers, huggingface_hub, timm, kornia, einops; \
+mods=['spandrel','controlnet_aux','insightface','onnxruntime','gguf','sentencepiece','peft','ultralytics','skimage','trimesh']; \
+bad=[]; \
+[bad.append(m) for m in mods if not importlib.util.find_spec(m)]; \
+print('deps smoke ok:', torch.__version__, '| cuda', torch.version.cuda, '| cv2', cv2.__version__, '| diffusers', diffusers.__version__, '| transformers', transformers.__version__); \
+assert not bad, f'缺少依赖: {bad}'"
+
+# 构建期 arch 断言门禁（关键）：
+#   1) 必须覆盖 20/30/40/50 系（sm_75/80/86/90/120）——缺任一代 ⇒ 该代卡 no kernel image
+#   2) 不允许出现 sm_60/61/70 —— 出现说明基础镜像被换成 CUDA 12 版本，
+#      与 requirements-modern（torch 2.13）不匹配，两栈语义就混了
+# 负例自检：把 FROM 换回 cuda12.1 基础镜像，本 RUN 必须因「意外包含 pre-Turing 架构」失败。
+RUN python -c "import torch; a=torch.cuda.get_arch_list(); \
+need=('sm_75','sm_80','sm_86','sm_90','sm_120'); \
+miss=[x for x in need if x not in a]; \
+old=[x for x in a if x in ('sm_50','sm_60','sm_61','sm_70')]; \
+print('archs:', a); \
+assert not miss, f'缺少算力支持: {miss}'; \
+assert not old, f'意外包含 pre-Turing 架构: {old}（基础镜像选错？）'"
+
+# ---- TripoSR（单图 3D 重建，MIT；算子在节点包 tripo-sr/server_op.py 自注册）----
+# 与 pascal 镜像一致：源码 vendor 进 /opt/triposr（带 torchmcubes→skimage fallback、
+# rembg 懒加载两个本地补丁），权重不进镜像（首次运行后手工下载到 MODELS_DIR/triposr）。
+COPY vendor/triposr/tsr/ /opt/triposr/tsr/
+RUN python -c "import skimage, omegaconf, trimesh; print('triposr deps ok')"
+
+COPY app/ ./app/
+
+# 显存预算式淘汰决定能否多模型常驻，条目数只是兜底：此处给 2，
+# 具体由 install.sh 按显存推算覆盖（8~12GB 卡会传 1）。
+ENV MODELS_DIR=/models \
+    MAX_RESIDENT_MODELS=2 \
+    PORT=8100
+
+EXPOSE 8100
+
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT}"]

@@ -9,12 +9,38 @@ psutil 是可选依赖：缺失或读取失败时 snapshot() 返回 available=Fa
 采样时被调用）。
 
 容器化口径注意：Docker Desktop（WSL2）里 psutil 读到的是 WSL2 虚拟机的
-内存/CPU，不是 Windows 物理机——监控页已标注「WSL2 VM 口径」。
+内存/CPU，不是 Windows 物理机；裸 Linux / 云主机 / LXC 容器则是本机口径。
+监控页文案由 env_label() 动态给出。
 cpu_percent 用 interval=None 非阻塞模式：首次调用返回无意义值，由常驻采样
 线程（metrics_history，每 2s 一帧）持续调用后即正常。
 """
 import os
 import threading
+
+
+def env_label():
+    """内存/CPU 口径标签：WSL2 VM / Docker 容器 / Linux 主机。
+
+    判定依据：/proc/version 含 microsoft → WSL2；/.dockerenv 或 cgroup 含
+    docker/kubepods → 容器；否则裸机/VM（compshare 等云主机走这里）。
+    """
+    try:
+        with open("/proc/version", encoding="utf-8", errors="ignore") as f:
+            ver = f.read().lower()
+        if "microsoft" in ver or "wsl" in ver:
+            return "WSL2 VM 口径（非 Windows 物理机）"
+    except OSError:
+        pass
+    try:
+        if os.path.exists("/.dockerenv"):
+            return "Docker 容器口径"
+        with open("/proc/1/cgroup", encoding="utf-8", errors="ignore") as f:
+            cg = f.read().lower()
+        if "docker" in cg or "kubepods" in cg or "containerd" in cg:
+            return "容器口径"
+    except OSError:
+        pass
+    return "Linux 主机口径"
 
 _lock = threading.Lock()
 _psutil = None    # 初始化成功后缓存的 psutil 模块
@@ -70,6 +96,7 @@ def snapshot(disk_paths=()):
     out = {
         "available": True,
         "reason": "",
+        "env_label": env_label(),
         "cpu_percent": _safe(ps.cpu_percent, None),  # interval=None 非阻塞
         "ram_used_mb": round(vm.used / 1024**2) if vm else None,
         "ram_total_mb": round(vm.total / 1024**2) if vm else None,

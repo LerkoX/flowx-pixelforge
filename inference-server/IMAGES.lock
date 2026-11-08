@@ -1,0 +1,20 @@
+# 镜像版本锁定（scripts/push-images.sh 会重写本文件）
+# 生成时间: 2026-11-05（首次发布）
+#
+# 精确复现某个版本：bash install.sh --image lerkobba/flowx-inference@sha256:<digest>
+#
+# ---- modern 栈（20/30/40/50 系）----
+# 基础镜像 pytorch/pytorch:2.13.0-cuda13.2-cudnn9-runtime
+# python 3.12.3 / torch 2.13.0+cu132 / CUDA 13.2 / cuDNN 9.20
+# arch: sm_75 sm_80 sm_86 sm_90 sm_100 sm_120（无 sm_89 ⇒ 40 系无 fp8；无 sm_60/61/70）
+m-2.13.0-cu132 sha256:e4f2bc81d167021aeb0c995bb4a36dce2d8c25cf30f192655c5bf00605b02170
+modern         sha256:e4f2bc81d167021aeb0c995bb4a36dce2d8c25cf30f192655c5bf00605b02170
+latest         sha256:e4f2bc81d167021aeb0c995bb4a36dce2d8c25cf30f192655c5bf00605b02170
+
+# ---- pascal 栈（10 系 / P4/P40/P100 / V100）----
+# 基础镜像 pytorch/pytorch:2.3.1-cuda12.1-cudnn8-runtime（复用现役依赖层 + 当前 app 代码）
+# python 3.10 / torch 2.3.1 / CUDA 12.1 / cuDNN 8
+# arch: sm_50 sm_60 sm_61 sm_70 sm_75 sm_80 sm_86 sm_90
+# 真机验收：GTX 1080（sm_61，驱动 582.28）→ /health status=ok, cuda_available=true
+p-2.3.1-cu121  sha256:8275477b2e154477fa3c5e3ecc7178c5b245d9385bcde4ac4fdd9e1cf550775e
+pascal         sha256:8275477b2e154477fa3c5e3ecc7178c5b245d9385bcde4ac4fdd9e1cf550775e

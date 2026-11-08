@@ -239,18 +239,18 @@
     </div>
   </div>
 
-  <!-- 系统内存面板（WSL2 VM 口径） -->
+  <!-- 系统内存面板（口径随部署环境：WSL2 VM / 容器 / Linux 主机） -->
   <div class="card wide" id="sys-card">
-    <h2>系统资源 <span class="dim">｜WSL2 VM 口径（非 Windows 物理机）</span>
+    <h2>系统资源 <span class="dim" id="sys-env-label">｜检测中…</span>
       <span class="win-box h2-right">历史窗口
         <button data-win="15">15m</button><button data-win="60" class="on">1h</button><button data-win="360">6h</button>
         <span id="hist-range" class="dim"></span>
       </span></h2>
-    <div class="bar" title="内存：已用 / 空闲（WSL2 VM）">
+    <div class="bar" title="内存：已用 / 空闲">
       <div class="seg-ram" id="ram-used"></div>
       <div class="lbl" id="ram-lbl"></div>
     </div>
-    <div class="bar-note">RAM（WSL2 VM）</div>
+    <div class="bar-note" id="ram-note">RAM</div>
     <div class="bar" title="swap：offload 权重溢出到磁盘的信号，>0 时采样会雪崩">
       <div class="seg-swap" id="swap-used"></div>
       <div class="lbl" id="swap-lbl"></div>
@@ -567,9 +567,13 @@ function renderGpu(h, g) {
   }).join("");
 }
 
-// ---------- 系统资源（RAM/swap/CPU/RSS/磁盘/对象仓库，WSL2 VM 口径） ----------
+// ---------- 系统资源（RAM/swap/CPU/RSS/磁盘/对象仓库，口径见 env_label） ----------
 function renderSysRes() {
   const lf = lastFrame();
+  if (lf && lf.env_label) {
+    const el = $("sys-env-label");
+    if (el.textContent !== "｜" + lf.env_label) el.textContent = "｜" + lf.env_label;
+  }
   const ramPct = lf && lf.ram_pct != null ? lf.ram_pct : 0;
   $("ram-used").style.width = ramPct + "%";
   $("ram-lbl").textContent = lf && lf.ram_used_mb != null ?
@@ -580,7 +584,7 @@ function renderSysRes() {
     (lf.swap_used_mb > 0 ? `⚠️ 已用 ${fmtMB(lf.swap_used_mb)}（${lf.swap_pct}%）` : "未使用") : "—";
 
   const m = [
-    ["CPU", lf && lf.cpu_pct != null ? lf.cpu_pct + " %" : "—", "WSL2 VM 口径"],
+    ["CPU", lf && lf.cpu_pct != null ? lf.cpu_pct + " %" : "—", lf && lf.env_label ? lf.env_label : "—"],
     ["进程 RSS", lf && lf.proc_rss_mb != null ? fmtMB(lf.proc_rss_mb) : "—", "offload 权重宿主"],
     ["模型盘剩余", lf && lf.disk_free_mb != null ? fmtMB(lf.disk_free_mb) : "—",
      lf && lf.disk_pct != null ? "已用 " + lf.disk_pct + "%" : ""],

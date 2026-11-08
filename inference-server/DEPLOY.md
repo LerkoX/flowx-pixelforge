@@ -11,7 +11,7 @@ FlowX 推理服务 = 远程能力运行时（FastAPI + diffusers），部署在 
 | --- | --- |
 | 硬件 | NVIDIA GPU（SD1.5 单模型建议显存 ≥ 6 GB；多模型常驻按 `MAX_RESIDENT_MODELS` × 约 4 GB 估算） |
 | 系统 | Linux x86_64（Ubuntu 20.04+ 推荐） |
-| NVIDIA 驱动 | 支持 CUDA 12.1 的版本（`nvidia-smi` 可见 GPU） |
+| NVIDIA 驱动 | **按显卡代次分档**：10 系/V100 ≥ 530（旧栈 cu121）或 ≥450（cu118 变体）；20/30/40/50 系 ≥ **580**（modern 栈 cu13.2）。详见 §2.0 |
 | Docker | 20.10+ |
 | nvidia-container-toolkit | 必须，Docker 容器访问 GPU |
 | 磁盘 | 镜像约 8 GB + 模型文件（SD1.5 约 4 GB/个） |
@@ -62,6 +62,100 @@ Docker 二选一：
 
 ## 2. 部署步骤
 
+### 2.0 一键安装（推荐，自动识别显卡选栈）
+
+`install.sh` 会探测显卡与驱动 → 自动选「栈」→ 拉取/构建镜像或在本机装依赖 → 起服务 →
+**跑健康验收**（断言 torch/CUDA 版本与栈一致）。支持 **10/20/30/40/50 全系**，两种形态：
+
+```bash
+cd inference-server
+
+# ① 先空跑，看清判定结果与将执行的命令（不改动系统）
+bash install.sh --dry-run
+
+# ② 容器模式（默认，Linux / WSL2）
+bash install.sh
+
+# ③ 裸机模式（micromamba 自包含 Python + systemd 常驻，不动系统 python）
+sudo bash install.sh --mode native
+
+# ④ GPU 在另一台机器（远程 docker daemon）
+bash install.sh --docker-host tcp://192.168.5.60:2375
+```
+
+#### 两栈矩阵（为什么不是一个版本通吃）
+
+CUDA 13.x 的 release notes 明确 **移除了 Maxwell/Pascal/Volta**（`Dropped support for
+pre-Turing architectures`），所以 10 系与 V100 永远上不了 CUDA 13；而 **50 系（sm_120）
+只存在于 CUDA 13**。只能在构建层分两套依赖栈：
+
+| 栈 | 显卡 | 算力 | Python | torch | CUDA / cuDNN | 最低驱动 | 镜像 tag |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| **P** | 10 系 GTX 10xx、P4/P40/P100、V100 | sm_60/61/70 | 3.10 | 2.3.1 | 12.1 / 8 | ≥530 | `lerkobba/flowx-inference:p-2.3.1-cu121` |
+| **P-lite** | 同上，但驱动只到 450~529 | sm_60/61/70 | 3.10 | 2.3.1+cu118 | 11.8 / 8 | ≥450 | `lerkobba/flowx-inference:p-2.3.1-cu118`（需 `--build`） |
+| **M** | 20/30/40/50 系、T4、A100、L40S、H100 | sm_75 ~ sm_120 | 3.12 | 2.13.0+cu132 | 13.2 / 9.20 | ≥ **580** | `lerkobba/flowx-inference:m-2.13.0-cu132` |
+| **X** | Maxwell（GTX 9xx 及更老）；或 50 系 + 驱动 <580 | — | — | — | — | — | 脚本直接拒绝并给人话指引 |
+
+分档**只认 compute capability + 驱动版本**，不认型号名：GTX 1650 是 sm_75 走 M 栈，
+GTX 1080 是 sm_61 走 P 栈；多卡混插时按**算力最低**的那张定栈。
+
+三个已取证的事实（实测于 2026-11）：
+
+- modern 基础镜像 `pytorch/pytorch:2.13.0-cuda13.2-cudnn9-runtime`：
+  `torch.cuda.get_arch_list() = ['sm_75','sm_80','sm_86','sm_90','sm_100','sm_120']`
+  —— 无 `sm_60/61/70`（Pascal/Volta 不可用）、**无 `sm_89`**。
+- 40 系（Ada, sm_89）靠 `sm_86` cubin 的 minor 版本兼容跑起来，代价是**本栈上拿不到 fp8**
+  （fp8 需原生 sm_89 kernel）。要用 fp8 得换 cu128 变体自行编译。
+- 驱动门槛：CUDA 13.x 最低 ≥580；CUDA 12.1 GA 需 **≥530.30.02**（§1 旧文档写的 525 是
+  CUDA 12.0 的门槛，已修正）。
+
+#### 脚本会做什么（8 步，幂等）
+
+1. 环境闸门：Linux / WSL2 + x86_64（`--docker-host` 时校验 daemon 架构）。
+2. 探卡：`nvidia-smi --query-gpu=name,compute_cap,memory.total,driver_version`
+   （老驱动无 `compute_cap` 字段时按型号推断）。
+3. 决策：输出栈 + 原因（例如「sm_86 且驱动 570 < 580，降级 P 栈，无 bf16/fp8」）。
+4. 依赖：docker / nvidia-container-toolkit；缺则按 apt/dnf 安装（`--no-install-deps` 只打印）。
+5. 数据：本地用绑定挂载目录；**远程 daemon 自动改用命名卷**（远端看不到本机路径）。
+6. 令牌：生成随机 `INFERENCE_TOKEN`；按显存推算 `MAX_RESIDENT_MODELS` / `OFFLOAD_MODE`
+   （<12GB → 1 + model；12~24GB → 2；≥24GB → 3）。
+7. 启动：`docker run`（不依赖 compose 插件）或 systemd 服务 `flowx-inference`。
+8. 验收：轮询 `/health` 断言 `cuda_available`、`torch_version` 与栈一致；
+   失败时自动抓容器日志并翻译常见错误（`no kernel image` = 栈选错、
+   `CUDA driver version is insufficient` = 驱动太老、`cuda_available=false` = toolkit 未装）。
+
+安全默认：**已存在同名容器 / 已有 `/etc/flowx-inference/env` 时默认拒绝覆盖**（需 `--force`）；
+卸载用 `--uninstall`，模型数据默认保留。
+
+#### 常用参数
+
+```bash
+bash install.sh --port 8100 --token mytoken     # 自定义端口与令牌
+bash install.sh --stack M                        # 强制某栈（跨栈迁移/排障用）
+bash install.sh --max-resident 3 --offload none  # 覆盖显存参数
+bash install.sh --image lerkobba/flowx-inference@sha256:... # 锁定到具体 digest
+bash install.sh --build                          # 强制本地构建（不用预构建镜像）
+bash install.sh --uninstall --keep-data          # 卸载，保留模型
+```
+
+> 只想手动 compose 部署？跳过本节，按 §2.1 起用 `docker-compose.yml` +
+> `docker-compose.pascal.yml`（P 栈）或 `docker-compose.modern.yml`（M 栈）。
+
+#### 自行构建与推送镜像
+
+```bash
+# 两个栈一起构建（P 栈若本地已有同栈基底镜像，走「秒级重打包」只覆盖 app/ 一层）
+DOCKER_HOST=tcp://<host>:2375 bash scripts/build-images.sh
+
+# 全量重建（自包含，慢，约 10 分钟/栈）
+DOCKER_HOST=tcp://<host>:2375 bash scripts/build-images.sh --full
+
+# 推送到 Docker Hub 并生成 IMAGES.lock（tag → digest）
+DOCKERHUB_USER=lerkobba DOCKERHUB_TOKEN=<access-token> bash scripts/push-images.sh
+```
+
+### 2.1 手动部署：放模型并启动
+
 ```bash
 cd inference-server
 
@@ -84,7 +178,7 @@ curl http://127.0.0.1:8100/health
 
 首次 `sd.checkpoint.load` 调用时才会把模型载入显存（服务启动本身不加载模型）。
 
-### 2.1 Pascal 显卡（GTX 10xx / Tesla P4/P40/P100，sm_60/61）
+### 2.2 Pascal 显卡（GTX 10xx / Tesla P4/P40/P100 / V100，sm_60/61/70）
 
 PyTorch 2.7+（CUDA 12.8+ 构建）的官方二进制已移除 Pascal 支持，标准镜像在 Pascal 上推理会报
 `no kernel image is available`。使用仓库自带的 Pascal 兼容镜像（torch 2.3.1 + cuDNN 8）：
@@ -97,7 +191,7 @@ docker compose -f docker-compose.yml -f docker-compose.pascal.yml up -d --build
 
 - `Dockerfile.pascal` 基于 `pytorch/pytorch:2.3.1-cuda12.1-cudnn8-runtime`，`requirements-pascal.txt` 固定 `torch==2.3.1`，防止 pip 升级到不含 Pascal 支持的新版本
 - 应用代码只用 fp16，无 bf16 / flash-attn / xformers 依赖，Pascal 上无需改动
-- 宿主机驱动需 >= 525（CUDA 12.1）。旧驱动（>= 450）的机器把 `Dockerfile.pascal` 里的基础镜像换成 `pytorch/pytorch:2.3.1-cuda11.8-cudnn8-runtime` 即可（镜像内注释有说明）
+- 宿主机驱动需 >= 530（CUDA 12.1 GA 实测门槛；>= 450 可用 cu118 变体）。旧驱动（>= 450）的机器把 `Dockerfile.pascal` 里的基础镜像换成 `pytorch/pytorch:2.3.1-cuda11.8-cudnn8-runtime` 即可（镜像内注释有说明）
 - 8 GB 显存的卡：`MAX_RESIDENT_MODELS` 保留 3 即可 —— 淘汰已改为**显存预算式**
   （见下 `VRAM_BUDGET`），条目数只是兜底上限；真正决定"能不能同时常驻"的是可用显存
 
@@ -336,7 +430,11 @@ running 任务在下一个检查点（图节点间 / 采样每步）生效。
 | 401 invalid token | `INFERENCE_TOKEN` 设置后，请求头必须是 `Authorization: Bearer <token>`（注意 Bearer 后一个空格） |
 | 构建拉取基础镜像慢 | `pytorch/pytorch` 镜像约 8 GB，可预先 `docker pull`，或配置镜像加速器 |
 | 首次推理很慢 | 属正常：首次调用才加载模型到显存；之后命中常驻缓存 |
-| `no kernel image is available`（Pascal 显卡） | 镜像内 torch 版本不支持 sm_60/61，改用 Pascal 镜像，见 2.1 节 |
+| `no kernel image is available`（任何卡） | **栈选错了**：Pascal 用了 modern 镜像，或 50 系用了旧栈。跑 `bash install.sh --dry-run` 看判定，或对镜像执行 `python -c "import torch;print(torch.cuda.get_arch_list())"` 对照 |
+| `CUDA driver version is insufficient for CUDA runtime version` | 宿主机驱动低于该栈门槛：cu13.2 需 ≥580、cu12.1 需 ≥530、cu11.8 需 ≥450。升级驱动后重跑 `install.sh`（脚本会自动改判到能用的栈） |
+| 40 系开了 `QUANTIZATION=fp8` 但没生效 | modern 镜像的 arch 列表只到 `sm_86`/`sm_120`，没有 `sm_89`，40 系走的是 sm_86 cubin —— **fp8 在 40 系上不可用**（需原生 sm_89 kernel）。这不是 bug |
+| `install.sh` 报「已存在容器 X」 | 默认不覆盖生产容器。确认要重建（模型卷保留）后加 `--force` |
+| 远程 daemon 上模型目录是空的 | 远程 daemon 看不到本机路径，脚本已自动改用命名卷 `flowx-inference-models`；模型要用 `scripts/download-model.sh`（`TARGET=flowx-inference-models ...`）灌进卷里 |
 
 ---
 
