@@ -476,6 +476,90 @@ async def upload_video(request: Request, filename: str = ""):
     return {"path": path, "filename": name, "bytes": len(body)}
 
 
+# 音频上传落盘目录（POST /audios 的临时中转；ffmpeg 解码后即删）
+AUDIO_INPUT_DIR = os.environ.get(
+    "AUDIO_INPUT_DIR", os.path.join(VIDEO_INPUT_DIR, "audio"))
+# H3 audio VAE 的采样率——上传即重采样到它，AUDIO 对象拿来就能当参考
+AUDIO_SAMPLE_RATE = int(os.environ.get("AUDIO_SAMPLE_RATE", "32000"))
+MAX_AUDIO_UPLOAD_BYTES = int(os.environ.get("MAX_AUDIO_UPLOAD_MB", "64")) * 1024 * 1024
+
+
+@app.post("/audios", dependencies=[Depends(auth)])
+async def upload_audio(request: Request, filename: str = ""):
+    """上传音频（wav/mp3/ogg/m4a 原始字节）→ ffmpeg 解码重采样为
+    f32 双声道 @ AUDIO_SAMPLE_RATE → 登记为 AUDIO 对象 {audio, sample_rate}。
+    供 FlowX 的 load-audio 节点把客户端本地音频送入对象仓库（H3 Ref2VA 的
+    AudioReference 素材；对称于 POST /images）。"""
+    import subprocess
+    import tempfile
+
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="empty body")
+    if len(body) > MAX_AUDIO_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"audio too large: {len(body)} > {MAX_AUDIO_UPLOAD_BYTES} bytes")
+    os.makedirs(AUDIO_INPUT_DIR, exist_ok=True)
+    base = os.path.basename(filename or "upload.wav") or "upload.wav"
+    ext = (os.path.splitext(base)[1] or ".wav").lower()
+    src = os.path.join(AUDIO_INPUT_DIR,
+                       f"{int(time.time() * 1000)}_up{ext}")
+    try:
+        with open(src, "wb") as f:
+            f.write(body)
+        # ffmpeg 解码为 f32le 双声道 PCM（与 video.py 的 _to_pcm16 同一系风格）
+        r = subprocess.run(
+            ["ffmpeg", "-y", "-v", "error", "-i", src,
+             "-f", "f32le", "-acodec", "pcm_f32le",
+             "-ac", "2", "-ar", str(AUDIO_SAMPLE_RATE), "-"],
+            capture_output=True, timeout=300)
+        if r.returncode != 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"cannot decode audio: {r.stderr.decode(errors='replace')[-200:]}")
+        import numpy as np
+        pcm = np.frombuffer(r.stdout, dtype=np.float32)
+        if pcm.size < 2:
+            raise HTTPException(status_code=400, detail="decoded audio is empty")
+        t = torch.from_numpy(pcm.reshape(-1, 2).T.copy())  # (2, N) f32
+    finally:
+        try:
+            os.unlink(src)
+        except OSError:
+            pass
+    secs = round(t.shape[1] / AUDIO_SAMPLE_RATE, 2)
+    oid = store.put("AUDIO", {"audio": t, "sample_rate": AUDIO_SAMPLE_RATE},
+                    meta={"source": "upload", "seconds": secs})
+    print(f"[upload] audio ({len(body)} bytes) -> AUDIO {oid} "
+          f"{secs}s@{AUDIO_SAMPLE_RATE}Hz", flush=True)
+    return {"id": oid, "seconds": secs, "sample_rate": AUDIO_SAMPLE_RATE}
+
+
+@app.get("/audios/{audio_id}", dependencies=[Depends(auth)])
+def get_audio(audio_id: str):
+    """下载 AUDIO 对象为 wav（f32→s16le PCM 封装）。调试用/节点侧预览用。"""
+    import numpy as np
+    try:
+        item = store.get(audio_id, "AUDIO")["data"]
+    except (KeyError, TypeError) as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    t = item["audio"].clamp(-1.0, 1.0)
+    sr = int(item.get("sample_rate") or AUDIO_SAMPLE_RATE)
+    pcm16 = (t * 32767.0).to(torch.int16).numpy().T.tobytes()  # (N,2) 交错
+    n_ch = t.shape[0]
+    # 手工 wav 头（RIFF）
+    byte_rate = sr * n_ch * 2
+    block = n_ch * 2
+    hdr = (b"RIFF" + (36 + len(pcm16)).to_bytes(4, "little") + b"WAVE"
+           + b"fmt " + (16).to_bytes(4, "little")
+           + (1).to_bytes(2, "little") + n_ch.to_bytes(2, "little")
+           + sr.to_bytes(4, "little") + byte_rate.to_bytes(4, "little")
+           + block.to_bytes(2, "little") + (16).to_bytes(2, "little")
+           + b"data" + len(pcm16).to_bytes(4, "little"))
+    return Response(content=hdr + pcm16, media_type="audio/wav")
+
+
 @app.get("/images/{image_id}", dependencies=[Depends(auth)])
 def get_image(image_id: str, index: int = 0, thumb: int = 0):
     """下载图像 PNG；thumb>0 时返回最长边为该像素的 JPEG 缩略图（供节点画布预览）。"""
