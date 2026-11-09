@@ -50,7 +50,11 @@ def _write_wav(pcm, channels, sample_rate, path):
 
 
 def _mux_audio(video_path, wav_path, out_path):
-    """ffmpeg 把 wav 合进 mp4（视频流 copy 不重编码，音频 AAC 128k）。
+    """ffmpeg 把 wav 合进 mp4（视频流 copy 不重编码，音频 AAC 256k）。
+    ～【为什么是 256k】H3 音频是 32kHz 立体声，128k（每声道 64k）对能量
+    爆发/风声类宽频音效不够，高频量化噪声听感「毛躁」（真机反馈）；
+    而视频侧 23Mbps，音视频配置严重失衡。256k 对 32kHz 立体声已绰裕
+    （5s 只增 ~100KB，远小于视频体积）。
     音频比视频短时按短视频截断（-shortest）；imageio-ffmpeg 的静态二进制。"""
     import subprocess
 
@@ -58,7 +62,7 @@ def _mux_audio(video_path, wav_path, out_path):
 
     exe = imageio_ffmpeg.get_ffmpeg_exe()
     cmd = [exe, "-y", "-i", video_path, "-i", wav_path,
-           "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
+           "-c:v", "copy", "-c:a", "aac", "-b:a", "256k",
            "-shortest", out_path]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     if proc.returncode != 0:
