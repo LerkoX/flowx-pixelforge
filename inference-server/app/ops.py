@@ -179,70 +179,89 @@ def controlnet_apply(control_net, image, strength=1.0,
     return {"control": chain}
 
 
-def as_cond_segments(cond, name="cond"):
-    """COND 归一化为段列表 [(tensor, area|None, strength), ...]：
-    裸张量 → 单个整图段；SDXLCond（M5）→ 单个整图段（pooled 走 cond_pooleds）；
-    cond.set_area 产物（段列表，含 SDXLSegments）原样校验通过；
-    SD3 dict 形式明确拒绝。area = (ly, lx, lh, lw) latent 像素坐标。"""
-    # **结构化 COND 协议**（对标 ComfyUI conds.py）：带 to_segments() 的对象
-    # 自行归一化成 [(tensor, area, strength, start, end)]。用鸭子类型而非
-    # isinstance——这些类定义在节点仓算子族里，服务端不该 import 它们。
-    if hasattr(cond, "to_segments"):
-        segs = []
-        for item in cond.to_segments():
-            if not (isinstance(item, (list, tuple)) and len(item) >= 3):
-                raise ValueError(
-                    f"{name}: 结构化 COND 的段需为 (tensor, area, strength"
-                    f"[, start, end])，got {type(item).__name__}")
-            t, area, s0 = item[0], item[1], item[2]
-            t0 = float(item[3]) if len(item) > 3 else 0.0
-            t1 = float(item[4]) if len(item) > 4 else 1.0
-            if not torch.is_tensor(t):
-                raise ValueError(f"{name}: 结构化 COND 段张量缺失")
-            segs.append((t, area, float(s0), t0, t1))
-        return segs
-    # cond.pack 产物：dict 形态（含层区间等扩展字段）
-    if isinstance(cond, dict) and "__cond_pack__" in cond:
-        segs = []
-        for it in cond["__cond_pack__"]:
-            t = it["tensor"]
-            if not torch.is_tensor(t):
-                raise ValueError(f"{name}: cond.pack 段张量缺失")
-            segs.append((t, it.get("area"), float(it.get("strength", 1.0)),
-                         float(it.get("start", 0.0)),
-                         float(it.get("end", 1.0))))
-        return segs
-    if isinstance(cond, SDXLCond):
-        return [(cond.embeds, None, 1.0)]
-    if isinstance(cond, dict):
+# ---------------------------------------------------------------------------
+# COND 归一化（对标 ComfyUI conds.py 的 COND 类层次）
+#
+# 设计：**一个工厂 + 一张形态表**。所有能被接受的 COND 形态都在这里收口成
+# 统一段契约 `[(tensor, area|None, strength, start, end), ...]`，下游
+# （sample / blend_side / cond_pooleds）只认这一种形态，不再各自判断类型。
+#
+# 支持的形态（按判定优先级）：
+#   ① 结构化协议：带 to_segments() 的对象（节点仓 Conditioning / CondTensor /
+#      ConditioningList）——鸭子类型识别，服务端不 import 节点仓的类
+#   ② cond.pack 产物：{"__cond_pack__": [...]}（含 weight/窗口/层区间）
+#   ③ SDXLSegments：list 子类，段 + 并行 pooled 列表
+#   ④ SDXLCond：embeds + pooled（clip.encode 的 SDXL 产物）
+#   ⑤ 段列表：3 元组（经典）或 5 元组（带进度窗口）
+#   ⑥ 裸张量：单条整图条件（SD1.x clip.encode 产物）
+#   其他（如 SD3 dict）显式报错——不是「不支持」，而是这条管线不适用。
+# ---------------------------------------------------------------------------
+
+_SEG_LEN = (3, 5)   # 合法段元组长度：3 元组经典 / 5 元组带进度窗口
+
+
+def _seg_from_tuple(item, name, idx=None):
+    """把 3/5 元组段规范化为 5 元组（唯一的段契约）。"""
+    where = f"{name} 段[{idx}]" if idx is not None else f"{name} 段"
+    if not (isinstance(item, (list, tuple)) and len(item) in _SEG_LEN):
+        got = (f"{type(item).__name__}"
+               f"(len={len(item) if hasattr(item, '__len__') else '?'})")
         raise ValueError(
-            f"{name}: 暂不支持 SD3 dict 形式 COND（embeds+pooled），"
-            f"仅支持 SD1.x/SDXL 张量形式")
+            f"{where}需为 (tensor, area, strength[, start, end]) "
+            f"3 或 5 元组，got {got}")
+    if len(item) == 5:
+        t, area, strength, t0, t1 = item
+    else:
+        t, area, strength = item
+        t0, t1 = 0.0, 1.0
+    if not torch.is_tensor(t):
+        raise ValueError(f"{where}张量缺失，got {type(t).__name__}")
+    return (t, area, float(strength), float(t0), float(t1))
+
+
+def as_cond_segments(cond, name="cond"):
+    """COND → 统一段契约 ``[(tensor, area|None, strength, start, end), ...]``。
+
+    area = (ly, lx, lh, lw) latent 像素坐标；start/end 为采样进度窗口。
+    接受的全部形态见上方形态表注释；不可识别的形态抛 ValueError（带
+    具体类型与长度，便于定位是哪个节点产出的怪东西）。
+    """
+    # ① 结构化协议（节点仓的 Conditioning 层次）
+    if hasattr(cond, "to_segments"):
+        return [_seg_from_tuple(it, name, i)
+                for i, it in enumerate(cond.to_segments())]
+
+    # ② cond.pack 产物
+    if isinstance(cond, dict) and "__cond_pack__" in cond:
+        return [_seg_from_tuple(
+                    (it["tensor"], it.get("area"), it.get("strength", 1.0),
+                     it.get("start", 0.0), it.get("end", 1.0)), name, i)
+                for i, it in enumerate(cond["__cond_pack__"])]
+
+    # ③④ SDXL 两种：SDXLSegments 先于 SDXLCond 判（前者是 list 子类）
+    if isinstance(cond, SDXLSegments):
+        return [_seg_from_tuple(it, name, i) for i, it in enumerate(cond)]
+    if isinstance(cond, SDXLCond):
+        return [(cond.embeds, None, 1.0, 0.0, 1.0)]
+
+    # ⑤ 段列表
     if isinstance(cond, list):
-        segs = []
-        for item in cond:
-            # 3 元组（经典）/ 5 元组（cond.set_timestep_range 追加进度窗口）
-            # ——对齐 ComfyUI ConditioningSetTimestepRange：条件只在采样进度
-            # [start, end) 区间内生效，区间外整段跳过（还省一次前向）。
-            if not (isinstance(item, (list, tuple)) and len(item) in (3, 5)):
-                raise ValueError(
-                    f"{name}: COND 段需为 (tensor, area, strength"
-                    f"[, start, end]) 3 或 5 元组，"
-                    f"got {type(item).__name__}(len={len(item) if hasattr(item, '__len__') else '?'})")
-            if len(item) == 5:
-                t, area, s, t0, t1 = item
-            else:
-                t, area, s = item
-                t0, t1 = 0.0, 1.0
-            if not torch.is_tensor(t):
-                raise ValueError(f"{name}: COND 段张量缺失，got {type(t).__name__}")
-            segs.append((t, area, float(s), float(t0), float(t1)))
+        segs = [_seg_from_tuple(it, name, i) for i, it in enumerate(cond)]
         if not segs:
             raise ValueError(f"{name}: COND 段列表为空")
         return segs
+
+    # 其他 dict（典型是 SD3 的 embeds+pooled）——这条管线不适用，显式报错
+    if isinstance(cond, dict):
+        raise ValueError(
+            f"{name}: 不支持 dict 形态 COND（{sorted(cond)[:4]}…）——"
+            f"SD3 的 embeds+pooled 走 sd3-* 配套算子，不要混用")
+
+    # ⑥ 裸张量
     if not torch.is_tensor(cond):
-        raise ValueError(f"{name}: COND 需为张量，got {type(cond).__name__}")
-    return [(cond, None, 1.0)]
+        raise ValueError(
+            f"{name}: COND 需为张量或已知 COND 形态，got {type(cond).__name__}")
+    return [(cond, None, 1.0, 0.0, 1.0)]
 
 
 def _merge_added(base, extra):
@@ -811,9 +830,9 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
         if len(segs) != 1:
             return False
         seg = segs[0]
-        t0 = seg[3] if len(seg) > 3 else 0.0
-        t1 = seg[4] if len(seg) > 4 else 1.0
-        return seg[1] is None and seg[2] == 1.0 and t0 <= 0.0 and t1 >= 1.0
+        # as_cond_segments 已统一成 5 元组契约，无需再判长度
+        return (seg[1] is None and seg[2] == 1.0
+                and seg[3] <= 0.0 and seg[4] >= 1.0)
 
     pos_plain = _seg_plain(pos_segs)
     neg_plain = _seg_plain(neg_segs)
@@ -1014,9 +1033,8 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
             out = None
             used = 0
             for k, (seg, m) in enumerate(zip(segs, masks)):
-                tensor, _area, s = seg[0], seg[1], seg[2]
-                t0 = seg[3] if len(seg) > 3 else 0.0
-                t1 = seg[4] if len(seg) > 4 else 1.0
+                # 5 元组契约：(tensor, area, strength, start, end)
+                tensor, _area, s, t0, t1 = seg
                 if (t0 > 0.0 or t1 < 1.0) and not (t0 <= progress < t1):
                     continue          # 窗口外：整段跳过
                 used += 1
