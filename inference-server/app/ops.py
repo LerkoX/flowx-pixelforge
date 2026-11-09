@@ -192,14 +192,22 @@ def as_cond_segments(cond, name="cond"):
     if isinstance(cond, list):
         segs = []
         for item in cond:
-            if not (isinstance(item, (list, tuple)) and len(item) == 3):
+            # 3 元组（经典）/ 5 元组（cond.set_timestep_range 追加进度窗口）
+            # ——对齐 ComfyUI ConditioningSetTimestepRange：条件只在采样进度
+            # [start, end) 区间内生效，区间外整段跳过（还省一次前向）。
+            if not (isinstance(item, (list, tuple)) and len(item) in (3, 5)):
                 raise ValueError(
-                    f"{name}: COND 段需为 (tensor, area, strength) 三元组，"
-                    f"got {type(item).__name__}")
-            t, area, s = item
+                    f"{name}: COND 段需为 (tensor, area, strength"
+                    f"[, start, end]) 3 或 5 元组，"
+                    f"got {type(item).__name__}(len={len(item) if hasattr(item, '__len__') else '?'})")
+            if len(item) == 5:
+                t, area, s, t0, t1 = item
+            else:
+                t, area, s = item
+                t0, t1 = 0.0, 1.0
             if not torch.is_tensor(t):
                 raise ValueError(f"{name}: COND 段张量缺失，got {type(t).__name__}")
-            segs.append((t, area, float(s)))
+            segs.append((t, area, float(s), float(t0), float(t1)))
         if not segs:
             raise ValueError(f"{name}: COND 段列表为空")
         return segs
@@ -751,10 +759,16 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
     # COND 归一化为段列表；裸张量（无区域、strength=1）为 plain
     pos_segs = as_cond_segments(pos, "pos")
     neg_segs = as_cond_segments(neg, "neg")
-    pos_plain = len(pos_segs) == 1 and pos_segs[0][1] is None \
-        and pos_segs[0][2] == 1.0
-    neg_plain = len(neg_segs) == 1 and neg_segs[0][1] is None \
-        and neg_segs[0][2] == 1.0
+    def _seg_plain(segs):
+        if len(segs) != 1:
+            return False
+        seg = segs[0]
+        t0 = seg[3] if len(seg) > 3 else 0.0
+        t1 = seg[4] if len(seg) > 4 else 1.0
+        return seg[1] is None and seg[2] == 1.0 and t0 <= 0.0 and t1 >= 1.0
+
+    pos_plain = _seg_plain(pos_segs)
+    neg_plain = _seg_plain(neg_segs)
     # control 归一化为 ControlBundle 列表：单 CONTROL（旧行为）与多 CONTROL
     # 链（controlnet.apply 串接产物）统一处理，多 CN 时残差求和（ComfyUI 同款）。
     controls = None
@@ -934,18 +948,30 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
             return m
 
         pos_masks = [None if a is None else _seg_mask(a)
-                     for _, a, _ in pos_segs]
+                     for a in (x[1] for x in pos_segs)]
         neg_masks = [None if a is None else _seg_mask(a)
-                     for _, a, _ in neg_segs]
+                     for a in (x[1] for x in neg_segs)]
         print(f"[sample] cond 分段：pos={len(pos_segs)} 段 "
               f"neg={len(neg_segs)} 段，按区域 mask×strength 混合", flush=True)
 
-        def blend_side(segs, masks, inp, t, added=None, extras=None):
+        def blend_side(segs, masks, inp, t, added=None, extras=None,
+                       progress=0.0):
             """逐段前向 + 区域加权混合（求和语义，不归一化——与 ComfyUI 一致，
             重叠区域影响叠加；无 area 的段视为整图）。
-            extras：每段的额外 added_cond_kwargs（SDXL 每段自带 pooled）。"""
+
+            extras：每段的额外 added_cond_kwargs（SDXL 每段自带 pooled）。
+            progress：当前采样进度 0~1。段带 [t0,t1) 窗口时仅窗口内生效
+            （对齐 ComfyUI ConditioningSetTimestepRange：区间外整段跳过，
+            既避免不该生效的条件污染，也省一次 UNet 前向）。"""
             out = None
-            for k, ((tensor, _area, s), m) in enumerate(zip(segs, masks)):
+            used = 0
+            for k, (seg, m) in enumerate(zip(segs, masks)):
+                tensor, _area, s = seg[0], seg[1], seg[2]
+                t0 = seg[3] if len(seg) > 3 else 0.0
+                t1 = seg[4] if len(seg) > 4 else 1.0
+                if (t0 > 0.0 or t1 < 1.0) and not (t0 <= progress < t1):
+                    continue          # 窗口外：整段跳过
+                used += 1
                 a = _merge_added(added, extras[k] if extras else None)
                 kw = {"added_cond_kwargs": a} if a is not None else {}
                 e = tensor.expand(b, -1, -1)
@@ -955,6 +981,18 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
                 if s != 1.0:
                     o = o * s
                 out = o if out is None else out + o
+            if used == 0:
+                # 全部段都不在当前窗口（例如只在后段生效的条件）→ 用首段
+                # 兜底，保证仍有条件可用（ComfyUI 同场景用 cond 列表回退）
+                seg, m = segs[0], masks[0]
+                a = _merge_added(added, extras[0] if extras else None)
+                kw = {"added_cond_kwargs": a} if a is not None else {}
+                out = pipe.unet(inp, t, encoder_hidden_states=seg[0].expand(b, -1, -1),
+                                **kw).sample
+                if m is not None:
+                    out = out * m
+                if seg[2] != 1.0:
+                    out = out * seg[2]
             return out
 
     # ---- SDXL added_cond_kwargs（M5）：text_embeds + time_ids ----
@@ -1013,10 +1051,13 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
                     inp = sched.scale_model_input(latents, t)
                     neg_adds = sdxl_side_extras[0] if sdxl_side_extras else None
                     pos_adds = sdxl_side_extras[1] if sdxl_side_extras else None
+                    _prog = i / max(1, len(ts))   # 采样进度（条件窗口用）
                     uncond = blend_side(neg_segs, neg_masks, inp, t,
-                                        ipa_added_neg, neg_adds)
+                                        ipa_added_neg, neg_adds,
+                                        progress=_prog)
                     cond = blend_side(pos_segs, pos_masks, inp, t,
-                                      ipa_added_pos, pos_adds)
+                                      ipa_added_pos, pos_adds,
+                                      progress=_prog)
                 guided = uncond + cfg * (cond - uncond)
                 latents = sched.step(guided, t, latents).prev_sample
                 if noise_mask is not None:

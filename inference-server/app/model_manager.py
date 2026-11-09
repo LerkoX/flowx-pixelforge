@@ -760,6 +760,44 @@ class ModelManager:
             return cls._offload_floor()
         return est
 
+    def register_external(self, key, obj, weights_bytes=0, arch="",
+                          offload_mode="none", vram_bytes=None):
+        """插件算子注册常驻对象的**统一入口**（与 load() 同口径折算显存预算）。
+
+        为什么需要它（真机教训）：
+        节点仓的算子（minimax_h3 / wan）原先各自 `models._pipes[key] = obj`
+        并把**文件大小**直接传给 `_evict_if_needed()` —— 对 14B/int8 模型
+        等于按 28~32GB 申请显存，而 offload=sequential 时真实峰值只是
+        「最大单层 + 激活」（实测 H3 21GB / 24GB 卡，Wan 14B 同级）。
+        结果 24GB 卡被判"装不下"，只能 `POST /model/policy {"vram_strict":0}`
+        绕过闸门（长期遗留问题）。
+
+        参数（对齐 ComfyUI model_management 的口径）：
+        - weights_bytes：权重体积（文件大小或 state_dict nbytes）
+        - offload_mode：none → 全量上卡按 weights_bytes 计；
+          model/sequential → 权重在 CPU，按 floor 计（vram_budget_of）
+        - vram_bytes：**显式显存峰值**，插件能精确估算时优先用它
+          （对应 ComfyUI 的 model_offloaded_memory + minimum_inference_memory）
+
+        返回 obj（便于算子 `return {"x": _register(...)}` 链式写法）。
+        """
+        est = int(vram_bytes) if vram_bytes else self.vram_budget_of(
+            weights_bytes, offload_mode)
+        with self._lock:
+            self._evict_if_needed(est)
+            self._pipes[key] = obj
+            self._archs[key] = arch
+            self._sizes[key] = int(weights_bytes or est)
+            self._vram_sizes[key] = est
+            self._offloads[key] = offload_mode
+            self._last_used[key] = time.time()
+        print(f"[model-manager] registered '{key[:48]}' ({arch}) "
+              f"权重~{int(weights_bytes) / 1024**2:.0f}MB "
+              f"显存预算~{est / 1024**2:.0f}MB [offload={offload_mode}]",
+              flush=True)
+        self._attribute(key)
+        return obj
+
     def resident_weights(self) -> int:
         """当前常驻模型的权重总量估算（字节）。"""
         return sum(int(self._sizes.get(k, 0)) for k in self._pipes)
