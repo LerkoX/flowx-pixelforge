@@ -9,6 +9,7 @@ import contextlib
 import torch
 from PIL import Image
 
+from .cfg import apply_cfg as _apply_cfg, cfg_variants  # noqa: F401
 from .samplers import (DEFAULT_SAMPLER, DEFAULT_SCHEDULER,
                        make_scheduler, resolve_sampler)
 
@@ -183,6 +184,34 @@ def as_cond_segments(cond, name="cond"):
     裸张量 → 单个整图段；SDXLCond（M5）→ 单个整图段（pooled 走 cond_pooleds）；
     cond.set_area 产物（段列表，含 SDXLSegments）原样校验通过；
     SD3 dict 形式明确拒绝。area = (ly, lx, lh, lw) latent 像素坐标。"""
+    # **结构化 COND 协议**（对标 ComfyUI conds.py）：带 to_segments() 的对象
+    # 自行归一化成 [(tensor, area, strength, start, end)]。用鸭子类型而非
+    # isinstance——这些类定义在节点仓算子族里，服务端不该 import 它们。
+    if hasattr(cond, "to_segments"):
+        segs = []
+        for item in cond.to_segments():
+            if not (isinstance(item, (list, tuple)) and len(item) >= 3):
+                raise ValueError(
+                    f"{name}: 结构化 COND 的段需为 (tensor, area, strength"
+                    f"[, start, end])，got {type(item).__name__}")
+            t, area, s0 = item[0], item[1], item[2]
+            t0 = float(item[3]) if len(item) > 3 else 0.0
+            t1 = float(item[4]) if len(item) > 4 else 1.0
+            if not torch.is_tensor(t):
+                raise ValueError(f"{name}: 结构化 COND 段张量缺失")
+            segs.append((t, area, float(s0), t0, t1))
+        return segs
+    # cond.pack 产物：dict 形态（含层区间等扩展字段）
+    if isinstance(cond, dict) and "__cond_pack__" in cond:
+        segs = []
+        for it in cond["__cond_pack__"]:
+            t = it["tensor"]
+            if not torch.is_tensor(t):
+                raise ValueError(f"{name}: cond.pack 段张量缺失")
+            segs.append((t, it.get("area"), float(it.get("strength", 1.0)),
+                         float(it.get("start", 0.0)),
+                         float(it.get("end", 1.0))))
+        return segs
     if isinstance(cond, SDXLCond):
         return [(cond.embeds, None, 1.0)]
     if isinstance(cond, dict):
@@ -654,7 +683,8 @@ def resolve_span(steps, denoise=1.0, start_at_step=0, end_at_step=0):
 def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
            sampler_name=DEFAULT_SAMPLER, scheduler=DEFAULT_SCHEDULER,
            denoise=1.0, start_at_step=0, end_at_step=0, add_noise=True,
-           control=None, preview_cb=None, interrupt_check=None):
+           control=None, preview_cb=None, interrupt_check=None,
+           cfg_strategy=None, cfg_rescale=None, cfg_pp_x0=0.0):
     """KSampler：手动采样循环，返回 {'latent': ..., 'seed': 实际种子}。
     sampler_name（更新公式）× scheduler（sigma 曲线：normal/karras/exponential/beta）
     自由组合（M2 解耦）；旧一体名 dpmpp_2m_karras 兼容（见 app.samplers）。
@@ -668,6 +698,15 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
     - add_noise=False 且 start_at_step=0/denoise=1：输入 latent 原样起步
       （ComfyUI disable noise 语义，使用者自负）
     - 默认值（0/0/True + denoise）下与历史行为逐字节一致
+
+    CFG 策略（对标 ComfyUI CFGGuider / sampler_cfg_function 可插拔）：
+    - cfg_strategy: standard（默认，与历史逐字节一致）/ rescale（SD3 论文，
+      抑制高 cfg 过曝）/ cfg_pp（CFG++，低步数更稳）/ none
+    - cfg_rescale : rescale 混合系数（默认 0.7）
+    - cfg_pp_x0   : cfg_pp 的 x0 插值系数（0=退化 standard）
+    三者都支持**环境变量兜底**（FLOWX_CFG_STRATEGY / FLOWX_CFG_RESCALE）——
+    因为核心算子的包装层在 /models/plugins.d/（不在仓库），改包装层要
+    等机器在线；用环境变量可以让策略切换立刻生效、无需改插件代码。
 
     注入四类（M4/M5 采样循环改造；均为可选，全缺省时走既有快速路径，逐字节不变）：
     - control（CONTROL 对象，controlnet.apply 产物）：步窗口内逐步跑 ControlNet
@@ -714,6 +753,15 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
     sched = make_scheduler(sampler_name, scheduler, pipe.scheduler.config)
     print(f"[sample] sampler={sampler_name} scheduler={scheduler} "
           f"steps={steps} cfg={cfg}", flush=True)
+    # CFG 策略：显式参数优先，否则读环境变量（改不了插件包装层时的兜底）
+    if cfg_strategy is None:
+        cfg_strategy = os.environ.get("FLOWX_CFG_STRATEGY", "standard")
+    if cfg_rescale is None:
+        cfg_rescale = float(os.environ.get("FLOWX_CFG_RESCALE", "0.7"))
+    if str(cfg_strategy).lower() not in ("standard", "", "default"):
+        print(f"[sample] cfg_strategy={cfg_strategy} rescale={cfg_rescale}",
+              flush=True)
+
     sched.set_timesteps(steps, device=device)
     timesteps = sched.timesteps
 
@@ -1058,7 +1106,13 @@ def sample(model, pos, neg, base, seed=-1, steps=20, cfg=7.0,
                     cond = blend_side(pos_segs, pos_masks, inp, t,
                                       ipa_added_pos, pos_adds,
                                       progress=_prog)
-                guided = uncond + cfg * (cond - uncond)
+                # CFG 策略可插拔（standard/rescale/cfg_pp/none）——
+                # 原来是硬编码 `uncond + cfg*(cond-uncond)`，等于把
+                # CFG++/rescale 这类画质改进挡在门外（ComfyUI 是可插拔的）
+                guided = _apply_cfg(cond, uncond, cfg,
+                                    strategy=cfg_strategy,
+                                    rescale=cfg_rescale,
+                                    cfg_pp_x0=cfg_pp_x0)
                 latents = sched.step(guided, t, latents).prev_sample
                 if noise_mask is not None:
                     orig_noisy = sched.add_noise(

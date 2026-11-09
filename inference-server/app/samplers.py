@@ -23,6 +23,39 @@ from diffusers import (
     UniPCMultistepScheduler,
 )
 
+def _optional_samplers():
+    """探测 diffusers 里可用的进阶求解器（缺则跳过，不写死版本假设）。
+
+    ComfyUI 的 KSAMPLER_NAMES 有 40+ 个求解器，我们原来只有 7 个。这里补
+    社区最常用的几个「少步数画质更好」的（对标 ComfyUI 同名项）：
+    - res_multistep : 多步指数积分，20 步内细节优于 euler
+    - deis          : DEIS 扩散指数积分器，速度/质量平衡好
+    - ipndm         : 改进的多步线性多步法
+    - dpmpp_3m_sde  : DPM++ 3M，比 2M 更稳（SDE 版带随机性）
+    - lcm           : Latent Consistency，极少步数（4~8 步）
+    全部按 `from diffusers import <cls>` 探测，不存在就静默跳过。
+    """
+    import diffusers as _d
+
+    wanted = {
+        "res_multistep": ("FlowMatchEulerDiscreteScheduler", {}),
+        "deis": ("DEISMultistepScheduler", {}),
+        "ipndm": ("IPNDMScheduler", {}),
+        "dpmpp_3m_sde": (
+            "DPMSolverMultistepScheduler",
+            {"algorithm_type": "dpmsolver++", "solver_type": "heun",
+             "use_karras_sigmas": True},
+        ),
+        "lcm": ("LCMScheduler", {}),
+    }
+    out = {}
+    for name, (cls_name, kwargs) in wanted.items():
+        cls = getattr(_d, cls_name, None)
+        if cls is not None:
+            out[name] = (cls, kwargs)
+    return out
+
+
 SAMPLERS = {
     "euler": (EulerDiscreteScheduler, {}),
     "euler_a": (EulerAncestralDiscreteScheduler, {}),
@@ -35,6 +68,8 @@ SAMPLERS = {
     ),
     "uni_pc": (UniPCMultistepScheduler, {}),
 }
+# 合并进阶求解器（diffusers 有不有取决于安装版本；缺失项不出现在列表里）
+SAMPLERS.update(_optional_samplers())
 
 SCHEDULES = {
     "normal": {},
