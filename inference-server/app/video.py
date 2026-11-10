@@ -31,6 +31,21 @@ def _to_pcm16(audio):
     if t.ndim == 1:  # 单声道一维
         t = t[None, :]
     if t.dtype != np.int16:
+        # **防削波（真机：H3 音频有爆破音）**
+        # 原实现直接 np.clip(-1,1) —— 生成模型的音频峰值常 >1（尤其能量爆发/打击音），
+        # 硬切会产生方波式失真，听起来就是「爆破音」。
+        # 分级处理：轻微超峰整体归一（不改变波形）；大幅超峰用 tanh 软限幅
+        # （保留动态、压掉尖峰）后再归一，避免硬切的同时不至于把音量压得太小。
+        peak = float(np.abs(t).max()) if t.size else 0.0
+        if peak > 1.5:
+            # 软限幅：tanh 把尖峰压圆，再整体缩放到 0.95
+            t = np.tanh(t / peak * 1.4)
+            t = t / max(float(np.abs(t).max()), 1e-6) * 0.95
+            print(f"[audio] 峰值 {peak:.2f} 大幅超限 → tanh 软限幅", flush=True)
+        elif peak > 1.0:
+            # 轻微超峰：整体归一，波形不变（只降音量）
+            t = t * (0.98 / peak)
+            print(f"[audio] 峰值 {peak:.2f} 超限 → 整体归一", flush=True)
         t = (np.clip(t, -1.0, 1.0) * 32767).astype(np.int16)
     return t, int(t.shape[0])
 
